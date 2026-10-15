@@ -76,6 +76,11 @@ requirement to produce up to two overlapping show files from one stream.
 
 ### 3.1 Config
 
+- **All times are shown and stored in UTC (decision, 2026-10-15).** File names, sidecars, `/healthz`, logs, the
+  show files, the web app, reports and CSV exports all use UTC, with a visible "UTC" label. The station's
+  timezone (`Europe/London`) is used for one thing only: converting Burst's published local schedule times into
+  UTC instants when the schedule is parsed (so a 20:00 show in BST is 19:00 UTC). Nothing is displayed in local
+  time, and the "UTC plus local time" columns in 3.2 are dropped in favour of UTC only.
 `config/stations.json`, validated against a JSON schema at start-up (fail loudly, naming the field):
 `id`, `name`, `listenUrl`, `scheduleUrl`, `timezone` (default `Europe/London`), `scheduleParser`
 (`burst` or `llm`), `marginBefore` and `marginAfter` (default 5 minutes each), `scheduleRefresh` (default
@@ -96,7 +101,7 @@ mounted files, never committed, because the repo is public.
   `"parsedBy": "llm"`. An LLM result may add or change shows but may not remove shows that a deterministic parse
   found.
 - **Output:** `/data/<station>/schedule.json`, written atomically: source URL, fetch time, content hash, parser,
-  the weekly grid, and dated windows for the next 14 days (UTC plus local time, so DST behaviour is visible).
+  the weekly grid, and dated windows for the next 14 days (in UTC, so DST behaviour is visible as a shift of the UTC time).
   Changes are appended as a diff to `schedule-changes.jsonl`.
 - A failed fetch or parse never discards the last good schedule; an empty parse counts as a failure; after 3
   consecutive failures a warning is logged every attempt.
@@ -255,6 +260,13 @@ same permission checks as every other audio request):
 - **Event navigation:** the events timeline (dead air, clipping, swearing, fillers and, later, songs) is drawn
   along the seek bar and listed beside it; selecting an event jumps to its time, and previous or next event
   buttons filter by type. Events come from `events.json` (3.6); nothing is computed in the browser.
+- **Segments (regions):** besides point events, the timeline carries labelled spans from one marker to the next:
+  song regions ("Artist - Title", with source and confidence), talking sections (with the transcript text, timed
+  lines highlighted as playback moves, click a line to seek), ads and jingles, each on its own lane under the
+  seek bar. The player shows what is playing now, plays or loops a single segment, and steps to the previous or
+  next segment of a kind. Segments come from `events.json` and the transcript (3.6, 3.7); until those exist the
+  recordings simply have none. The `PDMediaPlayer` component supports this (`Segments`, `PDMediaSegment`, and a
+  helper that derives segments from consecutive markers).
 - **Search:** full-text search over the transcripts for a word or phrase, with the hits listed per show and
   occurrence with a snippet and timestamp, each hit playing from a few seconds before the match. Scope follows
   the same access rules (presenters search only their shows). Search also covers the derived facts (3.7: names,
