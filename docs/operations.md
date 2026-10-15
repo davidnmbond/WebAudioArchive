@@ -39,3 +39,7 @@ guard (plan 5). Two instances are independent and are not reconciled.
 - The worker exits with code 3 at start-up if the data folder is not writable.
 - Segments are named by UTC start with a `-n` suffix for same-second restarts; order segments by the sidecar
   `startUtc`, not by file name (`103000-1.mp3` sorts before `103000.mp3`).
+
+- Upgrading the container interrupts recording for the length of a restart (seconds); the break is recorded as a gap
+  in the sidecar. Splitting the recorder from the rest and running A/B recorders to avoid this is specified in
+  spec section 3.13 and is not built yet.

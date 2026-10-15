@@ -302,6 +302,40 @@ known details for the show. Master segment JSON is the equivalent for unassigned
   operator remains responsible for the data protection position.
 - The README states that recordings are private archive copies and must not be republished.
 
+### 3.13 Recorder separation and A/B recorders (later enhancement, requested 2026-10-15)
+
+Plan 1 ships the recorder and the rest of the system in one process and one container. Upgrading that container
+interrupts recording for the length of a restart (seconds, recorded as a gap). For a regulatory archive that
+interruption should be avoidable, so the architecture must allow two changes. Neither is built in v1, but
+nothing built before them may make them harder.
+
+- **Separate recording engine.** The recorder (`StationSession`, `MasterRecorder`, `/healthz`) runs as its own
+  container and image, with as few dependencies as possible and its own version. It does one thing: hold the
+  stream connection and write segments plus sidecars. Analysis, schedule, cutting, transcription, the web app
+  and the weekly report run in other containers and only **read** the recorder's output (segments and sidecars
+  on a shared volume, read-only mount) and never call into it in-process. The files and the sidecar schema are
+  the contract between the two sides, so the recorder rarely needs to change and the rest can be upgraded freely
+  without touching an open stream.
+- **A/B recorders.** The system supports two recorders per station (A and B), each with its own stream
+  connection, its own instance id and its own folder (`master-a`, `master-b`), writing independently. To
+  upgrade, stop and upgrade A while B records, check A is healthy and recording, then do the same to B. Each
+  recorder still has a short gap while it is itself restarted, but the other one covers it.
+- **Reading two recorders.** Readers treat the union of A and B segments as the station's coverage. For any
+  time window (for example a show with its margins) the cutter prefers a single recorder that covers the whole
+  window with no gap; if neither does, it stitches from both at MP3 frame boundaries. The two connections start
+  at different moments (and a Revma connection starts about 5 seconds ahead of its arrival time, see 3.4), so
+  A and B are **not byte-identical and their segments overlap**. Stitching must choose a cut point, not
+  concatenate, and the sidecar for a cut records which recorder supplied each part. Coverage reported in
+  `/healthz` and the weekly report is computed over the union.
+- **What it does and does not protect.** A/B protects recording during upgrades and against one recorder
+  failing. It does not protect against the host or the shared volume failing; for that, the two-instance setup
+  in 3.10 remains the answer. Two recorders double the load on the station's stream server (two listeners) and
+  the disk use of the master unless one is retired or thinned; retention (3.12) must cover both folders.
+- **Constraints on earlier plans so this stays possible:** the recorder must not import analysis or web code;
+  sidecar schema changes are additive with a `schema` version (already present); readers address segments by
+  sidecar `startUtc` and `instance`, never by file name or by assuming one recorder; folder names carry the
+  recorder id when more than one exists.
+
 ## 4. Repository layout
 
 ```
@@ -367,6 +401,7 @@ All packages pinned to exact versions.
 | Manager lists diverge between instances | Export and import of the user list; documented as manual. |
 | Public repo | Code only. No recordings, secrets or user data in git. |
 | Compliance requirement unknown | Retention is a setting with no default deletion; manager decides the period. |
+| Upgrading the single recorder container interrupts recording | v1 accepts a recorded gap of a few seconds per upgrade. Section 3.13 specifies the recorder/rest split and A/B recorders to remove it later. |
 | Song search wanted but identification is deferred | Playback and transcript search ship in plan 4; song search is limited to ICY titles, spoken mentions and enricher output until 3.9 is built. Manager to decide whether to bring 3.9 forward. |
 
 ## 8. Decisions recorded
