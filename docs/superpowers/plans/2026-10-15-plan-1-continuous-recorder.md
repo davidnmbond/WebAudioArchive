@@ -1443,6 +1443,7 @@ public sealed class RecordingSink : IFrameSink
 ```csharp
 using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 
 namespace WebAudioArchive.Tests.Support;
@@ -1497,6 +1498,13 @@ public sealed class FakeStation : IAsyncDisposable
         app.MapGet("/stream", async ctx =>
         {
             station.Count("/stream");
+            if (!ctx.Request.Headers.ContainsKey("Icy-MetaData"))
+            {
+                // The resolver probes without Icy-MetaData: answer headers only, and do not use up a plan.
+                ctx.Response.ContentType = "audio/mpeg";
+                return;
+            }
+
             var index = Interlocked.Increment(ref station._streamConnections) - 1;
             var plan = station.Plan(index);
             if (plan.Status != 200)
