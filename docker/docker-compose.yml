@@ -1,13 +1,34 @@
+# Two independent recorders (A and B) for the same stations. Each holds its own stream connection and writes to
+# its own data folder, so one can be stopped, rebuilt or upgraded while the other keeps recording.
+# Upgrade one at a time: `docker compose -f docker/docker-compose.yml up -d --build recorder-a`, confirm it is
+# healthy and recording, then do the same for recorder-b. Never stop both together.
+x-recorder: &recorder
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  image: webaudioarchive:local
+  restart: always
+  stop_grace_period: 30s
+
 services:
-  recorder:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    restart: unless-stopped
+  recorder-a:
+    <<: *recorder
+    container_name: waa-recorder-a
     environment:
-      WAA_INSTANCE_ID: ${WAA_INSTANCE_ID:-home}
+      WAA_INSTANCE_ID: ${WAA_INSTANCE_ID:-home}-a
     volumes:
-      - ${WAA_DATA_DIR:-../data}:/data
+      - ${WAA_DATA_DIR:-../data}/a:/data
       - ../config:/config:ro
     ports:
       - "127.0.0.1:8080:8080"
+
+  recorder-b:
+    <<: *recorder
+    container_name: waa-recorder-b
+    environment:
+      WAA_INSTANCE_ID: ${WAA_INSTANCE_ID:-home}-b
+    volumes:
+      - ${WAA_DATA_DIR:-../data}/b:/data
+      - ../config:/config:ro
+    ports:
+      - "127.0.0.1:8081:8080"

@@ -12,7 +12,7 @@ beside the compose file. On Linux the data folder must be writable by uid 1654.
 - Audio: `<data>/<station>/master/<yyyy>/<MM-dd>/<HHmmss>.mp3`, sidecar `.json` beside it. UTC throughout.
 - A `.mp3.part` file is the segment being written. After a crash it is finished on the next start
   (`endedBy: crash`).
-- Health: `http://127.0.0.1:8080/healthz` (503 if an enabled station has written no frame for 2 minutes after the
+- Health: `http://127.0.0.1:8080/healthz` for recorder A and `http://127.0.0.1:8081/healthz` for recorder B (503 if an enabled station has written no frame for 2 minutes after the
   first 3 minutes of uptime).
 
 ## Reading the sidecar
@@ -43,3 +43,21 @@ guard (plan 5). Two instances are independent and are not reconciled.
 - Upgrading the container interrupts recording for the length of a restart (seconds); the break is recorded as a gap
   in the sidecar. Splitting the recorder from the rest and running A/B recorders to avoid this is specified in
   spec section 3.13 and is not built yet.
+
+## Dual recording (A and B)
+
+The compose file runs two recorders, `waa-recorder-a` and `waa-recorder-b`, each with its own stream connection,
+instance id (`<WAA_INSTANCE_ID>-a`, `-b`) and data folder (`data/a`, `data/b`). They do not talk to each other.
+Their segments overlap and are not byte-identical (see the Known limits). To get a period, use whichever
+recorder has no gap in it (read each segment's `.json`), or stitch from both.
+
+Upgrade one at a time and never stop both together:
+
+    docker compose -f docker/docker-compose.yml up -d --build recorder-a
+    curl http://127.0.0.1:8080/healthz      # wait for connected true and a recent lastFrameWrittenUtc
+    docker compose -f docker/docker-compose.yml up -d --build recorder-b
+
+Containers use `restart: always`, so Docker restarts them after a crash. They only run while Docker Desktop is
+running: Docker Desktop must start on login, the computer must not sleep, and a reboot (for example for Windows
+Update) stops recording until Docker Desktop is back. This setup does not protect against the host or its disk
+failing.
