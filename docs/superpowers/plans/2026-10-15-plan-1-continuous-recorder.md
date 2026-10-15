@@ -1530,6 +1530,8 @@ public sealed class FakeStation : IAsyncDisposable
 
             if (plan.DropAfterSend)
             {
+                // Give the client time to drain its socket: an RST discards unread data on Windows.
+                await Task.Delay(300, ctx.RequestAborted);
                 ctx.Abort();
                 return;
             }
