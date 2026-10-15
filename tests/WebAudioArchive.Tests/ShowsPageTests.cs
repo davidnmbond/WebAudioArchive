@@ -73,12 +73,7 @@ public sealed class ShowsAppFixture : IAsyncLifetime
         if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
     }
 
-    public async Task<string> Page(string url)
-    {
-        var h = WebUtility.HtmlDecode(await Client.GetStringAsync(url));
-        File.WriteAllText(@"C:\Users\david\AppData\Local\Temp\claude\c--Users-david-source-repos-davidnmbond-WebAudioArchive\724cebe8-e5c2-4d21-ba37-30fa75ec8f78\scratchpad\dump-" + url.Replace('/', '_').Replace('?', '_') + ".html", h); // DEBUG
-        return h;
-    }
+    public async Task<string> Page(string url) => WebUtility.HtmlDecode(await Client.GetStringAsync(url));
 }
 
 public sealed class ShowsPageTests(ShowsAppFixture app) : IClassFixture<ShowsAppFixture>
@@ -94,7 +89,7 @@ public sealed class ShowsPageTests(ShowsAppFixture app) : IClassFixture<ShowsApp
         Assert.Contains("90 weekly slots; local times read as Europe/London", html);
         Assert.Contains("https://burst.test/schedule", html);
         Assert.Contains("pdcal-view-week", html);
-        Assert.Contains("Showing 90 shows from 2026-10-12 00:00:00 UTC to 2026-10-19 00:00:00 UTC", html);
+        Assert.Contains("Showing 90 shows from <span class=\"utc\">2026-10-12 00:00:00 UTC</span> to <span class=\"utc\">2026-10-19 00:00:00 UTC</span>", html);
 
         // Thursday 20:00 BST is 19:00 UTC; recorded in full by A.
         Assert.Contains("Backseat Aux\n2026-10-15 19:00:00 UTC to 2026-10-15 20:00:00 UTC\nRecorded in full by A (A 100%, B 0%)", html);
@@ -132,7 +127,8 @@ public sealed class ShowsPageTests(ShowsAppFixture app) : IClassFixture<ShowsApp
         Assert.Contains("pd-media-player", html);
         Assert.Matches("<audio[^>]*src=\"/media/clip/[0-9a-f]{32}[.]mp3\"", html);
         Assert.Contains("Backseat Aux: recorder A, 5 minute margins", html);
-        Assert.Contains("The clip runs from 2026-10-15 18:55:00 UTC to 2026-10-15 20:05:00 UTC", html);
+        // The first whole frame is at, or a frame before, 18:55:00.
+        Assert.Matches("The clip runs from <span class=\"utc\">2026-10-15 18:5(4:59|5:00) UTC</span> to <span class=\"utc\">2026-10-15 20:05:00 UTC</span>", html);
         Assert.Contains("download=\"burst_20261015T185500Z_20261015T200500Z_A.mp3\"", html);
 
         // Marker and segment kinds as the player shows them (labels from ClipMarkers.KindLabels).
@@ -141,7 +137,9 @@ public sealed class ShowsPageTests(ShowsAppFixture app) : IClassFixture<ShowsApp
         Assert.Contains("Previous marker", html);
         Assert.Contains("Next marker", html);
         Assert.Contains("Lead-in", html);
-        Assert.Contains("Tail", html);
+        Assert.Contains("title=\"Hide Show markers\"", html);
+        Assert.Contains("title=\"Hide Margin segments\"", html);
+        Assert.Contains("title=\"Hide Show segments\"", html);
 
         // A deep link is worked out again from the id on every load, so it survives a reload.
         Assert.Contains("id=\"show-title\">Backseat Aux</h1>", await app.Page("/shows/burst-20261015T1900Z"));
@@ -158,7 +156,7 @@ public sealed class ShowsPageTests(ShowsAppFixture app) : IClassFixture<ShowsApp
         Assert.Contains("Only part of this show was recorded", html);
         Assert.Contains("value=\"2\"", html);
         Assert.Contains("pd-media-player", html);
-        Assert.Contains("The clip runs from 2026-10-15 19:58:00 UTC to 2026-10-15 20:05:00 UTC", html);
+        Assert.Matches("The clip runs from <span class=\"utc\">2026-10-15 19:5(7:59|8:00) UTC</span> to <span class=\"utc\">2026-10-15 20:05:00 UTC</span>", html);
     }
 
     [Fact]

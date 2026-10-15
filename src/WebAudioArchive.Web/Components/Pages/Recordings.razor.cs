@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Components;
 using PanoramicData.Blazor;
-using PanoramicData.Blazor.Models;
 using PanoramicData.Blazor.Enums;
+using PanoramicData.Blazor.Models;
 
 namespace WebAudioArchive.Web.Components.Pages;
 
