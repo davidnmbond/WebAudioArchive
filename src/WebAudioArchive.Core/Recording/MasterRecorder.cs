@@ -19,6 +19,10 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
     StreamInfo? _info;
     long _framesWritten;
 
+    /// <summary>Test seam: how the .part file stream is opened.</summary>
+    internal Func<string, Stream> OpenPartStream { get; init; } =
+        path => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024);
+
     public string MasterDir { get; } = Path.Combine(dataRoot, stationId, "master");
 
     public long FramesWritten => Interlocked.Read(ref _framesWritten);
@@ -52,6 +56,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         {
             var hour = new DateTimeOffset(utc.Year, utc.Month, utc.Day, utc.Hour, 0, 0, TimeSpan.Zero);
             if (_segment is not null && _segment.HourStart != hour) CloseSegment("hour-boundary");
+            // CloseSegment never throws, so a failed close cannot stop the next hour's audio being written.
             _segment ??= OpenSegment(utc, hour, header);
 
             if (_pendingGaps.Count > 0)
@@ -79,44 +84,68 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         if (!Directory.Exists(MasterDir)) return;
         foreach (var part in Directory.EnumerateFiles(MasterDir, "*.mp3.part", SearchOption.AllDirectories).ToList())
         {
-            var bytes = File.ReadAllBytes(part);
-            long good = 0;
-            var frames = 0;
-            double seconds = 0;
-            Mp3FrameHeader? first = null;
-            var splitter = new Mp3FrameSplitter();
-            FrameHandler handler = (ReadOnlySpan<byte> f, in Mp3FrameHeader h) =>
+            try
             {
-                good += f.Length;
-                frames++;
-                seconds += h.FrameSeconds;
-                first ??= h;
-            };
-            splitter.Push(bytes, handler);
-            splitter.Complete(handler);
-
-            if (frames == 0)
-            {
-                File.Delete(part);
-                log.LogWarning("Removed empty crashed segment {Part}", part);
-                continue;
+                RecoverOne(part);
             }
-
-            using (var fs = new FileStream(part, FileMode.Open, FileAccess.Write)) fs.SetLength(good);
-
-            var final = part[..^".part".Length];
-            File.Move(part, final, overwrite: false);
-
-            var start = StartFromPath(final);
-            var end = new DateTimeOffset(File.GetLastWriteTimeUtc(final), TimeSpan.Zero);
-            var h0 = first!.Value;
-            SegmentMetaStore.Write(Path.ChangeExtension(final, ".json"), new SegmentMeta(
-                1, instanceId, stationId, Path.GetFileName(final), start, end < start ? start : end, good, frames, seconds,
-                new SegmentFormat(h0.Codec, h0.BitrateKbps, h0.SampleRateHz, h0.Channels), null, [], [], "crash"));
-            log.LogWarning("Recovered crashed segment {File}: {Frames} frames", final, frames);
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // One bad file must not stop the others. The .part stays where it is, so the next start retries it.
+                log.LogError(ex, "Could not recover crashed segment {Part}; leaving it in place", part);
+            }
         }
     }
 
+    void RecoverOne(string part)
+    {
+        var bytes = File.ReadAllBytes(part);
+        long good = 0;
+        var frames = 0;
+        double seconds = 0;
+        Mp3FrameHeader? first = null;
+        var splitter = new Mp3FrameSplitter();
+        FrameHandler handler = (ReadOnlySpan<byte> f, in Mp3FrameHeader h) =>
+        {
+            good += f.Length;
+            frames++;
+            seconds += h.FrameSeconds;
+            first ??= h;
+        };
+        splitter.Push(bytes, handler);
+        splitter.Complete(handler);
+
+        if (frames == 0)
+        {
+            File.Delete(part);
+            log.LogWarning("Removed empty crashed segment {Part}", part);
+            return;
+        }
+
+        // Everything that can fail without changing the file is done before the truncate. The last-write time is read
+        // first because SetLength would replace it with the recovery time.
+        var final = part[..^".part".Length];
+        var start = StartFromPath(final);
+        var end = new DateTimeOffset(File.GetLastWriteTimeUtc(part), TimeSpan.Zero);
+        if (end < start) end = start;
+        var h0 = first!.Value;
+
+        using (var fs = new FileStream(part, FileMode.Open, FileAccess.Write)) fs.SetLength(good);
+        File.Move(part, final, overwrite: false);
+
+        try
+        {
+            SegmentMetaStore.Write(Path.ChangeExtension(final, ".json"), new SegmentMeta(
+                1, instanceId, stationId, Path.GetFileName(final), start, end, good, frames, seconds,
+                new SegmentFormat(h0.Codec, h0.BitrateKbps, h0.SampleRateHz, h0.Channels), null, [], [], "crash"));
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            log.LogError(ex, "Recovered {File} ({Frames} frames) but could not write its sidecar", final, frames);
+            return;
+        }
+
+        log.LogWarning("Recovered crashed segment {File}: {Frames} frames", final, frames);
+    }
     static DateTimeOffset StartFromPath(string mp3Path)
     {
         var name = Path.GetFileName(mp3Path); // 103045.mp3 or 103045-1.mp3
@@ -135,33 +164,62 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         var path = Path.Combine(dir, stem + ".mp3");
         for (var n = 1; File.Exists(path) || File.Exists(path + ".part"); n++) path = Path.Combine(dir, $"{stem}-{n}.mp3");
         log.LogInformation("Opening segment {Path}", path);
-        return new Segment(path, hour, utc, header, clock.UtcNow);
+        return new Segment(path, OpenPartStream(path + ".part"), hour, utc, header, clock.UtcNow);
     }
 
+    /// <summary>
+    /// Never throws. If the stream cannot be closed or the rename fails, the .part is left in place for
+    /// RecoverCrashedSegments on the next start. Once the rename has succeeded the sidecar is always attempted.
+    /// </summary>
     void CloseSegment(string endedBy)
     {
         var s = _segment!;
         _segment = null;
-        s.Dispose();
-        File.Move(s.PartPath, s.FinalPath, overwrite: false);
+
+        try
+        {
+            s.Dispose();
+            File.Move(s.PartPath, s.FinalPath, overwrite: false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            log.LogError(ex, "Could not finalise segment {Path}; leaving {Part} for crash recovery", s.FinalPath, s.PartPath);
+            return;
+        }
 
         var h = s.FirstHeader;
         var stream = _info is null ? null : new SegmentStream(
             _info.Url.ToString(), _info.HowFound,
             _info.IcyHeaders.GetValueOrDefault("icy-name"), _info.IcyHeaders.GetValueOrDefault("icy-genre"), _info.IcyMetaInt);
         var gaps = s.Gaps.Select(g => new SegmentGap(g.StartUtc, g.EndUtc, (g.EndUtc - g.StartUtc).TotalSeconds, g.Reason)).ToList();
-        SegmentMetaStore.Write(Path.ChangeExtension(s.FinalPath, ".json"), new SegmentMeta(
+        var meta = new SegmentMeta(
             1, instanceId, stationId, Path.GetFileName(s.FinalPath), s.StartUtc, s.LastFrameUtc, s.Bytes, s.Frames, s.Seconds,
-            new SegmentFormat(h.Codec, h.BitrateKbps, h.SampleRateHz, h.Channels), stream, s.Titles, gaps, endedBy));
+            new SegmentFormat(h.Codec, h.BitrateKbps, h.SampleRateHz, h.Channels), stream, s.Titles, gaps, endedBy);
+        var json = Path.ChangeExtension(s.FinalPath, ".json");
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                SegmentMetaStore.Write(json, meta);
+                break;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                if (attempt < 2) continue;
+                log.LogError(ex, "Segment {Path} was finalised but its sidecar could not be written", s.FinalPath);
+                return;
+            }
+        }
+
         log.LogInformation("Closed segment {Path}: {Frames} frames, {Bytes} bytes, ended by {EndedBy}", s.FinalPath, s.Frames, s.Bytes, endedBy);
     }
 
     sealed class Segment : IDisposable
     {
-        readonly FileStream _fs;
+        readonly Stream _fs;
         DateTimeOffset _lastFlush;
 
-        public Segment(string finalPath, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first, DateTimeOffset wallNow)
+        public Segment(string finalPath, Stream fs, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first, DateTimeOffset wallNow)
         {
             FinalPath = finalPath;
             PartPath = finalPath + ".part";
@@ -170,7 +228,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
             LastFrameUtc = startUtc;
             FirstHeader = first;
             _lastFlush = wallNow;
-            _fs = new FileStream(PartPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024);
+            _fs = fs;
         }
 
         public string FinalPath { get; }
@@ -187,14 +245,33 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
 
         public void Write(ReadOnlySpan<byte> frame, Mp3FrameHeader header, DateTimeOffset utc, DateTimeOffset wallNow)
         {
-            _fs.Write(frame);
+            try
+            {
+                _fs.Write(frame);
+            }
+            catch
+            {
+                // Cut the file back to the last whole frame so later frames append cleanly.
+                try
+                {
+                    _fs.SetLength(Bytes);
+                    _fs.Position = Bytes;
+                }
+                catch
+                {
+                    // Best effort: crash recovery also truncates to whole frames.
+                }
+
+                throw;
+            }
+
             Bytes += frame.Length;
             Frames++;
             Seconds += header.FrameSeconds;
             LastFrameUtc = utc;
             if (wallNow - _lastFlush >= FlushEvery)
             {
-                _fs.Flush(flushToDisk: false);
+                _fs.Flush();
                 _lastFlush = wallNow;
             }
         }

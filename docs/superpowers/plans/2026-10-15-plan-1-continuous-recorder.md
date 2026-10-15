@@ -2293,6 +2293,137 @@ public sealed class MasterRecorderTests : IDisposable
         Assert.Equal(2, r.FramesWritten);
         r.Dispose();
     }
+
+    [Fact]
+    public void Failed_write_is_truncated_to_whole_frames_and_later_frames_append_cleanly()
+    {
+        FaultyStream? faulty = null;
+        var r = new MasterRecorder(_root, "burst", "test-instance", _clock, NullLogger<MasterRecorder>.Instance)
+        {
+            OpenPartStream = p => faulty = new FaultyStream(new FileStream(p, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024)),
+        };
+        var t = _clock.UtcNow;
+        Write(r, 0, t);
+        faulty!.FailNextWrite = true;
+        Assert.Throws<IOException>(() => Write(r, 1, t.AddSeconds(1)));
+        Write(r, 2, t.AddSeconds(2));
+        r.Dispose();
+
+        var mp3 = Assert.Single(Files("*.mp3"));
+        Assert.Equal(Mp3TestData.Frame(0).Concat(Mp3TestData.Frame(2)).ToArray(), File.ReadAllBytes(mp3));
+        var meta = SegmentMetaStore.Read(Path.ChangeExtension(mp3, ".json"))!;
+        Assert.Equal(2, meta.Frames);
+        Assert.Equal(Mp3TestData.Frame(0).Length + Mp3TestData.Frame(2).Length, meta.Bytes);
+        Assert.Equal(2, r.FramesWritten);
+    }
+
+    [Fact]
+    public void Crash_recovery_keeps_the_part_files_last_write_time_as_the_end()
+    {
+        var dir = Path.Combine(MasterDir, "2026", "10-15");
+        Directory.CreateDirectory(dir);
+        var part = Path.Combine(dir, "103045.mp3.part");
+        File.WriteAllBytes(part, Mp3TestData.Frames(10).Concat(Mp3TestData.Frame(10).Take(100)).ToArray());
+        var lastWrite = new DateTime(2026, 10, 15, 10, 41, 7, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(part, lastWrite);
+
+        var r = NewRecorder();
+        r.RecoverCrashedSegments();
+        r.Dispose();
+
+        var meta = SegmentMetaStore.Read(Path.ChangeExtension(Assert.Single(Files("*.mp3")), ".json"))!;
+        Assert.Equal(new DateTimeOffset(lastWrite, TimeSpan.Zero), meta.EndUtc);
+    }
+
+    [Fact]
+    public void One_bad_part_file_does_not_stop_recovery_of_the_others()
+    {
+        var dir = Path.Combine(MasterDir, "2026", "10-15");
+        Directory.CreateDirectory(dir);
+        File.WriteAllBytes(Path.Combine(dir, "oddname.mp3.part"), Mp3TestData.Frames(3));
+        File.WriteAllBytes(Path.Combine(dir, "103045.mp3.part"), Mp3TestData.Frames(4));
+
+        var r = NewRecorder();
+        r.RecoverCrashedSegments();
+        r.Dispose();
+
+        var mp3 = Assert.Single(Files("*.mp3"));
+        Assert.EndsWith("103045.mp3", mp3);
+        Assert.Equal(Mp3TestData.Frames(4), File.ReadAllBytes(mp3));
+        Assert.Equal("oddname.mp3.part", Path.GetFileName(Assert.Single(Files("*.part"))));
+    }
+
+    [Fact]
+    public void Failed_close_leaves_a_part_file_that_the_next_start_recovers()
+    {
+        var r = new MasterRecorder(_root, "burst", "test-instance", _clock, NullLogger<MasterRecorder>.Instance)
+        {
+            OpenPartStream = p => new FaultyStream(new FileStream(p, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024)) { ThrowOnDispose = true },
+        };
+        Write(r, 0, _clock.UtcNow);
+        Write(r, 1, _clock.UtcNow.AddSeconds(1));
+        r.Dispose(); // must not throw
+
+        Assert.Empty(Files("*.mp3"));
+        Assert.Single(Files("*.part"));
+
+        var next = NewRecorder();
+        next.RecoverCrashedSegments();
+        next.Dispose();
+
+        var mp3 = Assert.Single(Files("*.mp3"));
+        Assert.Equal(Mp3TestData.Frames(2), File.ReadAllBytes(mp3));
+        Assert.Equal("crash", SegmentMetaStore.Read(Path.ChangeExtension(mp3, ".json"))!.EndedBy);
+    }
+
+    [Fact]
+    public void Failed_rename_does_not_throw_and_keeps_the_part_file()
+    {
+        var r = NewRecorder();
+        Write(r, 0, _clock.UtcNow);
+        var final = Path.Combine(MasterDir, "2026", "10-15", "103000.mp3");
+        File.WriteAllBytes(final, [1]); // makes the rename fail
+        r.Dispose(); // must not throw
+
+        Assert.Single(Files("*.part"));
+        Assert.Empty(Files("*.json"));
+    }
+
+    sealed class FaultyStream(Stream inner) : Stream
+    {
+        public bool FailNextWrite { get; set; }
+        public bool ThrowOnDispose { get; init; }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => true;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => inner.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => Write(buffer.AsSpan(offset, count));
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (FailNextWrite)
+            {
+                FailNextWrite = false;
+                inner.Write(buffer[..(buffer.Length / 2)]); // a torn write
+                throw new IOException("disk full");
+            }
+
+            inner.Write(buffer);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) inner.Dispose();
+            base.Dispose(disposing);
+            if (disposing && ThrowOnDispose) throw new IOException("close failed");
+        }
+    }
 }
 ```
 
@@ -2567,6 +2698,10 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
     StreamInfo? _info;
     long _framesWritten;
 
+    /// <summary>Test seam: how the .part file stream is opened.</summary>
+    internal Func<string, Stream> OpenPartStream { get; init; } =
+        path => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024);
+
     public string MasterDir { get; } = Path.Combine(dataRoot, stationId, "master");
 
     public long FramesWritten => Interlocked.Read(ref _framesWritten);
@@ -2600,6 +2735,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         {
             var hour = new DateTimeOffset(utc.Year, utc.Month, utc.Day, utc.Hour, 0, 0, TimeSpan.Zero);
             if (_segment is not null && _segment.HourStart != hour) CloseSegment("hour-boundary");
+            // CloseSegment never throws, so a failed close cannot stop the next hour's audio being written.
             _segment ??= OpenSegment(utc, hour, header);
 
             if (_pendingGaps.Count > 0)
@@ -2627,44 +2763,68 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         if (!Directory.Exists(MasterDir)) return;
         foreach (var part in Directory.EnumerateFiles(MasterDir, "*.mp3.part", SearchOption.AllDirectories).ToList())
         {
-            var bytes = File.ReadAllBytes(part);
-            long good = 0;
-            var frames = 0;
-            double seconds = 0;
-            Mp3FrameHeader? first = null;
-            var splitter = new Mp3FrameSplitter();
-            FrameHandler handler = (ReadOnlySpan<byte> f, in Mp3FrameHeader h) =>
+            try
             {
-                good += f.Length;
-                frames++;
-                seconds += h.FrameSeconds;
-                first ??= h;
-            };
-            splitter.Push(bytes, handler);
-            splitter.Complete(handler);
-
-            if (frames == 0)
-            {
-                File.Delete(part);
-                log.LogWarning("Removed empty crashed segment {Part}", part);
-                continue;
+                RecoverOne(part);
             }
-
-            using (var fs = new FileStream(part, FileMode.Open, FileAccess.Write)) fs.SetLength(good);
-
-            var final = part[..^".part".Length];
-            File.Move(part, final, overwrite: false);
-
-            var start = StartFromPath(final);
-            var end = new DateTimeOffset(File.GetLastWriteTimeUtc(final), TimeSpan.Zero);
-            var h0 = first!.Value;
-            SegmentMetaStore.Write(Path.ChangeExtension(final, ".json"), new SegmentMeta(
-                1, instanceId, stationId, Path.GetFileName(final), start, end < start ? start : end, good, frames, seconds,
-                new SegmentFormat(h0.Codec, h0.BitrateKbps, h0.SampleRateHz, h0.Channels), null, [], [], "crash"));
-            log.LogWarning("Recovered crashed segment {File}: {Frames} frames", final, frames);
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // One bad file must not stop the others. The .part stays where it is, so the next start retries it.
+                log.LogError(ex, "Could not recover crashed segment {Part}; leaving it in place", part);
+            }
         }
     }
 
+    void RecoverOne(string part)
+    {
+        var bytes = File.ReadAllBytes(part);
+        long good = 0;
+        var frames = 0;
+        double seconds = 0;
+        Mp3FrameHeader? first = null;
+        var splitter = new Mp3FrameSplitter();
+        FrameHandler handler = (ReadOnlySpan<byte> f, in Mp3FrameHeader h) =>
+        {
+            good += f.Length;
+            frames++;
+            seconds += h.FrameSeconds;
+            first ??= h;
+        };
+        splitter.Push(bytes, handler);
+        splitter.Complete(handler);
+
+        if (frames == 0)
+        {
+            File.Delete(part);
+            log.LogWarning("Removed empty crashed segment {Part}", part);
+            return;
+        }
+
+        // Everything that can fail without changing the file is done before the truncate. The last-write time is read
+        // first because SetLength would replace it with the recovery time.
+        var final = part[..^".part".Length];
+        var start = StartFromPath(final);
+        var end = new DateTimeOffset(File.GetLastWriteTimeUtc(part), TimeSpan.Zero);
+        if (end < start) end = start;
+        var h0 = first!.Value;
+
+        using (var fs = new FileStream(part, FileMode.Open, FileAccess.Write)) fs.SetLength(good);
+        File.Move(part, final, overwrite: false);
+
+        try
+        {
+            SegmentMetaStore.Write(Path.ChangeExtension(final, ".json"), new SegmentMeta(
+                1, instanceId, stationId, Path.GetFileName(final), start, end, good, frames, seconds,
+                new SegmentFormat(h0.Codec, h0.BitrateKbps, h0.SampleRateHz, h0.Channels), null, [], [], "crash"));
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            log.LogError(ex, "Recovered {File} ({Frames} frames) but could not write its sidecar", final, frames);
+            return;
+        }
+
+        log.LogWarning("Recovered crashed segment {File}: {Frames} frames", final, frames);
+    }
     static DateTimeOffset StartFromPath(string mp3Path)
     {
         var name = Path.GetFileName(mp3Path); // 103045.mp3 or 103045-1.mp3
@@ -2683,33 +2843,62 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         var path = Path.Combine(dir, stem + ".mp3");
         for (var n = 1; File.Exists(path) || File.Exists(path + ".part"); n++) path = Path.Combine(dir, $"{stem}-{n}.mp3");
         log.LogInformation("Opening segment {Path}", path);
-        return new Segment(path, hour, utc, header, clock.UtcNow);
+        return new Segment(path, OpenPartStream(path + ".part"), hour, utc, header, clock.UtcNow);
     }
 
+    /// <summary>
+    /// Never throws. If the stream cannot be closed or the rename fails, the .part is left in place for
+    /// RecoverCrashedSegments on the next start. Once the rename has succeeded the sidecar is always attempted.
+    /// </summary>
     void CloseSegment(string endedBy)
     {
         var s = _segment!;
         _segment = null;
-        s.Dispose();
-        File.Move(s.PartPath, s.FinalPath, overwrite: false);
+
+        try
+        {
+            s.Dispose();
+            File.Move(s.PartPath, s.FinalPath, overwrite: false);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            log.LogError(ex, "Could not finalise segment {Path}; leaving {Part} for crash recovery", s.FinalPath, s.PartPath);
+            return;
+        }
 
         var h = s.FirstHeader;
         var stream = _info is null ? null : new SegmentStream(
             _info.Url.ToString(), _info.HowFound,
             _info.IcyHeaders.GetValueOrDefault("icy-name"), _info.IcyHeaders.GetValueOrDefault("icy-genre"), _info.IcyMetaInt);
         var gaps = s.Gaps.Select(g => new SegmentGap(g.StartUtc, g.EndUtc, (g.EndUtc - g.StartUtc).TotalSeconds, g.Reason)).ToList();
-        SegmentMetaStore.Write(Path.ChangeExtension(s.FinalPath, ".json"), new SegmentMeta(
+        var meta = new SegmentMeta(
             1, instanceId, stationId, Path.GetFileName(s.FinalPath), s.StartUtc, s.LastFrameUtc, s.Bytes, s.Frames, s.Seconds,
-            new SegmentFormat(h.Codec, h.BitrateKbps, h.SampleRateHz, h.Channels), stream, s.Titles, gaps, endedBy));
+            new SegmentFormat(h.Codec, h.BitrateKbps, h.SampleRateHz, h.Channels), stream, s.Titles, gaps, endedBy);
+        var json = Path.ChangeExtension(s.FinalPath, ".json");
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                SegmentMetaStore.Write(json, meta);
+                break;
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                if (attempt < 2) continue;
+                log.LogError(ex, "Segment {Path} was finalised but its sidecar could not be written", s.FinalPath);
+                return;
+            }
+        }
+
         log.LogInformation("Closed segment {Path}: {Frames} frames, {Bytes} bytes, ended by {EndedBy}", s.FinalPath, s.Frames, s.Bytes, endedBy);
     }
 
     sealed class Segment : IDisposable
     {
-        readonly FileStream _fs;
+        readonly Stream _fs;
         DateTimeOffset _lastFlush;
 
-        public Segment(string finalPath, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first, DateTimeOffset wallNow)
+        public Segment(string finalPath, Stream fs, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first, DateTimeOffset wallNow)
         {
             FinalPath = finalPath;
             PartPath = finalPath + ".part";
@@ -2718,7 +2907,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
             LastFrameUtc = startUtc;
             FirstHeader = first;
             _lastFlush = wallNow;
-            _fs = new FileStream(PartPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024);
+            _fs = fs;
         }
 
         public string FinalPath { get; }
@@ -2735,14 +2924,33 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
 
         public void Write(ReadOnlySpan<byte> frame, Mp3FrameHeader header, DateTimeOffset utc, DateTimeOffset wallNow)
         {
-            _fs.Write(frame);
+            try
+            {
+                _fs.Write(frame);
+            }
+            catch
+            {
+                // Cut the file back to the last whole frame so later frames append cleanly.
+                try
+                {
+                    _fs.SetLength(Bytes);
+                    _fs.Position = Bytes;
+                }
+                catch
+                {
+                    // Best effort: crash recovery also truncates to whole frames.
+                }
+
+                throw;
+            }
+
             Bytes += frame.Length;
             Frames++;
             Seconds += header.FrameSeconds;
             LastFrameUtc = utc;
             if (wallNow - _lastFlush >= FlushEvery)
             {
-                _fs.Flush(flushToDisk: false);
+                _fs.Flush();
                 _lastFlush = wallNow;
             }
         }
@@ -2751,7 +2959,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
     }
 }
 ```
-Notes for the implementer: in `Clock_back_hour_does_not_collide` and the roll tests, the `wallNow` argument comes from `clock` (the injected `ManualClock`), which stays fixed, so no flush occurs mid-test; that is fine because `Dispose` flushes.
+Notes for the implementer: `WebAudioArchive.Core.csproj` needs `<ItemGroup><InternalsVisibleTo Include="WebAudioArchive.Tests" /></ItemGroup>` for the `OpenPartStream` test seam. In `Clock_back_hour_does_not_collide` and the roll tests, the `wallNow` argument comes from `clock` (the injected `ManualClock`), which stays fixed, so no flush occurs mid-test; that is fine because `Dispose` flushes.
 
 - [ ] **Step 8: Run to verify pass**
 
