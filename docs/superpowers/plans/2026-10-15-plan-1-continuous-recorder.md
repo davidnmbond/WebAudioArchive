@@ -1456,6 +1456,7 @@ public sealed class StreamPlan
     public Func<int, string?> TitleForBlock { get; init; } = _ => null;
     public Task? Gate { get; init; }            // wait for this before sending anything
     public bool DropAfterSend { get; init; }    // abort the connection after sending
+    public Task? DropGate { get; init; }        // with DropAfterSend: wait for this after sending, before aborting
     public bool HoldOpen { get; init; } = true; // keep the connection open and silent after sending
     public int Status { get; init; } = 200;
 }
@@ -1530,6 +1531,7 @@ public sealed class FakeStation : IAsyncDisposable
 
             if (plan.DropAfterSend)
             {
+                if (plan.DropGate is not null) await plan.DropGate.WaitAsync(ctx.RequestAborted);
                 // Give the client time to drain its socket: an RST discards unread data on Windows.
                 await Task.Delay(300, ctx.RequestAborted);
                 ctx.Abort();
@@ -1623,6 +1625,7 @@ public class StreamSourceTests
 `tests/WebAudioArchive.Tests/StationSessionTests.cs`:
 ```csharp
 using Microsoft.Extensions.Logging.Abstractions;
+using WebAudioArchive.Core.Mp3;
 using WebAudioArchive.Core.Recording;
 using WebAudioArchive.Core.Streams;
 using WebAudioArchive.Tests.Support;
@@ -1632,13 +1635,13 @@ namespace WebAudioArchive.Tests;
 public class StationSessionTests
 {
     static readonly DateTimeOffset T0 = new(2026, 10, 15, 10, 30, 0, TimeSpan.Zero);
-    static readonly SessionOptions Fast = new(TimeSpan.FromMilliseconds(400), TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(100));
+    static readonly SessionOptions Fast = new(TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(100));
 
-    static StationSession NewSession(FakeStation station, RecordingSink sink, ManualClock clock, StationHealth health)
+    static StationSession NewSession(FakeStation station, IFrameSink sink, ManualClock clock, StationHealth health, SessionOptions? options = null)
     {
         var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         var source = new HttpStreamSource(http, new StreamResolver(http, NullLogger<StreamResolver>.Instance), station.ListenUrl, NullLogger<HttpStreamSource>.Instance);
-        return new StationSession(source, sink, clock, health, NullLogger<StationSession>.Instance, Fast);
+        return new StationSession(source, sink, clock, health, NullLogger<StationSession>.Instance, options ?? Fast);
     }
 
     static async Task WaitFor(Func<bool> condition, string what)
@@ -1663,7 +1666,8 @@ public class StationSessionTests
         using var cts = new CancellationTokenSource();
 
         var run = session.RunAsync(cts.Token);
-        await WaitFor(() => sink.Frames.Count >= 100, "100 frames");
+        // The last frame is held until the stream ends or the session is cancelled, so wait for all but one.
+        await WaitFor(() => sink.Frames.Count >= 99, "99 frames");
         cts.Cancel();
         await run;
 
@@ -1691,7 +1695,8 @@ public class StationSessionTests
         await WaitFor(() => station.StreamConnections >= 2, "the reconnect");
         clock.Advance(TimeSpan.FromSeconds(7));
         gate.SetResult();
-        await WaitFor(() => sink.Frames.Count >= 100, "second 50 frames");
+        // The last frame is held until the stream ends or the session is cancelled, so wait for all but one.
+        await WaitFor(() => sink.Frames.Count >= 99, "second 50 frames");
         cts.Cancel();
         await run;
 
@@ -1713,7 +1718,7 @@ public class StationSessionTests
             : new StreamPlan { Audio = Mp3TestData.Frames(10, startSeq: 10), HoldOpen = true };
         var sink = new RecordingSink();
         var health = new StationHealth();
-        var session = NewSession(station, sink, new ManualClock(T0), health);
+        var session = NewSession(station, sink, new ManualClock(T0), health, new SessionOptions(TimeSpan.FromMilliseconds(400), TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(100)));
         using var cts = new CancellationTokenSource();
 
         var run = session.RunAsync(cts.Token);
@@ -1737,11 +1742,151 @@ public class StationSessionTests
         using var cts = new CancellationTokenSource();
 
         var run = session.RunAsync(cts.Token);
-        await WaitFor(() => sink.Frames.Count >= 10, "audio after two failures");
+        await WaitFor(() => sink.Frames.Count >= 9, "audio after two failures");
         cts.Cancel();
         await run;
 
         Assert.Empty(sink.Gaps);
+    }
+
+    [Fact]
+    public async Task Written_frames_set_the_frame_written_time()
+    {
+        await using var station = await FakeStation.StartAsync();
+        station.Plan = _ => new StreamPlan { Audio = Mp3TestData.Frames(20) };
+        var health = new StationHealth();
+        var session = NewSession(station, new RecordingSink(), new ManualClock(T0), health);
+        using var cts = new CancellationTokenSource();
+
+        Assert.Null(health.LastFrameWrittenUtc);
+        var run = session.RunAsync(cts.Token);
+        await WaitFor(() => health.LastFrameWrittenUtc is not null, "a written frame");
+        cts.Cancel();
+        await run;
+
+        Assert.Equal(T0, health.LastFrameWrittenUtc);
+        Assert.Null(health.LastError);
+    }
+
+    [Fact]
+    public async Task Gap_starts_at_the_last_data_not_at_the_disconnect()
+    {
+        await using var station = await FakeStation.StartAsync();
+        var dropGate = new TaskCompletionSource();
+        var gate = new TaskCompletionSource();
+        station.Plan = n => n == 0
+            ? new StreamPlan { Audio = Mp3TestData.Frames(50), DropAfterSend = true, DropGate = dropGate.Task }
+            : new StreamPlan { Audio = Mp3TestData.Frames(50, startSeq: 50), Gate = gate.Task };
+        var clock = new ManualClock(T0);
+        var sink = new RecordingSink();
+        var session = NewSession(station, sink, clock, new StationHealth());
+        using var cts = new CancellationTokenSource();
+
+        var run = session.RunAsync(cts.Token);
+        await WaitFor(() => sink.Frames.Count >= 49, "the audio before the drop"); // the last frame is held until the stream ends
+        clock.Advance(TimeSpan.FromSeconds(3));                                   // time passes with no data, before the drop
+        dropGate.SetResult();
+        await WaitFor(() => station.StreamConnections >= 2, "the reconnect");
+        clock.Advance(TimeSpan.FromSeconds(7));
+        gate.SetResult();
+        // The last frame is held until the stream ends or the session is cancelled, so wait for all but one.
+        await WaitFor(() => sink.Frames.Count >= 99, "second 50 frames");
+        cts.Cancel();
+        await run;
+
+        var gap = Assert.Single(sink.Gaps);
+        Assert.Equal(T0, gap.StartUtc);
+        Assert.Equal(T0.AddSeconds(10), gap.EndUtc);
+    }
+
+    sealed class FailingSink : IFrameSink
+    {
+        readonly Func<int, bool> _failOnAttempt;
+        readonly object _lock = new();
+        public List<DateTime> ConnectTimes { get; } = [];
+        public List<byte[]> FrameAttempts { get; } = [];
+        public List<byte[]> FramesWritten { get; } = [];
+        public List<GapRecord> Gaps { get; } = [];
+
+        public int ConnectCount { get { lock (_lock) return ConnectTimes.Count; } }
+        public int WrittenCount { get { lock (_lock) return FramesWritten.Count; } }
+
+        public FailingSink(Func<int, bool>? failOnAttempt = null) => _failOnAttempt = failOnAttempt ?? (_ => true);
+
+        public void OnConnected(StreamInfo info, DateTimeOffset utc)
+        {
+            lock (_lock) ConnectTimes.Add(DateTime.UtcNow);
+        }
+
+        public void OnFrame(ReadOnlySpan<byte> frame, in Mp3FrameHeader header, DateTimeOffset utc)
+        {
+            lock (_lock)
+            {
+                FrameAttempts.Add(frame.ToArray());
+                if (_failOnAttempt(FrameAttempts.Count)) throw new IOException("No space left on device");
+                FramesWritten.Add(frame.ToArray());
+            }
+        }
+
+        public void OnTitle(string title, DateTimeOffset utc) { }
+
+        public void OnGap(GapRecord gap)
+        {
+            lock (_lock) Gaps.Add(gap);
+        }
+    }
+
+    [Fact]
+    public async Task A_failing_sink_is_reported_not_healthy_and_backed_off_without_reset()
+    {
+        await using var station = await FakeStation.StartAsync();
+        station.Plan = _ => new StreamPlan { Audio = Mp3TestData.Frames(20) };
+        var sink = new FailingSink();
+        var health = new StationHealth();
+        var options = new SessionOptions(TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(800));
+        var session = NewSession(station, sink, new ManualClock(T0), health, options);
+        using var cts = new CancellationTokenSource();
+
+        var run = session.RunAsync(cts.Token);
+        await WaitFor(() => sink.ConnectCount >= 4, "four connection attempts");
+        cts.Cancel();
+        await run;
+
+        Assert.Null(health.LastFrameWrittenUtc);
+        Assert.NotNull(health.LastByteUtc);
+        Assert.Contains("No space left on device", health.LastError!.Message);
+        Assert.Contains("recorder write failed", health.LastError.Message);
+        Assert.False(health.Connected);
+
+        // Delays grow 100, 200, 400 ms. A backoff that reset after each data-bearing attempt would stay near 100 ms.
+        var t = sink.ConnectTimes;
+        Assert.True((t[3] - t[2]).TotalMilliseconds >= 300, $"third interval was {(t[3] - t[2]).TotalMilliseconds} ms");
+        Assert.True((t[3] - t[0]).TotalMilliseconds >= 650);
+
+        var gap = Assert.Single(sink.Gaps.Take(1));
+        Assert.StartsWith("recorder write failed", gap.Reason);
+    }
+
+    [Fact]
+    public async Task After_a_sink_failure_the_same_frame_is_never_offered_twice()
+    {
+        await using var station = await FakeStation.StartAsync();
+        station.Plan = n => n == 0
+            ? new StreamPlan { Audio = Mp3TestData.Frames(20) }
+            : new StreamPlan { Audio = Mp3TestData.Frames(20, startSeq: 20) };
+        var sink = new FailingSink(attempt => attempt == 6);
+        var session = NewSession(station, sink, new ManualClock(T0), new StationHealth(),
+            new SessionOptions(TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(100)));
+        using var cts = new CancellationTokenSource();
+
+        var run = session.RunAsync(cts.Token);
+        await WaitFor(() => sink.WrittenCount >= 20, "frames from the second connection");
+        cts.Cancel();
+        await run;
+
+        var attempts = sink.FrameAttempts.Select(f => Mp3TestData.SeqOf(f)).ToList();
+        Assert.Equal(attempts.Count, attempts.Distinct().Count());
+        Assert.Contains(5, attempts); // the frame that failed was offered once, and not again
     }
 }
 ```
@@ -1796,11 +1941,15 @@ public interface IFrameSink
 ```csharp
 namespace WebAudioArchive.Core.Recording;
 
+public sealed record SinkError(string Message, DateTimeOffset Utc);
+
 public sealed class StationHealth
 {
     long _lastByteTicks;
+    long _lastFrameWrittenTicks;
     int _reconnects;
     volatile bool _connected;
+    volatile SinkError? _lastError;
 
     public bool Connected
     {
@@ -1808,20 +1957,40 @@ public sealed class StationHealth
         set => _connected = value;
     }
 
-    public DateTimeOffset? LastByteUtc
-    {
-        get
-        {
-            var t = Interlocked.Read(ref _lastByteTicks);
-            return t == 0 ? null : new DateTimeOffset(t, TimeSpan.Zero);
-        }
-    }
+    public DateTimeOffset? LastByteUtc => ToTime(Interlocked.Read(ref _lastByteTicks));
+
+    /// <summary>When a frame was last accepted by the recorder without error. This, not bytes received, is what health is based on.</summary>
+    public DateTimeOffset? LastFrameWrittenUtc => ToTime(Interlocked.Read(ref _lastFrameWrittenTicks));
+
+    /// <summary>The most recent recorder failure, cleared when a frame is next written successfully.</summary>
+    public SinkError? LastError => _lastError;
 
     public int Reconnects => Volatile.Read(ref _reconnects);
 
     public void NoteByte(DateTimeOffset utc) => Interlocked.Exchange(ref _lastByteTicks, utc.UtcTicks);
 
+    public void NoteFrameWritten(DateTimeOffset utc)
+    {
+        Interlocked.Exchange(ref _lastFrameWrittenTicks, utc.UtcTicks);
+        _lastError = null;
+    }
+
+    public void NoteSinkError(string message, DateTimeOffset utc) => _lastError = new SinkError(message, utc);
+
     public void NoteReconnect() => Interlocked.Increment(ref _reconnects);
+
+    static DateTimeOffset? ToTime(long ticks) => ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+}
+
+/// <summary>The /healthz verdict, kept here so it can be tested without a host.</summary>
+public static class HealthRules
+{
+    public static readonly TimeSpan GracePeriod = TimeSpan.FromSeconds(180);
+    public static readonly TimeSpan MaxSilence = TimeSpan.FromSeconds(120);
+
+    /// <summary>True when an enabled station, after the grace period, has written no frame or none for too long.</summary>
+    public static bool IsUnhealthy(bool enabled, TimeSpan uptime, DateTimeOffset? lastFrameWrittenUtc, DateTimeOffset now) =>
+        enabled && uptime >= GracePeriod && (lastFrameWrittenUtc is null || now - lastFrameWrittenUtc.Value > MaxSilence);
 }
 ```
 
@@ -1971,16 +2140,27 @@ public sealed class StationSession(
         {
             _gotData = false;
             var reason = "disconnected";
+            var sinkFailed = false;
             try
             {
                 await using var opened = await source.OpenAsync(ct).ConfigureAwait(false);
-                sink.OnConnected(opened.Info, clock.UtcNow);
+                Sink(() => sink.OnConnected(opened.Info, clock.UtcNow));
                 health.Connected = true;
                 await PumpAsync(opened, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
+            }
+            catch (SinkFailureException ex)
+            {
+                // The recorder failed, not the stream: say so, and keep growing the backoff so a permanently
+                // failing sink (unwritable disk, disk full) is not retried every second.
+                sinkFailed = true;
+                var text = ex.InnerException?.Message ?? ex.Message;
+                reason = "recorder write failed: " + (text.Length > 180 ? text[..180] : text);
+                log.LogError(ex.InnerException ?? ex, "Recorder write failed: {Reason}", reason);
+                health.NoteSinkError(reason, clock.UtcNow);
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
@@ -1996,8 +2176,8 @@ public sealed class StationSession(
                 _gapReason = reason;
             }
 
-            var delay = _gotData ? _options.BackoffInitial : backoff;
-            backoff = _gotData ? _options.BackoffInitial : TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, _options.BackoffMax.Ticks));
+            var delay = _gotData && !sinkFailed ? _options.BackoffInitial : backoff;
+            backoff = _gotData && !sinkFailed ? _options.BackoffInitial : TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, _options.BackoffMax.Ticks));
             try
             {
                 await Task.Delay(delay, ct).ConfigureAwait(false);
@@ -2018,9 +2198,23 @@ public sealed class StationSession(
         var buffer = new byte[16 * 1024];
         var now = clock.UtcNow;
 
-        FrameHandler onFrame = (ReadOnlySpan<byte> frame, in Mp3FrameHeader header) => sink.OnFrame(frame, in header, now);
+        var sinkFailed = false;
+        FrameHandler onFrame = (ReadOnlySpan<byte> frame, in Mp3FrameHeader header) =>
+        {
+            try
+            {
+                sink.OnFrame(frame, in header, now);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                sinkFailed = true;
+                throw new SinkFailureException(ex);
+            }
+
+            health.NoteFrameWritten(now);
+        };
         AudioHandler onAudio = audio => splitter.Push(audio, onFrame);
-        Action<IcyTitle> onTitle = t => sink.OnTitle(t.Title, now);
+        Action<IcyTitle> onTitle = t => Sink(() => sink.OnTitle(t.Title, now));
 
         try
         {
@@ -2035,7 +2229,7 @@ public sealed class StationSession(
                     _gotData = true;
                     if (_gapStart is { } start)
                     {
-                        sink.OnGap(new GapRecord(start, now, _gapReason));
+                        Sink(() => sink.OnGap(new GapRecord(start, now, _gapReason)));
                         _gapStart = null;
                     }
                 }
@@ -2047,9 +2241,25 @@ public sealed class StationSession(
         }
         finally
         {
-            splitter.Complete(onFrame);
+            // After a recorder failure the splitter may still hold the frame that failed. Emitting it again would
+            // duplicate audio, so it is dropped with the connection.
+            if (!sinkFailed) splitter.Complete(onFrame);
         }
     }
+
+    static void Sink(Action call)
+    {
+        try
+        {
+            call();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            throw new SinkFailureException(ex);
+        }
+    }
+
+    sealed class SinkFailureException(Exception inner) : Exception(inner.Message, inner);
 
     async Task<int> ReadWithStallTimeoutAsync(Stream body, byte[] buffer, CancellationToken ct)
     {
@@ -2389,9 +2599,44 @@ public sealed class MasterRecorderTests : IDisposable
         Assert.Empty(Files("*.json"));
     }
 
+    [Fact]
+    public void Each_frame_reaches_the_part_file_as_it_is_written()
+    {
+        var r = NewRecorder();
+        Write(r, 0, _clock.UtcNow);
+
+        var part = Assert.Single(Files("*.part"));
+        using (var fs = new FileStream(part, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Equal(Mp3TestData.Frame(0).Length, fs.Length); // nothing waits in a process buffer
+
+        r.Dispose();
+    }
+
+    [Fact]
+    public void A_failure_after_a_lost_write_never_zero_pads_the_part_file()
+    {
+        FaultyStream? faulty = null;
+        var r = new MasterRecorder(_root, "burst", "test-instance", _clock, NullLogger<MasterRecorder>.Instance)
+        {
+            OpenPartStream = p => faulty = new FaultyStream(new FileStream(p, FileMode.CreateNew, FileAccess.Write, FileShare.Read, bufferSize: 0)) { SwallowNextWrite = true },
+        };
+        var t = _clock.UtcNow;
+        // frame 0 is counted but never reaches the file
+        Write(r, 0, t);
+        faulty!.FailNextWrite = true;     // frame 1 tears: half of it lands, then the write throws
+        Assert.Throws<IOException>(() => Write(r, 1, t.AddSeconds(1)));
+
+        var part = Assert.Single(Files("*.part"));
+        using (var fs = new FileStream(part, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Equal(Mp3TestData.Frame(1).Length / 2, fs.Length); // cut back only, never extended with zeros
+
+        r.Dispose();
+    }
+
     sealed class FaultyStream(Stream inner) : Stream
     {
         public bool FailNextWrite { get; set; }
+        public bool SwallowNextWrite { get; set; } // reports success but writes nothing, like a write that only fails later at flush
         public bool ThrowOnDispose { get; init; }
 
         public override bool CanRead => false;
@@ -2407,6 +2652,12 @@ public sealed class MasterRecorderTests : IDisposable
 
         public override void Write(ReadOnlySpan<byte> buffer)
         {
+            if (SwallowNextWrite)
+            {
+                SwallowNextWrite = false;
+                return;
+            }
+
             if (FailNextWrite)
             {
                 FailNextWrite = false;
@@ -2486,6 +2737,24 @@ public sealed class CoverageReaderTests : IDisposable
         Assert.Equal(0, c.CoveredSeconds);
         Assert.Equal(0, c.Fraction);
     }
+
+    [Fact]
+    public void Unreadable_or_incomplete_sidecars_are_skipped_and_never_throw()
+    {
+        Segment("100000", At(10, 0), At(10, 30));
+        var day = Path.Combine(_dir, "2026", "10-15");
+        File.WriteAllText(Path.Combine(day, "broken.json"), "{ not json");
+        File.WriteAllText(Path.Combine(day, "nullgaps.json"),
+            """{"startUtc":"2026-10-15T10:30:00+00:00","endUtc":"2026-10-15T10:40:00+00:00","gaps":null,"titles":null}""");
+        File.WriteAllText(Path.Combine(day, "empty.json"), "{}");
+        var lockedPath = Path.Combine(day, "locked.json");
+        File.WriteAllText(lockedPath, "{}");
+        using var locked = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        var c = CoverageReader.Read(_dir, now: At(11, 0), window: TimeSpan.FromHours(1));
+
+        Assert.Equal(1800 + 600, c.CoveredSeconds, 3); // the good segment plus the one with null gaps
+    }
 }
 ```
 
@@ -2532,7 +2801,7 @@ public sealed class RecorderEndToEndTests : IDisposable
         await Wait(() => station.StreamConnections >= 2);
         clock.Advance(TimeSpan.FromSeconds(7));
         gate.SetResult();
-        await Wait(() => recorder.FramesWritten >= 200);
+        await Wait(() => recorder.FramesWritten >= 199);
         cts.Cancel();
         await run;
         recorder.Dispose();
@@ -2646,7 +2915,7 @@ public static class CoverageReader
             {
                 SegmentMeta? meta;
                 try { meta = SegmentMetaStore.Read(path); }
-                catch (System.Text.Json.JsonException) { continue; }
+                catch (Exception ex) when (ex is System.Text.Json.JsonException or IOException or UnauthorizedAccessException) { continue; }
                 if (meta is null) continue;
 
                 var start = Max(meta.StartUtc, from);
@@ -2654,7 +2923,7 @@ public static class CoverageReader
                 if (end <= start) continue;
 
                 var seconds = (end - start).TotalSeconds;
-                foreach (var gap in meta.Gaps)
+                foreach (var gap in meta.Gaps ?? [])
                 {
                     var gs = Max(gap.StartUtc, start);
                     var ge = Min(gap.EndUtc, end);
@@ -2690,17 +2959,19 @@ namespace WebAudioArchive.Core.Recording;
 public sealed class MasterRecorder(string dataRoot, string stationId, string instanceId, IClock clock, ILogger<MasterRecorder> log)
     : IFrameSink, IDisposable
 {
-    static readonly TimeSpan FlushEvery = TimeSpan.FromSeconds(10);
-
     readonly object _lock = new();
     readonly List<GapRecord> _pendingGaps = [];
     Segment? _segment;
     StreamInfo? _info;
     long _framesWritten;
 
-    /// <summary>Test seam: how the .part file stream is opened.</summary>
+    /// <summary>
+    /// Test seam: how the .part file stream is opened. The default is unbuffered, so each frame is handed to the
+    /// OS in one write: Bytes is exact, a failure surfaces on the frame that caused it, and nothing sits in a
+    /// process buffer to be lost on a crash.
+    /// </summary>
     internal Func<string, Stream> OpenPartStream { get; init; } =
-        path => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024);
+        path => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, bufferSize: 0);
 
     public string MasterDir { get; } = Path.Combine(dataRoot, stationId, "master");
 
@@ -2744,7 +3015,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
                 _pendingGaps.Clear();
             }
 
-            _segment.Write(frame, header, utc, clock.UtcNow);
+            _segment.Write(frame, header, utc);
             Interlocked.Increment(ref _framesWritten);
         }
     }
@@ -2842,8 +3113,8 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         var stem = utc.ToString("HHmmss");
         var path = Path.Combine(dir, stem + ".mp3");
         for (var n = 1; File.Exists(path) || File.Exists(path + ".part"); n++) path = Path.Combine(dir, $"{stem}-{n}.mp3");
-        log.LogInformation("Opening segment {Path}", path);
-        return new Segment(path, OpenPartStream(path + ".part"), hour, utc, header, clock.UtcNow);
+        log.LogInformation("Opening segment {Path} at wall time {Wall:O}", path, clock.UtcNow);
+        return new Segment(path, OpenPartStream(path + ".part"), hour, utc, header);
     }
 
     /// <summary>
@@ -2896,9 +3167,8 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
     sealed class Segment : IDisposable
     {
         readonly Stream _fs;
-        DateTimeOffset _lastFlush;
 
-        public Segment(string finalPath, Stream fs, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first, DateTimeOffset wallNow)
+        public Segment(string finalPath, Stream fs, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first)
         {
             FinalPath = finalPath;
             PartPath = finalPath + ".part";
@@ -2906,7 +3176,6 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
             StartUtc = startUtc;
             LastFrameUtc = startUtc;
             FirstHeader = first;
-            _lastFlush = wallNow;
             _fs = fs;
         }
 
@@ -2922,7 +3191,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         public List<SegmentTitle> Titles { get; } = [];
         public List<GapRecord> Gaps { get; } = [];
 
-        public void Write(ReadOnlySpan<byte> frame, Mp3FrameHeader header, DateTimeOffset utc, DateTimeOffset wallNow)
+        public void Write(ReadOnlySpan<byte> frame, Mp3FrameHeader header, DateTimeOffset utc)
         {
             try
             {
@@ -2933,7 +3202,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
                 // Cut the file back to the last whole frame so later frames append cleanly.
                 try
                 {
-                    _fs.SetLength(Bytes);
+                    if (_fs.Length > Bytes) _fs.SetLength(Bytes); // only ever cut back, never zero-extend
                     _fs.Position = Bytes;
                 }
                 catch
@@ -2948,11 +3217,6 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
             Frames++;
             Seconds += header.FrameSeconds;
             LastFrameUtc = utc;
-            if (wallNow - _lastFlush >= FlushEvery)
-            {
-                _fs.Flush();
-                _lastFlush = wallNow;
-            }
         }
 
         public void Dispose() => _fs.Dispose();
@@ -2971,6 +3235,122 @@ Expected: all pass. If `Gap_and_titles_are_attached_to_the_segment_that_follows`
 ```powershell
 git add -A
 git commit -m "Add master recorder with UTC hourly segments, sidecars, crash recovery and coverage"
+```
+
+---
+
+#### Task 7 addenda (final review fixes)
+
+Also added to Task 7: health is based on the last frame written (`StationHealth.LastFrameWrittenUtc`, `HealthRules` in `StationHealth.cs`), a recorder failure is distinguished from a stream failure in `StationSession` (backoff keeps growing, nothing is offered twice), the `.part` stream is unbuffered, the Worker probes the data root at start-up (exit code 3), `.env` is git-ignored and the Dockerfile creates `/data` owned by `APP_UID`. New files:
+
+**`src\WebAudioArchive.Core\Recording\DataRootProbe.cs`**
+
+```csharp
+namespace WebAudioArchive.Core.Recording;
+
+/// <summary>Start-up check that the data root can be written, so a root-owned or read-only volume fails loudly.</summary>
+public static class DataRootProbe
+{
+    /// <summary>Returns one message per problem found; empty when every station folder is writable.</summary>
+    public static IReadOnlyList<string> Check(string dataRoot, IEnumerable<string> stationIds)
+    {
+        var errors = new List<string>();
+        foreach (var id in stationIds)
+        {
+            var dir = Path.Combine(dataRoot, id);
+            try
+            {
+                Directory.CreateDirectory(dir);
+                var probe = Path.Combine(dir, ".waa-write-probe-" + Guid.NewGuid().ToString("N"));
+                File.WriteAllBytes(probe, [0]);
+                File.Delete(probe);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                errors.Add($"data folder '{dir}' is not writable: {ex.Message}");
+            }
+        }
+
+        return errors;
+    }
+}
+```
+
+**`tests\WebAudioArchive.Tests\HealthRulesTests.cs`**
+
+```csharp
+using WebAudioArchive.Core.Recording;
+
+namespace WebAudioArchive.Tests;
+
+public class HealthRulesTests
+{
+    static readonly DateTimeOffset Now = new(2026, 10, 15, 12, 0, 0, TimeSpan.Zero);
+
+    [Theory]
+    [InlineData(true, 200, null, true)]      // after the grace period and never wrote a frame
+    [InlineData(true, 200, 121, true)]       // last frame too old
+    [InlineData(true, 200, 120, false)]      // exactly at the limit is still fine
+    [InlineData(true, 200, 5, false)]
+    [InlineData(true, 179, null, false)]     // inside the grace period
+    [InlineData(true, 180, null, true)]
+    [InlineData(false, 500, null, false)]    // disabled stations never make the host unhealthy
+    public void Verdict_is_based_on_the_last_frame_written(bool enabled, int uptimeSeconds, int? secondsSinceFrame, bool expected)
+    {
+        DateTimeOffset? last = secondsSinceFrame is null ? null : Now.AddSeconds(-secondsSinceFrame.Value);
+        Assert.Equal(expected, HealthRules.IsUnhealthy(enabled, TimeSpan.FromSeconds(uptimeSeconds), last, Now));
+    }
+
+    [Fact]
+    public void A_sink_error_is_cleared_by_the_next_written_frame()
+    {
+        var health = new StationHealth();
+        health.NoteSinkError("disk full", Now);
+        Assert.Equal("disk full", health.LastError!.Message);
+        health.NoteFrameWritten(Now.AddSeconds(1));
+        Assert.Null(health.LastError);
+        Assert.Equal(Now.AddSeconds(1), health.LastFrameWrittenUtc);
+    }
+}
+```
+
+**`tests\WebAudioArchive.Tests\DataRootProbeTests.cs`**
+
+```csharp
+using WebAudioArchive.Core.Recording;
+
+namespace WebAudioArchive.Tests;
+
+public sealed class DataRootProbeTests : IDisposable
+{
+    readonly string _root = Path.Combine(Path.GetTempPath(), "waa-probe-" + Guid.NewGuid().ToString("N"));
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+        if (File.Exists(_root)) File.Delete(_root);
+    }
+
+    [Fact]
+    public void A_writable_root_passes_and_leaves_no_probe_files()
+    {
+        var errors = DataRootProbe.Check(_root, ["a", "b"]);
+
+        Assert.Empty(errors);
+        Assert.Empty(Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public void An_unwritable_root_is_reported_per_station()
+    {
+        File.WriteAllText(_root, "a file where the data folder should be");
+
+        var errors = DataRootProbe.Check(_root, ["a", "b"]);
+
+        Assert.Equal(2, errors.Count);
+        Assert.All(errors, e => Assert.Contains("not writable", e));
+    }
+}
 ```
 
 ---
@@ -3040,7 +3420,9 @@ public sealed class WorkerHostTests : IDisposable
             var response = await client.GetAsync("/healthz");
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
-            if (body.GetProperty("stations")[0].GetProperty("lastByteUtc").ValueKind != JsonValueKind.Null) break;
+            var current = body.GetProperty("stations")[0];
+            if (current.GetProperty("lastFrameWrittenUtc").ValueKind != JsonValueKind.Null
+                && current.GetProperty("currentSegmentStartUtc").ValueKind != JsonValueKind.Null) break;
             await Task.Delay(50);
         }
 
@@ -3049,6 +3431,9 @@ public sealed class WorkerHostTests : IDisposable
         Assert.Equal("fake", s.GetProperty("id").GetString());
         Assert.True(s.GetProperty("connected").GetBoolean());
         Assert.NotEqual(JsonValueKind.Null, s.GetProperty("lastByteUtc").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, s.GetProperty("lastFrameWrittenUtc").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, s.GetProperty("secondsSinceLastFrameWritten").ValueKind);
+        Assert.Equal(JsonValueKind.Null, s.GetProperty("lastError").ValueKind);
         Assert.NotEqual(JsonValueKind.Null, s.GetProperty("currentSegmentStartUtc").ValueKind);
         Assert.NotEmpty(Directory.EnumerateFiles(Path.Combine(data, "fake", "master"), "*.part", SearchOption.AllDirectories));
     }
@@ -3141,7 +3526,7 @@ if (args.Contains("--healthcheck"))
         var response = await http.GetAsync($"http://127.0.0.1:{port}/healthz");
         return response.IsSuccessStatusCode ? 0 : 1;
     }
-    catch (HttpRequestException)
+    catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
     {
         return 1;
     }
@@ -3161,6 +3546,13 @@ catch (ConfigException ex)
 {
     foreach (var e in ex.Errors) Console.Error.WriteLine("config error: " + e);
     return 2;
+}
+
+var probeErrors = DataRootProbe.Check(dataRoot, stations.Where(s => s.Enabled).Select(s => s.Id));
+if (probeErrors.Count > 0)
+{
+    foreach (var e in probeErrors) Console.Error.WriteLine("data error: " + e);
+    return 3;
 }
 
 if (builder.Configuration["urls"] is null && Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is null)
@@ -3185,17 +3577,21 @@ app.MapGet("/healthz", (StationRegistry registry) =>
     var unhealthy = false;
     var stationReports = registry.Stations.Select(s =>
     {
-        var last = s.Health.LastByteUtc;
-        var since = last is null ? (double?)null : Math.Round((now - last.Value).TotalSeconds, 1);
-        var silent = s.Config.Enabled && uptime > TimeSpan.FromSeconds(180) && (since is null || since > 120);
+        var lastByte = s.Health.LastByteUtc;
+        var lastFrame = s.Health.LastFrameWrittenUtc;
+        var silent = HealthRules.IsUnhealthy(s.Config.Enabled, uptime, lastFrame, now);
         if (silent) unhealthy = true;
         return new
         {
             id = s.Config.Id,
             enabled = s.Config.Enabled,
             connected = s.Health.Connected,
-            lastByteUtc = last,
-            secondsSinceLastByte = since,
+            lastByteUtc = lastByte,
+            secondsSinceLastByte = lastByte is null ? (double?)null : Math.Round((now - lastByte.Value).TotalSeconds, 1),
+            lastFrameWrittenUtc = lastFrame,
+            secondsSinceLastFrameWritten = lastFrame is null ? (double?)null : Math.Round((now - lastFrame.Value).TotalSeconds, 1),
+            lastError = s.Health.LastError?.Message,
+            lastErrorUtc = s.Health.LastError?.Utc,
             reconnects = s.Health.Reconnects,
             currentSegmentStartUtc = s.Recorder.CurrentSegmentStartUtc,
             coverage24h = CoverageReader.Read(s.Recorder.MasterDir, now, TimeSpan.FromHours(24)).Fraction,
@@ -3238,6 +3634,7 @@ COPY --from=build /app .
 ENV WAA_CONFIG=/config/stations.json \
     WAA_DATA=/data \
     WAA_PORT=8080
+RUN mkdir -p /data && chown $APP_UID /data
 VOLUME /data
 EXPOSE 8080
 USER $APP_UID

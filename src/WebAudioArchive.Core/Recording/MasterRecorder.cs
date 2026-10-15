@@ -11,17 +11,19 @@ namespace WebAudioArchive.Core.Recording;
 public sealed class MasterRecorder(string dataRoot, string stationId, string instanceId, IClock clock, ILogger<MasterRecorder> log)
     : IFrameSink, IDisposable
 {
-    static readonly TimeSpan FlushEvery = TimeSpan.FromSeconds(10);
-
     readonly object _lock = new();
     readonly List<GapRecord> _pendingGaps = [];
     Segment? _segment;
     StreamInfo? _info;
     long _framesWritten;
 
-    /// <summary>Test seam: how the .part file stream is opened.</summary>
+    /// <summary>
+    /// Test seam: how the .part file stream is opened. The default is unbuffered, so each frame is handed to the
+    /// OS in one write: Bytes is exact, a failure surfaces on the frame that caused it, and nothing sits in a
+    /// process buffer to be lost on a crash.
+    /// </summary>
     internal Func<string, Stream> OpenPartStream { get; init; } =
-        path => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 64 * 1024);
+        path => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, bufferSize: 0);
 
     public string MasterDir { get; } = Path.Combine(dataRoot, stationId, "master");
 
@@ -65,7 +67,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
                 _pendingGaps.Clear();
             }
 
-            _segment.Write(frame, header, utc, clock.UtcNow);
+            _segment.Write(frame, header, utc);
             Interlocked.Increment(ref _framesWritten);
         }
     }
@@ -163,8 +165,8 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         var stem = utc.ToString("HHmmss");
         var path = Path.Combine(dir, stem + ".mp3");
         for (var n = 1; File.Exists(path) || File.Exists(path + ".part"); n++) path = Path.Combine(dir, $"{stem}-{n}.mp3");
-        log.LogInformation("Opening segment {Path}", path);
-        return new Segment(path, OpenPartStream(path + ".part"), hour, utc, header, clock.UtcNow);
+        log.LogInformation("Opening segment {Path} at wall time {Wall:O}", path, clock.UtcNow);
+        return new Segment(path, OpenPartStream(path + ".part"), hour, utc, header);
     }
 
     /// <summary>
@@ -217,9 +219,8 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
     sealed class Segment : IDisposable
     {
         readonly Stream _fs;
-        DateTimeOffset _lastFlush;
 
-        public Segment(string finalPath, Stream fs, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first, DateTimeOffset wallNow)
+        public Segment(string finalPath, Stream fs, DateTimeOffset hourStart, DateTimeOffset startUtc, Mp3FrameHeader first)
         {
             FinalPath = finalPath;
             PartPath = finalPath + ".part";
@@ -227,7 +228,6 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
             StartUtc = startUtc;
             LastFrameUtc = startUtc;
             FirstHeader = first;
-            _lastFlush = wallNow;
             _fs = fs;
         }
 
@@ -243,7 +243,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
         public List<SegmentTitle> Titles { get; } = [];
         public List<GapRecord> Gaps { get; } = [];
 
-        public void Write(ReadOnlySpan<byte> frame, Mp3FrameHeader header, DateTimeOffset utc, DateTimeOffset wallNow)
+        public void Write(ReadOnlySpan<byte> frame, Mp3FrameHeader header, DateTimeOffset utc)
         {
             try
             {
@@ -254,7 +254,7 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
                 // Cut the file back to the last whole frame so later frames append cleanly.
                 try
                 {
-                    _fs.SetLength(Bytes);
+                    if (_fs.Length > Bytes) _fs.SetLength(Bytes); // only ever cut back, never zero-extend
                     _fs.Position = Bytes;
                 }
                 catch
@@ -269,11 +269,6 @@ public sealed class MasterRecorder(string dataRoot, string stationId, string ins
             Frames++;
             Seconds += header.FrameSeconds;
             LastFrameUtc = utc;
-            if (wallNow - _lastFlush >= FlushEvery)
-            {
-                _fs.Flush();
-                _lastFlush = wallNow;
-            }
         }
 
         public void Dispose() => _fs.Dispose();

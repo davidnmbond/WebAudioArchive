@@ -13,6 +13,7 @@ COPY --from=build /app .
 ENV WAA_CONFIG=/config/stations.json \
     WAA_DATA=/data \
     WAA_PORT=8080
+RUN mkdir -p /data && chown $APP_UID /data
 VOLUME /data
 EXPOSE 8080
 USER $APP_UID

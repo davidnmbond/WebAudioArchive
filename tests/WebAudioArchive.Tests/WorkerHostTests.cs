@@ -44,7 +44,9 @@ public sealed class WorkerHostTests : IDisposable
             var response = await client.GetAsync("/healthz");
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
-            if (body.GetProperty("stations")[0].GetProperty("lastByteUtc").ValueKind != JsonValueKind.Null) break;
+            var current = body.GetProperty("stations")[0];
+            if (current.GetProperty("lastFrameWrittenUtc").ValueKind != JsonValueKind.Null
+                && current.GetProperty("currentSegmentStartUtc").ValueKind != JsonValueKind.Null) break;
             await Task.Delay(50);
         }
 
@@ -53,6 +55,9 @@ public sealed class WorkerHostTests : IDisposable
         Assert.Equal("fake", s.GetProperty("id").GetString());
         Assert.True(s.GetProperty("connected").GetBoolean());
         Assert.NotEqual(JsonValueKind.Null, s.GetProperty("lastByteUtc").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, s.GetProperty("lastFrameWrittenUtc").ValueKind);
+        Assert.NotEqual(JsonValueKind.Null, s.GetProperty("secondsSinceLastFrameWritten").ValueKind);
+        Assert.Equal(JsonValueKind.Null, s.GetProperty("lastError").ValueKind);
         Assert.NotEqual(JsonValueKind.Null, s.GetProperty("currentSegmentStartUtc").ValueKind);
         Assert.NotEmpty(Directory.EnumerateFiles(Path.Combine(data, "fake", "master"), "*.part", SearchOption.AllDirectories));
     }

@@ -13,6 +13,7 @@ public sealed class StreamPlan
     public Func<int, string?> TitleForBlock { get; init; } = _ => null;
     public Task? Gate { get; init; }            // wait for this before sending anything
     public bool DropAfterSend { get; init; }    // abort the connection after sending
+    public Task? DropGate { get; init; }        // with DropAfterSend: wait for this after sending, before aborting
     public bool HoldOpen { get; init; } = true; // keep the connection open and silent after sending
     public int Status { get; init; } = 200;
 }
@@ -87,6 +88,7 @@ public sealed class FakeStation : IAsyncDisposable
 
             if (plan.DropAfterSend)
             {
+                if (plan.DropGate is not null) await plan.DropGate.WaitAsync(ctx.RequestAborted);
                 // Give the client time to drain its socket: an RST discards unread data on Windows.
                 await Task.Delay(300, ctx.RequestAborted);
                 ctx.Abort();

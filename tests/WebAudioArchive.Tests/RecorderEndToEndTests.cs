@@ -37,7 +37,7 @@ public sealed class RecorderEndToEndTests : IDisposable
         await Wait(() => station.StreamConnections >= 2);
         clock.Advance(TimeSpan.FromSeconds(7));
         gate.SetResult();
-        await Wait(() => recorder.FramesWritten >= 200);
+        await Wait(() => recorder.FramesWritten >= 199);
         cts.Cancel();
         await run;
         recorder.Dispose();

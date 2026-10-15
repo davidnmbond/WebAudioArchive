@@ -15,7 +15,7 @@ public static class CoverageReader
             {
                 SegmentMeta? meta;
                 try { meta = SegmentMetaStore.Read(path); }
-                catch (System.Text.Json.JsonException) { continue; }
+                catch (Exception ex) when (ex is System.Text.Json.JsonException or IOException or UnauthorizedAccessException) { continue; }
                 if (meta is null) continue;
 
                 var start = Max(meta.StartUtc, from);
@@ -23,7 +23,7 @@ public static class CoverageReader
                 if (end <= start) continue;
 
                 var seconds = (end - start).TotalSeconds;
-                foreach (var gap in meta.Gaps)
+                foreach (var gap in meta.Gaps ?? [])
                 {
                     var gs = Max(gap.StartUtc, start);
                     var ge = Min(gap.EndUtc, end);

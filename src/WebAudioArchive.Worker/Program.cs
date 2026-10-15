@@ -13,7 +13,7 @@ if (args.Contains("--healthcheck"))
         var response = await http.GetAsync($"http://127.0.0.1:{port}/healthz");
         return response.IsSuccessStatusCode ? 0 : 1;
     }
-    catch (HttpRequestException)
+    catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
     {
         return 1;
     }
@@ -33,6 +33,13 @@ catch (ConfigException ex)
 {
     foreach (var e in ex.Errors) Console.Error.WriteLine("config error: " + e);
     return 2;
+}
+
+var probeErrors = DataRootProbe.Check(dataRoot, stations.Where(s => s.Enabled).Select(s => s.Id));
+if (probeErrors.Count > 0)
+{
+    foreach (var e in probeErrors) Console.Error.WriteLine("data error: " + e);
+    return 3;
 }
 
 if (builder.Configuration["urls"] is null && Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is null)
@@ -57,17 +64,21 @@ app.MapGet("/healthz", (StationRegistry registry) =>
     var unhealthy = false;
     var stationReports = registry.Stations.Select(s =>
     {
-        var last = s.Health.LastByteUtc;
-        var since = last is null ? (double?)null : Math.Round((now - last.Value).TotalSeconds, 1);
-        var silent = s.Config.Enabled && uptime > TimeSpan.FromSeconds(180) && (since is null || since > 120);
+        var lastByte = s.Health.LastByteUtc;
+        var lastFrame = s.Health.LastFrameWrittenUtc;
+        var silent = HealthRules.IsUnhealthy(s.Config.Enabled, uptime, lastFrame, now);
         if (silent) unhealthy = true;
         return new
         {
             id = s.Config.Id,
             enabled = s.Config.Enabled,
             connected = s.Health.Connected,
-            lastByteUtc = last,
-            secondsSinceLastByte = since,
+            lastByteUtc = lastByte,
+            secondsSinceLastByte = lastByte is null ? (double?)null : Math.Round((now - lastByte.Value).TotalSeconds, 1),
+            lastFrameWrittenUtc = lastFrame,
+            secondsSinceLastFrameWritten = lastFrame is null ? (double?)null : Math.Round((now - lastFrame.Value).TotalSeconds, 1),
+            lastError = s.Health.LastError?.Message,
+            lastErrorUtc = s.Health.LastError?.Utc,
             reconnects = s.Health.Reconnects,
             currentSegmentStartUtc = s.Recorder.CurrentSegmentStartUtc,
             coverage24h = CoverageReader.Read(s.Recorder.MasterDir, now, TimeSpan.FromHours(24)).Fraction,

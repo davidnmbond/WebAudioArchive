@@ -52,4 +52,22 @@ public sealed class CoverageReaderTests : IDisposable
         Assert.Equal(0, c.CoveredSeconds);
         Assert.Equal(0, c.Fraction);
     }
+
+    [Fact]
+    public void Unreadable_or_incomplete_sidecars_are_skipped_and_never_throw()
+    {
+        Segment("100000", At(10, 0), At(10, 30));
+        var day = Path.Combine(_dir, "2026", "10-15");
+        File.WriteAllText(Path.Combine(day, "broken.json"), "{ not json");
+        File.WriteAllText(Path.Combine(day, "nullgaps.json"),
+            """{"startUtc":"2026-10-15T10:30:00+00:00","endUtc":"2026-10-15T10:40:00+00:00","gaps":null,"titles":null}""");
+        File.WriteAllText(Path.Combine(day, "empty.json"), "{}");
+        var lockedPath = Path.Combine(day, "locked.json");
+        File.WriteAllText(lockedPath, "{}");
+        using var locked = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        var c = CoverageReader.Read(_dir, now: At(11, 0), window: TimeSpan.FromHours(1));
+
+        Assert.Equal(1800 + 600, c.CoveredSeconds, 3); // the good segment plus the one with null gaps
+    }
 }

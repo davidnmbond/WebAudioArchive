@@ -32,16 +32,27 @@ public sealed class StationSession(
         {
             _gotData = false;
             var reason = "disconnected";
+            var sinkFailed = false;
             try
             {
                 await using var opened = await source.OpenAsync(ct).ConfigureAwait(false);
-                sink.OnConnected(opened.Info, clock.UtcNow);
+                Sink(() => sink.OnConnected(opened.Info, clock.UtcNow));
                 health.Connected = true;
                 await PumpAsync(opened, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
+            }
+            catch (SinkFailureException ex)
+            {
+                // The recorder failed, not the stream: say so, and keep growing the backoff so a permanently
+                // failing sink (unwritable disk, disk full) is not retried every second.
+                sinkFailed = true;
+                var text = ex.InnerException?.Message ?? ex.Message;
+                reason = "recorder write failed: " + (text.Length > 180 ? text[..180] : text);
+                log.LogError(ex.InnerException ?? ex, "Recorder write failed: {Reason}", reason);
+                health.NoteSinkError(reason, clock.UtcNow);
             }
             catch (Exception ex) when (ex is not OutOfMemoryException)
             {
@@ -57,8 +68,8 @@ public sealed class StationSession(
                 _gapReason = reason;
             }
 
-            var delay = _gotData ? _options.BackoffInitial : backoff;
-            backoff = _gotData ? _options.BackoffInitial : TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, _options.BackoffMax.Ticks));
+            var delay = _gotData && !sinkFailed ? _options.BackoffInitial : backoff;
+            backoff = _gotData && !sinkFailed ? _options.BackoffInitial : TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, _options.BackoffMax.Ticks));
             try
             {
                 await Task.Delay(delay, ct).ConfigureAwait(false);
@@ -79,9 +90,23 @@ public sealed class StationSession(
         var buffer = new byte[16 * 1024];
         var now = clock.UtcNow;
 
-        FrameHandler onFrame = (ReadOnlySpan<byte> frame, in Mp3FrameHeader header) => sink.OnFrame(frame, in header, now);
+        var sinkFailed = false;
+        FrameHandler onFrame = (ReadOnlySpan<byte> frame, in Mp3FrameHeader header) =>
+        {
+            try
+            {
+                sink.OnFrame(frame, in header, now);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                sinkFailed = true;
+                throw new SinkFailureException(ex);
+            }
+
+            health.NoteFrameWritten(now);
+        };
         AudioHandler onAudio = audio => splitter.Push(audio, onFrame);
-        Action<IcyTitle> onTitle = t => sink.OnTitle(t.Title, now);
+        Action<IcyTitle> onTitle = t => Sink(() => sink.OnTitle(t.Title, now));
 
         try
         {
@@ -96,7 +121,7 @@ public sealed class StationSession(
                     _gotData = true;
                     if (_gapStart is { } start)
                     {
-                        sink.OnGap(new GapRecord(start, now, _gapReason));
+                        Sink(() => sink.OnGap(new GapRecord(start, now, _gapReason)));
                         _gapStart = null;
                     }
                 }
@@ -108,9 +133,25 @@ public sealed class StationSession(
         }
         finally
         {
-            splitter.Complete(onFrame);
+            // After a recorder failure the splitter may still hold the frame that failed. Emitting it again would
+            // duplicate audio, so it is dropped with the connection.
+            if (!sinkFailed) splitter.Complete(onFrame);
         }
     }
+
+    static void Sink(Action call)
+    {
+        try
+        {
+            call();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            throw new SinkFailureException(ex);
+        }
+    }
+
+    sealed class SinkFailureException(Exception inner) : Exception(inner.Message, inner);
 
     async Task<int> ReadWithStallTimeoutAsync(Stream body, byte[] buffer, CancellationToken ct)
     {

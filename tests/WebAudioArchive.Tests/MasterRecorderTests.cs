@@ -288,9 +288,44 @@ public sealed class MasterRecorderTests : IDisposable
         Assert.Empty(Files("*.json"));
     }
 
+    [Fact]
+    public void Each_frame_reaches_the_part_file_as_it_is_written()
+    {
+        var r = NewRecorder();
+        Write(r, 0, _clock.UtcNow);
+
+        var part = Assert.Single(Files("*.part"));
+        using (var fs = new FileStream(part, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Equal(Mp3TestData.Frame(0).Length, fs.Length); // nothing waits in a process buffer
+
+        r.Dispose();
+    }
+
+    [Fact]
+    public void A_failure_after_a_lost_write_never_zero_pads_the_part_file()
+    {
+        FaultyStream? faulty = null;
+        var r = new MasterRecorder(_root, "burst", "test-instance", _clock, NullLogger<MasterRecorder>.Instance)
+        {
+            OpenPartStream = p => faulty = new FaultyStream(new FileStream(p, FileMode.CreateNew, FileAccess.Write, FileShare.Read, bufferSize: 0)) { SwallowNextWrite = true },
+        };
+        var t = _clock.UtcNow;
+        // frame 0 is counted but never reaches the file
+        Write(r, 0, t);
+        faulty!.FailNextWrite = true;     // frame 1 tears: half of it lands, then the write throws
+        Assert.Throws<IOException>(() => Write(r, 1, t.AddSeconds(1)));
+
+        var part = Assert.Single(Files("*.part"));
+        using (var fs = new FileStream(part, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Equal(Mp3TestData.Frame(1).Length / 2, fs.Length); // cut back only, never extended with zeros
+
+        r.Dispose();
+    }
+
     sealed class FaultyStream(Stream inner) : Stream
     {
         public bool FailNextWrite { get; set; }
+        public bool SwallowNextWrite { get; set; } // reports success but writes nothing, like a write that only fails later at flush
         public bool ThrowOnDispose { get; init; }
 
         public override bool CanRead => false;
@@ -306,6 +341,12 @@ public sealed class MasterRecorderTests : IDisposable
 
         public override void Write(ReadOnlySpan<byte> buffer)
         {
+            if (SwallowNextWrite)
+            {
+                SwallowNextWrite = false;
+                return;
+            }
+
             if (FailNextWrite)
             {
                 FailNextWrite = false;
