@@ -18,6 +18,37 @@
     </PDToolbarPlaceholder>
 </PDToolbar>
 
+<section class="mb-4" aria-label="Recordings calendar" id="recordings-calendar">
+    <h2 class="h5">Calendar</h2>
+    <p class="small text-body-secondary mb-2">
+        Each recorder's hourly segments and its recording gaps, by UTC day and hour. Select one to play that range in the Player.
+        <span class="rec-legend rec-a ms-2">A</span> <span class="rec-legend rec-b">B</span> <span class="rec-legend rec-gap">Gap</span>
+    </p>
+    <PDCalendar TItem="RecordingCalendarItem"
+                Items="CalendarItems"
+                StartSelector="i => i.StartUtc"
+                EndSelector="i => i.EndUtc"
+                TitleSelector="i => i.Title"
+                KeySelector="i => i.Key"
+                CssClassSelector="i => i.CssClass"
+                TooltipSelector="i => i.Tooltip"
+                View="CalendarView.Week"
+                AvailableViews="CalendarViews"
+                FirstDayOfWeek="DayOfWeek.Monday"
+                TimeZone="TimeZoneInfo.Utc"
+                Clock="Time"
+                ScrollToHour="ScrollHour"
+                ScrollHeight="28rem"
+                MinItemHeight="18"
+                TimeFormat="HH:mm"
+                EmptyText="Nothing recorded in this range."
+                AriaLabel="Recorded segments and gaps (UTC)"
+                CssClass="waa-calendar recordings-calendar"
+                OnVisibleRangeChanged="OnCalendarRangeChanged"
+                OnItemSelected="OpenInPlayer" />
+</section>
+
+<h2 class="h5">Segments</h2>
 <div class="table-responsive">
 <PDTable @ref="Table"
          TItem="RecordingRow"

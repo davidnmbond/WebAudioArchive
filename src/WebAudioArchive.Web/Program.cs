@@ -3,6 +3,7 @@ using PanoramicData.Blazor.Extensions;
 using WebAudioArchive.Web;
 using WebAudioArchive.Web.Clips;
 using WebAudioArchive.Web.Components;
+using WebAudioArchive.Web.Schedule;
 using WebAudioArchive.Web.Status;
 
 if (args.Contains("--healthcheck"))
@@ -49,6 +50,12 @@ builder.Services.AddSingleton<ClipService>();
 builder.Services.AddSingleton<StatusService>();
 builder.Services.AddSingleton<RecordingsQuery>();
 builder.Services.AddHostedService<CacheHousekeeper>();
+// The schedule: page URL and zone from the stations config; fetched at start and every 15 minutes, last good kept.
+var scheduleSource = ScheduleSource.Load(settings.Station, Setting("WAA_STATIONS_CONFIG"));
+builder.Services.AddSingleton(scheduleSource);
+builder.Services.AddSingleton<ScheduleService>();
+builder.Services.AddHostedService<ScheduleRefresher>();
+builder.Services.AddHttpClient(ScheduleService.HttpClientName, c => c.Timeout = ScheduleService.FetchTimeout + TimeSpan.FromSeconds(5));
 builder.Services.AddHttpClient(StatusService.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(3));
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddPanoramicDataBlazor();
@@ -58,6 +65,10 @@ var app = builder.Build();
 app.Logger.LogInformation(
     "Serving station {Station} from recorders {Recorders}; clip cache {Cache}. No sign-in: publish this port on loopback only.",
     settings.Station, string.Join(", ", settings.Recorders.Select(r => $"{r.Id}={r.Root}")), settings.CacheDir);
+if (scheduleSource.IsConfigured)
+    app.Logger.LogInformation("Schedule for {Station}: {Url}, local times in {Zone}, refreshed every {Minutes} minutes", scheduleSource.Station, scheduleSource.Url, scheduleSource.Zone!.Id, ScheduleService.RefreshInterval.TotalMinutes);
+else
+    app.Logger.LogWarning("No schedule: {Problem}", scheduleSource.Problem);
 
 app.UseAntiforgery();
 app.MapStaticAssets();

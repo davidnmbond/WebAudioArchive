@@ -29,8 +29,11 @@ public sealed class CacheHousekeeper(WebSettings settings, TimeProvider time, IL
 /// <summary>The JSON returned by GET /api/clip. All times are UTC.</summary>
 public static class ClipJson
 {
-    public static object From(PreparedClip c) => new
+    public static object From(PreparedClip c)
     {
+        var clock = c.Clock();
+        return new
+        {
         id = c.File.Id,
         url = c.Url,
         downloadUrl = c.DownloadUrl,
@@ -58,5 +61,22 @@ public static class ClipJson
             fromUtc = p.StartUtc.UtcDateTime,
             toUtc = p.EndUtc.UtcDateTime,
         }),
-    };
+
+        // Added for the player's markers: each gap and restart inside the window, with where it falls in the clip.
+        gaps = c.Gaps().Select(g => new
+        {
+            fromUtc = g.StartUtc.UtcDateTime,
+            toUtc = g.EndUtc.UtcDateTime,
+            seconds = Math.Round(g.Seconds, 3),
+            reason = g.Reason,
+            clipSeconds = Math.Round(clock.ToClip(g.StartUtc).TotalSeconds, 3),
+        }),
+        restarts = c.Restarts().Select(r => new
+        {
+            atUtc = r.AtUtc.UtcDateTime,
+            endedBy = r.EndedBy,
+            clipSeconds = Math.Round(clock.ToClip(r.AtUtc).TotalSeconds, 3),
+        }),
+        };
+    }
 }

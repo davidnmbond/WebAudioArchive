@@ -16,7 +16,6 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 .status-badge { font-size: 0.8rem; }
 .status-badge i { margin-right: 0.3rem; }
 
-.clip-player audio { display: none; }
 .utc-date-picker { min-width: 11rem; }
 
 #blazor-error-ui {
@@ -62,3 +61,42 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 }
 .pdtoolbar .pdtoolbaritem:has(.toolbar-text) { flex: 1 1 14rem; min-width: 0; }
 .toolbar-text { white-space: normal; }
+
+/* PDCalendar (Shows and Recordings): every colour from Bootstrap's variables, so the calendar follows the app's
+   theme attribute rather than only the operating system's preference. */
+.pdcal.waa-calendar {
+    --pd-calendar-item-bg: var(--bs-primary-bg-subtle);
+    --pd-calendar-item-fg: var(--bs-primary-text-emphasis);
+    --pd-calendar-weekend: var(--bs-tertiary-bg);
+    --pd-calendar-outside: var(--bs-secondary-bg);
+    --pd-calendar-none: var(--bs-secondary-bg);
+}
+.show-full { --pd-calendar-item-bg: var(--bs-success-bg-subtle); --pd-calendar-item-fg: var(--bs-success-text-emphasis); }
+.show-partial { --pd-calendar-item-bg: var(--bs-warning-bg-subtle); --pd-calendar-item-fg: var(--bs-warning-text-emphasis); }
+.show-missing { --pd-calendar-item-bg: var(--bs-danger-bg-subtle); --pd-calendar-item-fg: var(--bs-danger-text-emphasis); }
+.show-live { --pd-calendar-item-bg: var(--bs-info-bg-subtle); --pd-calendar-item-fg: var(--bs-info-text-emphasis); }
+.show-future { --pd-calendar-item-bg: var(--bs-secondary-bg); --pd-calendar-item-fg: var(--bs-body-color); }
+.rec-a { --pd-calendar-item-bg: var(--bs-primary-bg-subtle); --pd-calendar-item-fg: var(--bs-primary-text-emphasis); }
+.rec-b { --pd-calendar-item-bg: var(--bs-info-bg-subtle); --pd-calendar-item-fg: var(--bs-info-text-emphasis); }
+.rec-gap { --pd-calendar-item-bg: var(--bs-danger); --pd-calendar-item-fg: var(--bs-white); }
+.pdcal .rec-open { outline: 1px dashed var(--pd-calendar-item-fg); outline-offset: -1px; }
+.show-live .show-cov-icon { color: var(--bs-danger); }
+
+.show-legend, .rec-legend {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.1rem 0.45rem;
+    border-radius: var(--bs-border-radius-sm);
+    background-color: var(--pd-calendar-item-bg);
+    color: var(--pd-calendar-item-fg);
+    font-weight: 500;
+}
+
+/* Content of the calendar items (ItemTemplate): coverage icon, UTC start, title. */
+.show-cov-icon { flex: none; font-size: 0.7rem; }
+.waa-item-time { flex: none; opacity: 0.85; }
+.waa-item-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+
+/* Phone width: the calendar's toolbar wraps and the week grid scrolls inside its own box, never the page. */
+.pdcal-week-scroll { overflow-x: auto; }
+.clip-player-clock code { overflow-wrap: anywhere; }

@@ -21,6 +21,10 @@ public sealed class RecordingRow
     public required string PlayerUrl { get; init; }
 }
 
+/// <summary>A segment or a recording gap on the Recordings calendar. Times UTC.</summary>
+public sealed record RecordingCalendarItem(
+    string Key, string Recorder, string Kind, DateTimeOffset StartUtc, DateTimeOffset EndUtc, string Title, string Tooltip, string CssClass, string PlayerUrl);
+
 /// <summary>All segments of every recorder, newest first, optionally limited to one UTC date.</summary>
 public sealed class RecordingsQuery(SegmentCatalog catalog)
 {
@@ -34,6 +38,60 @@ public sealed class RecordingsQuery(SegmentCatalog catalog)
             .Select(ToRow)
             .ToList();
         return rows;
+    }
+
+    /// <summary>
+    /// The Recordings calendar's items overlapping [from, to): every segment of every recorder, and every recording gap
+    /// (a gap in a segment's sidecar, or missing audio between one segment and the next of the same recorder).
+    /// </summary>
+    public IReadOnlyList<RecordingCalendarItem> CalendarItems(DateTimeOffset from, DateTimeOffset to)
+    {
+        var items = new List<RecordingCalendarItem>();
+        foreach (var r in catalog.All())
+        {
+            var label = r.Recorder.ToUpperInvariant();
+            CatalogSegment? previous = null;
+            foreach (var s in r.Segments)
+            {
+                if (s.EndUtc > from && s.StartUtc < to)
+                {
+                    var title = s.IsOpen ? $"{label}: recording" : $"{label}: segment";
+                    items.Add(new RecordingCalendarItem(
+                        r.Recorder + "|" + s.AudioPath, label, "segment", s.StartUtc, s.EndUtc, title,
+                        $"Recorder {label}, {ClipPlanner.Utc(s.StartUtc)} to {ClipPlanner.Utc(s.EndUtc)}{(s.IsOpen ? " (being recorded)" : $", ended by {s.EndedBy}")}, {s.SpanGaps.Count} gaps",
+                        $"rec-item rec-{r.Recorder}{(s.IsOpen ? " rec-open" : "")}",
+                        PlayerLink.For(s.StartUtc, s.EndUtc, r.Recorder)));
+                }
+
+                foreach (var g in s.SpanGaps.Where(g => g.EndUtc > from && g.StartUtc < to))
+                    items.Add(Gap(r.Recorder, g.StartUtc, g.EndUtc, g.Reason));
+
+                if (previous is not null)
+                {
+                    var missingFrom = previous.EndUtc;
+                    var missingTo = PositionModel.AudioStartUtc(s);
+                    if ((missingTo - missingFrom).TotalSeconds > ClipEvents.MinGapSeconds && missingTo > from && missingFrom < to)
+                        items.Add(Gap(r.Recorder, missingFrom, missingTo, "not recorded"));
+                }
+
+                previous = s;
+            }
+        }
+
+        return items.OrderBy(i => i.StartUtc).ThenBy(i => i.Recorder, StringComparer.Ordinal).ToList();
+    }
+
+    static RecordingCalendarItem Gap(string recorder, DateTimeOffset start, DateTimeOffset end, string reason)
+    {
+        var label = recorder.ToUpperInvariant();
+        var seconds = (end - start).TotalSeconds;
+        return new RecordingCalendarItem(
+            $"{recorder}|gap|{start.UtcTicks}", label, "gap", start, end,
+            string.Create(CultureInfo.InvariantCulture, $"{label}: gap {seconds:0.0} s"),
+            string.Create(CultureInfo.InvariantCulture, $"Recorder {label} has no audio from {ClipPlanner.Utc(start)} to {ClipPlanner.Utc(end)} ({seconds:0.0} s, {reason})"),
+            $"rec-item rec-gap rec-{recorder}",
+            // A minute either side of the gap; for a gap of hours, the minute either side of where it starts (a clip is at most 4 hours).
+            PlayerLink.For(start.AddMinutes(-1), end - start > TimeSpan.FromHours(3) ? start.AddMinutes(1) : end.AddMinutes(1), recorder));
     }
 
     static bool Overlaps(CatalogSegment s, DateOnly date)

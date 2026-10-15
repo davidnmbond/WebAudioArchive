@@ -68,7 +68,8 @@
             </div>
         }
 
-        <ClipPlayer Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds" Timeline="@Clip.Timeline()" />
+        <ClipPlayer Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds" Timeline="@Clip.Timeline()"
+                    Markers="@Markers" Title="@($"Recorder {Clip.Plan.Recorder.ToUpperInvariant()}, {Utc(Clip.Plan.StartUtc)} to {Utc(Clip.Plan.EndUtc)}")" />
 
         <PDTabSet CssClass="mt-3" TabMinWidth="0" @bind-SelectedTabId="SelectedTab">
             <PDTab Id="DetailsTab" Title="Clip details" IconCssClass="fas fa-info-circle">

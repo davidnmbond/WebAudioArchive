@@ -18,6 +18,7 @@ public sealed partial class Player
 
     PlayerForm Form { get; } = new();
     PreparedClip? Clip { get; set; }
+    IReadOnlyList<PanoramicData.Blazor.Models.PDMediaMarker> Markers { get; set; } = [];
     string? Error { get; set; }
     bool Busy { get; set; }
     string? _loadedQuery;
@@ -78,6 +79,7 @@ public sealed partial class Player
         {
             var request = Form.ToRequest();
             Clip = await Task.Run(() => Clips.Prepare(null, request));
+            Markers = ClipMarkers.ForPlayer(Clip);
         }
         catch (ClipException ex)
         {

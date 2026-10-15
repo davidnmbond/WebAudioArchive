@@ -3,7 +3,8 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="PanoramicData.Blazor" Version="10.0.350" />
+    <PackageReference Include="AngleSharp" Version="1.8.1" />
+    <PackageReference Include="PanoramicData.Blazor" Version="10.0.366" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />

@@ -1,0 +1,62 @@
+@page "/shows"
+
+<PageTitle>Shows - WebAudioArchive</PageTitle>
+
+<h1 class="h3">Shows</h1>
+<p class="text-body-secondary">
+    Station <strong>@Settings.Station</strong>'s scheduled shows and how much of each was recorded. All times are UTC: the
+    station's page lists UK local times, converted to UTC when it is read (British Summer Time is UTC+1, GMT is UTC+0).
+</p>
+
+<ScheduleStatus Snapshot="Snapshot" Source="Schedule.Source" />
+
+@if (Snapshot.Schedule is not null)
+{
+    <div class="d-flex flex-wrap gap-2 align-items-center mb-2 small" id="shows-legend" aria-label="Coverage key">
+        <span class="badge text-bg-secondary">Times UTC</span>
+        @foreach (var (css, icon, text) in Legend)
+        {
+            <span class="show-legend @css"><i class="@icon me-1" aria-hidden="true"></i>@text</span>
+        }
+    </div>
+
+    <PDCalendar TItem="ShowItem"
+                Items="Items"
+                StartSelector="i => i.Show.StartUtc"
+                EndSelector="i => i.Show.EndUtc"
+                TitleSelector="i => i.Show.Title"
+                KeySelector="i => i.Show.Id"
+                CssClassSelector="@(i => "show-item " + i.Coverage.CssClass)"
+                TooltipSelector="Tooltip"
+                View="View"
+                ViewChanged="v => View = v"
+                Date="FocusDate"
+                AvailableViews="Views"
+                FirstDayOfWeek="DayOfWeek.Monday"
+                TimeZone="TimeZoneInfo.Utc"
+                Clock="Time"
+                FirstVisibleHour="6"
+                LastVisibleHour="24"
+                ScrollToHour="7"
+                ScrollHeight="40rem"
+                MaxItemsPerDay="4"
+                AgendaDays="7"
+                TimeFormat="HH:mm"
+                IsLoading="Loading"
+                EmptyText="No scheduled shows in this range."
+                AriaLabel="Scheduled shows (UTC)"
+                CssClass="waa-calendar shows-calendar"
+                OnVisibleRangeChanged="OnRangeChangedAsync"
+                OnItemSelected="Open">
+        <ItemTemplate Context="item">
+            <span class="show-cov-icon @item.Coverage.Icon" aria-hidden="true"></span>
+            <span class="waa-item-time">@item.Show.StartUtc.UtcDateTime.ToString("HH:mm", CultureInfo.InvariantCulture)</span>
+            <span class="waa-item-title">@item.Show.Title</span>
+            <span class="visually-hidden">, @item.Coverage.Label</span>
+        </ItemTemplate>
+    </PDCalendar>
+    <p class="small text-body-secondary mt-2" id="shows-range">
+        Showing @Items.Count shows from <span class="utc">@Utc(Range.From)</span> to <span class="utc">@Utc(Range.To)</span>.
+        Select a show to play it with @Settings.DefaultMarginMinutes minutes either side.
+    </p>
+}

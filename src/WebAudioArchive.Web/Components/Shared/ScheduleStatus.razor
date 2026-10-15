@@ -1,0 +1,30 @@
+@* Where the schedule came from, and a clear warning when the live page could not be read. Never throws. *@
+@if (Snapshot.Schedule is null)
+{
+    <div class="alert alert-warning" id="schedule-unavailable" role="alert">
+        <PDLabel IconCssClass="fas fa-exclamation-triangle" Text="Schedule unavailable" TextCssClass="fw-semibold" />
+        <p class="mb-2 mt-1">
+            The station's schedule has not been read yet, so shows cannot be listed.
+            @(Snapshot.LastError ?? Source.Problem ?? "The first fetch has not finished; reload this page in a moment.")
+        </p>
+        <p class="mb-0">Everything recorded is still on the <a href="recordings" id="schedule-fallback">Recordings page</a>, where any time range can be played.</p>
+    </div>
+}
+else if (Snapshot.LastError is not null)
+{
+    <div class="alert alert-warning" id="schedule-stale" role="status">
+        <PDLabel IconCssClass="fas fa-exclamation-triangle" Text="Showing the last good schedule" TextCssClass="fw-semibold" />
+        <p class="mb-0 mt-1">
+            The live schedule could not be refreshed at <span class="utc">@Utc(Snapshot.LastAttemptUtc)</span>: @Snapshot.LastError
+            The last good schedule, fetched at <span class="utc">@Utc(Snapshot.FetchedUtc)</span>, is shown instead.
+        </p>
+    </div>
+}
+else
+{
+    <p class="small text-body-secondary" id="schedule-source">
+        Schedule from <a href="@Source.Url" rel="noopener noreferrer" target="_blank">@Source.Url</a>
+        @(Snapshot.FromSavedCopy ? "(saved copy, " : "(fetched ")<span class="utc">@Utc(Snapshot.FetchedUtc)</span>@(Snapshot.FromSavedCopy ? "; the live page is checked every 15 minutes)" : "; checked every 15 minutes)").
+        @Snapshot.Schedule.Slots.Count weekly slots; local times read as @(Source.Zone?.Id ?? "-").
+    </p>
+}

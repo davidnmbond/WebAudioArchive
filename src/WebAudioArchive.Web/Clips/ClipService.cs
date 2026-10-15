@@ -26,6 +26,12 @@ public sealed record PreparedClip(string Station, ClipFile File, ClipPlan Plan)
 
         return list;
     }
+
+    public ClipClock Clock() => new(Timeline(), File.Seconds);
+
+    public IReadOnlyList<ClipGap> Gaps() => ClipEvents.Gaps(Plan);
+
+    public IReadOnlyList<ClipRestart> Restarts() => ClipEvents.Restarts(Plan);
 }
 
 /// <summary>

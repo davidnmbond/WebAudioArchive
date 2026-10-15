@@ -49,8 +49,11 @@ services:
       WAA_RECORDERS: a=/data/a,b=/data/b
       WAA_RECORDER_HEALTH: a=http://recorder-a:8080/healthz,b=http://recorder-b:8080/healthz
       WAA_CACHE: /cache
+      # The Shows tab reads the station's scheduleUrl and timezone from here (read-only).
+      WAA_STATIONS_CONFIG: /config/stations.json
     volumes:
       - ${WAA_DATA_DIR:-../data}:/data:ro
+      - ../config:/config:ro
       - web-cache:/cache
     ports:
       - "127.0.0.1:8090:8080"
