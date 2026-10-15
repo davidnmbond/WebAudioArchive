@@ -1,0 +1,13 @@
+services:
+  recorder:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      WAA_INSTANCE_ID: ${WAA_INSTANCE_ID:-home}
+    volumes:
+      - ${WAA_DATA_DIR:-../data}:/data
+      - ../config:/config:ro
+    ports:
+      - "127.0.0.1:8080:8080"
