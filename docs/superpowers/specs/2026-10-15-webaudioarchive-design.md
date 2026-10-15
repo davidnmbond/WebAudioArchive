@@ -123,7 +123,7 @@ mounted files, never committed, because the repo is public.
   (`.pls`, `.m3u`), one level of iframe. The resolved URL is cached and re-resolved after repeated failure.
 - ICY metadata blocks, when present, are removed from the audio and each title is stored with its offset.
 - A dropped connection is retried with backoff (1 s doubling to 30 s). The gap is recorded with wall-clock
-  start and end in the segment's metadata and in the instance's coverage figures. Audio during a gap is lost.
+  start and end in the segment's metadata and in the instance's coverage figures. Audio during a gap is lost. A station may also replay a few seconds of buffered audio when a connection is re-established (Revma: audio at connect starts about 5 s before the arrival time), so reconnects can overlap slightly with what was already recorded.
 - Fan-out through bounded channels. The master writer is the priority subscriber. A slow subscriber (the
   analyser) drops oldest chunks, and the drop is counted and logged; it can never stall the recorder.
 
@@ -134,9 +134,9 @@ mounted files, never committed, because the repo is public.
   instance id, endedBy). UTC naming replaces station-local naming because local clock hours repeat when the
   clocks go back and would collide. A restart makes a new segment starting at the restart time.
 - Splits only at MP3 frame boundaries, so every segment decodes on its own and concatenating segments in order
-  reproduces the broadcast bytes exactly.
+  reproduces the bytes received exactly. This holds within one connection; across reconnects the stream can have a gap or a short replay, and a partial frame at either end of a connection is skipped.
 - Writes to `<HHmmss>.mp3.part`, renamed when the segment closes. On start-up any `.part` left by a crash is
-  closed and marked `"truncated": true, "reason": "crash"`.
+  closed with `endedBy` set to `"crash"`, cut back to whole frames.
 - Each instance logs free disk space, warns below a threshold and, below a lower threshold, **keeps recording
   and stops everything else first** (analysis, cutting, web), because the record matters most.
 - Rough size: 128 kbps is about 57.6 MB per hour, 1.38 GB per day, about 500 GB per year, per instance for the
