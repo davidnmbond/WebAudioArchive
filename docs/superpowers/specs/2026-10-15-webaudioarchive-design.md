@@ -277,6 +277,15 @@ same permission checks as every other audio request):
   aloud in the transcript, or recorded in the enricher output. Real song search depends on the 3.9 work and is
   recorded as a decision for the manager (section 7).
 
+**Web app MVP (built 2026-10-15, deviates from this section on purpose):** a manager-only web container
+(`docker/Dockerfile.web`, service `web`) ahead of the full design. Deviations, all to be removed when 3.8 is built
+in full: **no sign-in, roles or audit log**, so it is published on `127.0.0.1` only and must
+not be exposed; clips are made on request for any UTC range (Player page and `GET /api/clip`) rather than from
+scheduled show cuts; clip and audio URLs are unguessable hashes but are **not** permission checked; the calendar is a
+plain date input and the player is the HTML `audio` element, each behind one component (`UtcDatePicker`,
+`ClipPlayer`) so the library's later calendar and media player can replace them. It never mixes A and B in one clip
+(3.13's stitching from both is not built): it chooses one recorder and warns. Details in `docs/operations.md`.
+
 ### 3.9 Songs (later, not built in v1)
 
 Reserved so it can be added without redesign: ICY titles are already captured when the stream provides them;
