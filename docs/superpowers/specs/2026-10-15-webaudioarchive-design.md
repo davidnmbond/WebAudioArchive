@@ -189,7 +189,21 @@ analyses independently, so both need local whisper and an LLM, as you have confi
 
 ### 3.8 Web app, accounts and access
 
-- ASP.NET Core, server-rendered pages, audio played with HTTP range requests. One web role per instance.
+- ASP.NET Core (Blazor, see the UI stack bullet below), audio played with HTTP range requests. One web role per instance.
+- **UI stack (decision, 2026-10-15):** Blazor (.NET 10) in **interactive server** render mode, using the
+  `PanoramicData.Blazor` component library from NuGet (MIT licence, public package; pinned to an exact version,
+  10.0.350 at the time of writing) for the design elements: `PDTable` (with `PDPager`, filtering and sorting) for
+  shows, events, search hits, users and the weekly report; `PDTabSet`, `PDToolbar`, `PDModal`, `PDForm`,
+  `PDTagInput`, `PDDateTime`, `PDProgressBar` and `PDTree` where they fit; `PDTimeline` is the first candidate
+  for the events lane on the seek bar and is evaluated in plan 4, with a small custom component as the fallback.
+  The library has no calendar or media player component, so the **calendar view and the audio player are
+  built in this repository** on Bootstrap (the library's own dependency, 5.1.3 or later) and the browser's HTML
+  `audio` element. Interactive server fits the access model: authorisation stays on the server, nothing
+  sensitive is sent to a client that is not allowed it, and there is no separate API surface to secure. Only
+  the audio and download endpoints are plain minimal-API endpoints, because they need HTTP range requests
+  and cookie authorisation, and the browser fetches them directly. Only the library is used, not any other
+  PanoramicData code or conventions. Consequence: the Web project is a Blazor web app, the session cookie also
+  carries the circuit, and the page tests use bUnit plus a few Playwright smoke tests (Playwright in CI only).
 - **Sign-in is Google only** (OpenID Connect). There are no local passwords. Only Google accounts that a
   manager has added can sign in; any other Google account is shown "not authorised".
 - **Roles:** `manager` and `presenter`.
@@ -343,7 +357,7 @@ src/WebAudioArchive.Core/      stream discovery, ICY, fan-out, master segments, 
 src/WebAudioArchive.Stations/  Burst parser (and future per-station parsers)
 src/WebAudioArchive.Analysis/  decode, clipping, swear, filler, transcriber and enricher clients
 src/WebAudioArchive.Worker/    recorder host and background services
-src/WebAudioArchive.Web/       sign-in, roles, pages, audio endpoints, reports
+src/WebAudioArchive.Web/       Blazor app (PanoramicData.Blazor), sign-in, roles, pages, audio endpoints, reports
 tests/WebAudioArchive.Tests/   unit and integration, fixtures under tests/fixtures
 config/stations.json           Burst configured
 docker/                        Dockerfile, compose files (cpu, gpu), tunnel notes
@@ -351,7 +365,8 @@ docs/                          specs, operations, detector validation notes
 .github/workflows/ci.yml       build and test on Linux
 ```
 
-.NET 10, AngleSharp, ffmpeg in the image, `Microsoft.Extensions.Hosting`, ASP.NET Core with Google OIDC, SQLite.
+.NET 10, AngleSharp, ffmpeg in the image, `Microsoft.Extensions.Hosting`, ASP.NET Core Blazor with Google OIDC,
+PanoramicData.Blazor, SQLite.
 All packages pinned to exact versions.
 
 ## 5. Deployment
