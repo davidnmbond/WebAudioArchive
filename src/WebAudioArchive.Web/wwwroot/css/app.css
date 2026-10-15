@@ -1,0 +1,6 @@
+html, body { font-size: 0.95rem; }
+.utc { white-space: nowrap; }
+#blazor-error-ui { display: none; position: fixed; bottom: 0; left: 0; right: 0; padding: 0.6rem 1rem; background: #fff3cd; z-index: 1000; }
+#blazor-error-ui .reload { margin-left: 1rem; }
+.clip-player audio { display: none; }
+.utc-date-picker { min-width: 11rem; }

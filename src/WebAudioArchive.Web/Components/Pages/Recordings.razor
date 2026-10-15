@@ -1,0 +1,38 @@
+@page "/recordings"
+
+<PageTitle>Recordings - WebAudioArchive</PageTitle>
+
+<h1 class="h3">Recordings</h1>
+<p class="text-body-secondary">Every master segment of station <strong>@Settings.Station</strong> from every recorder, newest first. All times are UTC.</p>
+
+<div class="d-flex flex-wrap gap-2 align-items-end mb-3">
+    <UtcDatePicker Id="recordings-date" Label="Date (UTC)" Value="FilterDate" ValueChanged="OnDateChangedAsync" />
+    <button class="btn btn-sm btn-outline-secondary" @onclick="ClearDateAsync">All dates</button>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="ReloadAsync">Reload</button>
+    <span class="ms-2 text-body-secondary small" id="recordings-count">@Provider.Rows.Count segments@(FilterDate is null ? "" : " on " + FilterDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + " UTC")</span>
+</div>
+
+<PDTable @ref="Table"
+         TItem="RecordingRow"
+         Id="recordings-table"
+         DataProvider="Provider"
+         KeyField="r => r.Key"
+         SortCriteria="Sort"
+         PageCriteria="Paging"
+         PageSizeChoices="PageSizes"
+         ShowOverlay="false"
+         NoDataMessage="No recordings found.">
+    <PDColumn TItem="RecordingRow" Id="recorder" Field="r => r.Recorder" Title="Recorder" />
+    <PDColumn TItem="RecordingRow" Id="start" Field="r => r.StartUtc" Title="Start (UTC)" Format="yyyy-MM-dd HH:mm:ss" />
+    <PDColumn TItem="RecordingRow" Id="end" Field="r => r.EndUtc" Title="End (UTC)" Format="yyyy-MM-dd HH:mm:ss" />
+    <PDColumn TItem="RecordingRow" Id="duration" Field="r => r.AudioSeconds" Title="Audio duration">
+        <Template Context="row">@row.Duration</Template>
+    </PDColumn>
+    <PDColumn TItem="RecordingRow" Id="size" Field="r => r.SizeMb" Title="Size (MB)" Format="0.00" />
+    <PDColumn TItem="RecordingRow" Id="endedBy" Field="r => r.EndedBy" Title="Ended by" />
+    <PDColumn TItem="RecordingRow" Id="gaps" Field="r => r.Gaps" Title="Gaps" />
+    <PDColumn TItem="RecordingRow" Id="open" Field="r => r.Open" Title="Open" />
+    <PDColumn TItem="RecordingRow" Id="play" Title="Play" Sortable="false">
+        <Template Context="row"><a class="btn btn-sm btn-primary" href="@row.PlayerUrl">Play</a></Template>
+    </PDColumn>
+</PDTable>

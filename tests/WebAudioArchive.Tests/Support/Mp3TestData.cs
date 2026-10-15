@@ -27,6 +27,29 @@ public static class Mp3TestData
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// Like <see cref="Frame"/> but padded the way a real 128 kbps, 44.1 kHz encoder pads (417 bytes plus a padding byte
+    /// in 42300 of every 44100 frames), so a run of them averages exactly 16000 bytes per second.
+    /// </summary>
+    public static byte[] CbrFrame(int seq)
+    {
+        var padded = (long)(seq + 1) * 42300 / 44100 > (long)seq * 42300 / 44100;
+        var f = Frame(seq);
+        if (padded == (f.Length == 418)) return f;
+        var g = new byte[padded ? 418 : 417];
+        f.AsSpan(0, Math.Min(f.Length, g.Length)).CopyTo(g);
+        if (padded) g[^1] = (byte)((seq + g.Length - 1) & 0x7F);
+        g[2] = padded ? (byte)0x92 : (byte)0x90;
+        return g;
+    }
+
+    public static byte[] CbrFrames(int count, int startSeq = 0)
+    {
+        var ms = new MemoryStream();
+        for (var i = 0; i < count; i++) ms.Write(CbrFrame(startSeq + i));
+        return ms.ToArray();
+    }
+
     public static int SeqOf(ReadOnlySpan<byte> frame) =>
         (frame[4] << 21) | (frame[5] << 14) | (frame[6] << 7) | frame[7];
 }

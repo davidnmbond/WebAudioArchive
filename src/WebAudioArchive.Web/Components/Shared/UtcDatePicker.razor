@@ -1,0 +1,5 @@
+@* The only place a date is picked. A later job swaps this for PDCalendar; callers only see a UTC DateOnly. *@
+<div class="utc-date-picker">
+    <label class="form-label mb-1" for="@Id">@Label</label>
+    <input id="@Id" type="date" class="form-control form-control-sm" value="@Text" @onchange="OnChangeAsync" />
+</div>

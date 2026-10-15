@@ -1,0 +1,18 @@
+@inherits LayoutComponentBase
+
+<nav class="navbar navbar-expand bg-body-tertiary border-bottom mb-3">
+    <div class="container-fluid">
+        <span class="navbar-brand">WebAudioArchive</span>
+        <ul class="navbar-nav me-auto">
+            <li class="nav-item"><NavLink class="nav-link" href="" Match="NavLinkMatch.All">Status</NavLink></li>
+            <li class="nav-item"><NavLink class="nav-link" href="recordings">Recordings</NavLink></li>
+            <li class="nav-item"><NavLink class="nav-link" href="player">Player</NavLink></li>
+        </ul>
+        <span class="badge text-bg-secondary me-2" title="Every time on these pages is UTC">All times UTC</span>
+        <span class="badge text-bg-warning" title="This MVP has no sign-in. Publish it on 127.0.0.1 only.">No sign-in: loopback only</span>
+    </div>
+</nav>
+
+<main class="container-fluid pb-4">
+    @Body
+</main>

@@ -1,0 +1,24 @@
+@* The audio player, kept behind this one component so it can be swapped for PDMediaPlayer later. Plain HTML audio plus wwwroot/js/clipplayer.js. *@
+<div class="clip-player card" @ref="_root" data-timeline="@TimelineJson" id="clip-player">
+    <div class="card-body">
+        <audio preload="metadata" src="@Src" data-role="audio"></audio>
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+            <button type="button" class="btn btn-primary btn-sm" data-action="toggle">Play</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-action="back">Back 15 s</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-action="forward">Forward 30 s</button>
+            <span class="ms-2 small text-body-secondary">Speed</span>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Playback speed">
+                @foreach (var speed in Speeds)
+                {
+                    <button type="button" class="btn btn-outline-primary @(speed == 1 ? "active" : "")" data-speed="@speed.ToString(CultureInfo.InvariantCulture)">@speed.ToString(CultureInfo.InvariantCulture)x</button>
+                }
+            </div>
+        </div>
+        <input type="range" class="form-range" data-role="seek" min="0" max="1000" step="1" value="0" aria-label="Seek" />
+        <div class="d-flex flex-wrap gap-3 small">
+            <span>Position <span data-role="position">0:00:00</span> of <span data-role="duration">@DurationText</span></span>
+            <span>Wall time <strong data-role="wall">@StartText</strong> UTC</span>
+            <a class="ms-auto btn btn-sm btn-success" href="@DownloadUrl" download="@DownloadName" data-role="download">Download @DownloadName</a>
+        </div>
+    </div>
+</div>

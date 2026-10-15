@@ -1,0 +1,88 @@
+@page "/player"
+
+<PageTitle>Player - WebAudioArchive</PageTitle>
+
+<h1 class="h3">Player</h1>
+<p class="text-body-secondary">Pick a UTC time range; the recorded hourly segments are joined into one clip. All times are UTC.</p>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-auto">
+                <UtcDatePicker Id="player-date" Label="Date (UTC)" @bind-Value="Form.Date" />
+            </div>
+            <div class="col-auto">
+                <label class="form-label mb-1" for="player-from">From (UTC, HH:mm:ss)</label>
+                <input id="player-from" type="time" step="1" class="form-control form-control-sm" value="@Form.From" @onchange="e => Form.From = Text(e)" />
+            </div>
+            <div class="col-auto">
+                <label class="form-label mb-1" for="player-to">To (UTC, HH:mm:ss)</label>
+                <input id="player-to" type="time" step="1" class="form-control form-control-sm" value="@Form.To" @onchange="e => Form.To = Text(e)" />
+            </div>
+            <div class="col-auto">
+                <label class="form-label mb-1" for="player-recorder">Recorder</label>
+                <select id="player-recorder" class="form-select form-select-sm" @bind="Form.Recorder">
+                    <option value="auto">Auto (best coverage)</option>
+                    @foreach (var r in Settings.Recorders)
+                    {
+                        <option value="@r.Id">@r.Label</option>
+                    }
+                </select>
+            </div>
+            <div class="col-auto">
+                <div class="form-check mb-1">
+                    <input id="player-margin" class="form-check-input" type="checkbox" @bind="Form.AddMargin" />
+                    <label class="form-check-label" for="player-margin">add</label>
+                    <input id="player-margin-minutes" type="number" min="0" max="60" class="form-control form-control-sm d-inline-block mx-1" style="width: 5rem" @bind="Form.MarginMinutes" />
+                    <label class="form-check-label" for="player-margin">minutes before and after</label>
+                </div>
+            </div>
+            <div class="col-auto">
+                <button id="player-prepare" class="btn btn-primary btn-sm" @onclick="PrepareAsync" disabled="@Busy">@(Busy ? "Preparing..." : "Prepare clip")</button>
+            </div>
+        </div>
+        <div class="form-text">A To earlier than From means the next UTC day. The longest clip is 4 hours.</div>
+    </div>
+</div>
+
+@if (Error is not null)
+{
+    <div class="alert alert-danger" id="player-error">@Error</div>
+}
+
+@if (Clip is not null)
+{
+    <div class="card mb-3" id="player-result">
+        <div class="card-body">
+            <dl class="row mb-0">
+                <dt class="col-sm-3">Recorder used</dt><dd class="col-sm-9" id="clip-recorder">@Clip.Plan.Recorder.ToUpperInvariant()</dd>
+                <dt class="col-sm-3">Requested</dt><dd class="col-sm-9 utc">@Utc(Clip.Plan.WindowFrom) to @Utc(Clip.Plan.WindowTo)</dd>
+                <dt class="col-sm-3">Clip covers</dt><dd class="col-sm-9 utc" id="clip-covers">@Utc(Clip.Plan.StartUtc) to @Utc(Clip.Plan.EndUtc)</dd>
+                <dt class="col-sm-3">Duration</dt><dd class="col-sm-9">@Duration</dd>
+                <dt class="col-sm-3">Size</dt><dd class="col-sm-9">@Size</dd>
+            </dl>
+        </div>
+    </div>
+
+    @if (Clip.Plan.Warnings.Count > 0)
+    {
+        <div class="alert alert-warning" id="clip-warnings">
+            <strong>Warnings</strong>
+            <ul class="mb-0">
+                @foreach (var w in Clip.Plan.Warnings)
+                {
+                    <li>@w</li>
+                }
+            </ul>
+        </div>
+    }
+
+    <ul class="small text-body-secondary" id="clip-notes">
+        @foreach (var n in Clip.Plan.Notes)
+        {
+            <li>@n</li>
+        }
+    </ul>
+
+    <ClipPlayer Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds" Timeline="@Clip.Timeline()" />
+}

@@ -1,0 +1,53 @@
+@page "/"
+@implements IDisposable
+
+<PageTitle>Status - WebAudioArchive</PageTitle>
+
+<h1 class="h3">Status</h1>
+<p class="text-body-secondary">
+    Station <strong>@Settings.Station</strong>. Checked at <span class="utc">@CheckedText</span>; refreshes every @RefreshSeconds s.
+    <button class="btn btn-sm btn-outline-secondary ms-2" @onclick="RefreshAsync">Refresh now</button>
+</p>
+
+@if (Statuses is null)
+{
+    <p>Reading the recorders...</p>
+}
+else
+{
+    <div class="row g-3">
+        @foreach (var s in Statuses)
+        {
+            <div class="col-12 col-xl-6">
+                <div class="card border-3 @BorderClass(s.Level)" data-recorder="@s.Recorder.Id" data-level="@s.Level">
+                    <div class="card-header d-flex align-items-center">
+                        <span class="badge @BadgeClass(s.Level) me-2">@LevelText(s.Level)</span>
+                        <strong>Recorder @s.Recorder.Label</strong>
+                        <span class="ms-auto text-body-secondary small">@(s.Health?.Instance ?? "")</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="mb-2">@s.Summary</p>
+                        <table class="table table-sm mb-0">
+                            <tbody>
+                                <tr><th scope="row">Connected</th><td>@YesNo(s.Health?.Connected)</td></tr>
+                                <tr><th scope="row">Seconds since last frame written</th><td>@Seconds(s.Health?.SecondsSinceLastFrame)</td></tr>
+                                <tr><th scope="row">Last error</th><td>@LastError(s.Health)</td></tr>
+                                <tr><th scope="row">Current segment start</th><td class="utc">@Utc(s.Health?.CurrentSegmentStartUtc)</td></tr>
+                                <tr><th scope="row">Reconnects</th><td>@(s.Health?.Reachable == true ? s.Health.Reconnects.ToString(CultureInfo.InvariantCulture) : "-")</td></tr>
+                                <tr><th scope="row">Recorder uptime</th><td>@Seconds(s.Health?.UptimeSeconds)</td></tr>
+                                <tr><th scope="row">Coverage, last 24 hours</th><td>@Coverage(s)</td></tr>
+                                <tr><th scope="row">Latest segment</th><td class="utc">@Latest(s)</td></tr>
+                                <tr><th scope="row">Data root</th><td><code>@s.Recorder.Root</code> (read-only)</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+    <p class="small text-body-secondary mt-3">
+        Green: connected and a frame written in the last @StatusRules.GreenSeconds s. Amber: reconnecting, a recent write error,
+        frames late, or no health URL. Red: health check unreachable or no frame for over @StatusRules.RedSeconds s.
+        Coverage counts closed segments from their sidecars (minus gaps) and the open segment up to its last write.
+    </p>
+}

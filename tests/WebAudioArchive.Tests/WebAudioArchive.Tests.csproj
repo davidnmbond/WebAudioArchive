@@ -14,6 +14,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />
+    <!-- Aliased because the Web and Worker projects each have a public top-level Program class. -->
+    <ProjectReference Include="..\..\src\WebAudioArchive.Web\WebAudioArchive.Web.csproj" Aliases="web" />
     <ProjectReference Include="..\..\src\WebAudioArchive.Worker\WebAudioArchive.Worker.csproj" />
   </ItemGroup>
   <ItemGroup>
