@@ -33,7 +33,7 @@ services:
     ports:
       - "127.0.0.1:8081:8080"
 
-  # The web app: Status, Recordings and Player pages plus the clip API, at http://127.0.0.1:8090.
+  # The web app: Status, Shows, Recordings and Player pages plus the clip API, at http://127.0.0.1:8090.
   # NO SIGN-IN in this version, so it is published on loopback only. It reads the recorders' data read-only and talks
   # to them only through /healthz; it has its own image, so it is rebuilt and restarted on its own and never touches
   # a recorder: `docker compose -f docker/docker-compose.yml up -d --build web` (always name the service).

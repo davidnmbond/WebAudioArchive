@@ -105,6 +105,13 @@ mounted files, never committed, because the repo is public.
   Changes are appended as a diff to `schedule-changes.jsonl`.
 - A failed fetch or parse never discards the last good schedule; an empty parse counts as a failure; after 3
   consecutive failures a warning is logged every attempt.
+- **MVP (built 2026-10-15, issue #24; the rest is issue #8):** a minimal schedule service runs inside the web app, not
+  as its own service. It fetches the page at start and every 15 minutes, parses it with the AngleSharp Burst parser
+  above (also accepting `rowspan`; it fails closed on any table it does not recognise), and keeps the last good weekly
+  grid in the web cache volume (`/cache/schedule/<station>.json`), because the web container mounts `/data` read-only.
+  Dated occurrences are worked out from the grid on request (any range, UTC, rules of 3.3 for skipped and repeated
+  local times) rather than stored for 14 days. Not built yet: the LLM fallback, conditional requests, the content
+  hash, `schedule.json` and `schedule-changes.jsonl` under `/data`.
 
 ### 3.3 Window planner and show cutter
 
@@ -281,10 +288,13 @@ same permission checks as every other audio request):
 (`docker/Dockerfile.web`, service `web`) ahead of the full design. Deviations, all to be removed when 3.8 is built
 in full: **no sign-in, roles or audit log**, so it is published on `127.0.0.1` only and must
 not be exposed; clips are made on request for any UTC range (Player page and `GET /api/clip`) rather than from
-scheduled show cuts; clip and audio URLs are unguessable hashes but are **not** permission checked; the calendar is a
-plain date input and the player is the HTML `audio` element, each behind one component (`UtcDatePicker`,
-`ClipPlayer`) so the library's later calendar and media player can replace them. It never mixes A and B in one clip
-(3.13's stitching from both is not built): it chooses one recorder and warns. Details in `docs/operations.md`.
+scheduled show cuts; clip and audio URLs are unguessable hashes but are **not** permission checked. Since issue #24
+(PanoramicData.Blazor 10.0.366) the player is `PDMediaPlayer` (inside `ClipPlayer`) and the calendar picker exists as
+the **Shows** tab (`PDCalendar`, week, month and agenda, in UTC) over the minimal schedule of 3.2, with coverage per
+show; a show's page plays a clip made on request from the masters with the 5 minute margins (the show proper shaded,
+show start and end, recording gaps and recorder restarts as markers, margins and show as segments), not a cut show
+file. Events, transcripts, search and a remembered position are not built (issue #11). It never mixes A and B in one
+clip (3.13's stitching from both is not built): it chooses one recorder and warns. Details in `docs/operations.md`.
 
 ### 3.9 Songs (later, not built in v1)
 

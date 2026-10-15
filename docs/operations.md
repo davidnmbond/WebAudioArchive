@@ -86,19 +86,66 @@ Pages:
   URL unreachable or no frame for over 120 s), connected, seconds since the last frame, last error, current segment
   start, reconnects, uptime, and coverage over the last 24 hours. Coverage is computed by the web app from the sidecars
   (segment spans minus gaps) plus the open `.part` up to its last write time. Refreshes every 15 s.
-- **Recordings** (`/recordings`): every segment from both recorders (recorder, start, end, audio duration, size, ended
-  by, number of gaps, open), newest first, with a UTC date filter. Play opens the Player for that segment.
+- **Shows** (`/shows`): the station's schedule in a `PDCalendar` (week by default; month and agenda; weeks start on
+  Monday; the calendar runs in UTC and every time is labelled UTC). `?view=month` and `?date=2026-10-26` (a UTC date)
+  choose the first view. Each show is marked, by colour, icon and tooltip: **recorded** (at least one recorder has all
+  of it, within 2 s), **partly recorded** (some of it, but no single recorder has all of it), **not recorded**,
+  **on air now** (measured up to now, counting the open `.part`) or **in the future**. Above the calendar: where the
+  schedule came from and when, or a warning (see "Schedule" below).
+- **Show** (`/shows/<station>-<yyyyMMdd>T<HHmm>Z`, the UTC start, for example `/shows/burst-20261015T1900Z`): title,
+  UTC start and end, coverage per recorder with the uncovered stretches listed in UTC, a margin (default **5 minutes**
+  before and after, 0 to 60) and a recorder (Auto, A, B). The show's clip (made by the same planner and builder as the
+  Player, from the show's start minus the margin to its end plus the margin, or to now while it is on air) plays in
+  `PDMediaPlayer`: the show proper is the shaded range of the seek bar, so the lead-in and tail are visibly outside it;
+  markers at the show's start and end, at each recording gap (kind "gap": sidecar gaps, missing audio between segments
+  or at the edges) and each recorder restart (kind "restart": a segment inside the window that ended other than at the
+  hour boundary); a lane with the lead-in, show and tail ("margin" and "show" segments); the planner's warnings above
+  the player. A show that has not started says "Not yet broadcast"; a partly recorded one plays what exists with a
+  warning; one with nothing recorded says so. The id is the station and UTC start, so a link works after a restart or
+  reload as long as the schedule still has a show starting then.
+- **Recordings** (`/recordings`): a week calendar (`PDCalendar`, UTC) of each recorder's segments (A and B side by side,
+  the open segment dashed) and recording gaps (red; sidecar gaps and missing audio between segments). Selecting a
+  segment opens the Player for it, as the table's Play button does; selecting a gap opens the Player a minute either
+  side of it. Below it, the table of every segment from both recorders (recorder, start, end, audio duration, size,
+  ended by, number of gaps, open), newest first, with a UTC date filter.
 - **Player** (`/player`): date, From, To, "add N minutes before and after" (off by default, 5 minutes), recorder (Auto,
   A, B). Prepare clip shows the recorder used, the clip's real start and end, duration, size and warnings, then plays it
-  (speed 0.75x to 2x, back 15 s, forward 30 s, seek bar with the UTC wall time) with a download link named like
-  `burst_20261015T151500Z_20261015T151600Z_A.mp3`. A link such as
-  `/player?from=2026-10-15T15:15:00Z&to=2026-10-15T15:16:00Z&recorder=auto` prepares the clip on load.
+  in `PDMediaPlayer` (speeds 0.75x, 1x, 1.25x, 1.5x and 2x with pitch kept, back 15 s, forward 30 s, a seek bar with
+  markers for the requested start and end, recording gaps and recorder restarts, previous and next marker buttons, the
+  media's own error message if it cannot play) with a download button for a file named like
+  `burst_20261015T151500Z_20261015T151600Z_A.mp3`. Beside the player: the **UTC wall time** of the current position
+  (the clip's real start plus the position, following any jump across a gap), which the player itself does not know.
+  A link such as `/player?from=2026-10-15T15:15:00Z&to=2026-10-15T15:16:00Z&recorder=auto` prepares the clip on load.
+
+Schedule (the Shows tab):
+
+- The web app reads the station's `scheduleUrl` and `timezone` from the stations config (`WAA_STATIONS_CONFIG`; in
+  compose `../config` is mounted read-only at `/config` and the variable is `/config/stations.json`). It fetches the
+  page at start-up and then every **15 minutes** (20 s timeout, User-Agent `WebAudioArchive/1.0`), and parses it with
+  a parser for Burst's table (header Monday to Sunday, one row per hour from 09:00 to 21:00, `data-show` as the title;
+  a show filling consecutive hours of a day, by `rowspan` or by the same title repeated, is one show; an empty cell is
+  off air). The parser fails closed: if the table is not exactly what it expects, it reports why and returns nothing.
+- **Last good schedule:** a good parse replaces the schedule and is saved to `/cache/schedule/<station>.json` (the
+  cache volume, so it survives a restart and is used until the first fetch after a restart). A failed fetch or a page
+  that does not parse never replaces it: the Shows page keeps showing the last good schedule with a warning giving the
+  error and when the last good one was fetched. If there has never been a good schedule, the Shows page says
+  "Schedule unavailable" with the reason and a link to the Recordings page. A schedule problem never stops the app.
+- **UTC rule and the clock change:** the page states no time zone; its times are UK local time, so the configured
+  `Europe/London` is applied **only** when turning a weekly slot into dated UTC instants. Nothing local is stored or
+  shown. In British Summer Time (UTC+1) a 20:00 show is 19:00 UTC; in GMT (UTC+0) it is 20:00 UTC. On 25 October 2026
+  the clocks go back at 02:00, so from the week of 26 October every show is an hour later in UTC; on 28 March 2027
+  they go forward and the shows move an hour earlier in UTC. A local time skipped by the spring change moves to the
+  next valid instant; one repeated in the autumn takes the first.
+- Not built yet (issue #8): the LLM fallback, `schedule.json` and a change log under `/data`, and cutting shows to
+  files; the web app makes each show's clip on request from the masters.
 
 API:
 
 - `GET /api/clip?station=burst&from=<UTC>&to=<UTC>&marginBefore=<min>&marginAfter=<min>&recorder=auto|a|b` returns
   JSON: `id`, `url`, `downloadUrl`, `downloadName`, `recorder`, `from` and `to` (what the clip really covers), `seconds`,
-  `bytes`, `warnings`, `notes`, `coverageSeconds` per recorder and the `pieces` joined. 400 with `{ "error": ... }` for
+  `bytes`, `warnings`, `notes`, `coverageSeconds` per recorder, the `pieces` joined, `gaps` (each with `fromUtc`,
+  `toUtc`, `seconds`, `reason` and `clipSeconds`, where it falls in the clip) and `restarts` (`atUtc`, `endedBy`,
+  `clipSeconds`). 400 with `{ "error": ... }` for
   bad input (from not before to, a window ending in the future, longer than 4 hours, unknown station or recorder,
   margins outside 0 to 60 minutes); 404 when nothing was recorded in the window.
 - `GET /media/clip/<id>.mp3` serves the cached clip as `audio/mpeg` with range requests (206); add `?download=1` for a
@@ -117,6 +164,9 @@ How clips are made and how accurate they are:
   and every finished clip is checked to be whole frames. **Positions are accurate to about a second**; after a reconnect
   inside a segment they can be off by a few seconds, because the replayed audio at a reconnect is estimated.
 - The open segment (`.mp3.part`) can be clipped while it is written; its gaps are not known until the hour closes.
+- Marker positions, the shaded show range and the UTC wall time beside the player come from UTC times mapped through
+  the clip's timeline (where each piece starts and where the audio jumps across a gap), so they have the same accuracy:
+  about a second. A time inside a gap is shown where the audio jumps over it.
 - A one minute clip is about 1 MB. The longest clip is 4 hours (about 230 MB); margins that would pass that are
   reduced, with a warning.
 
@@ -127,7 +177,8 @@ oldest until the cache is under 2 GB.
 Settings (environment variables): `WAA_STATION` (default `burst`), `WAA_RECORDERS` (`a=/data/a,b=/data/b`, required;
 start-up fails naming the setting if it is missing or a root does not exist), `WAA_RECORDER_HEALTH`
 (`a=http://recorder-a:8080/healthz,b=http://recorder-b:8080/healthz`), `WAA_CACHE` (default `/cache`), `WAA_PORT`
-(default 8080 inside the container).
+(default 8080 inside the container), `WAA_STATIONS_CONFIG` (the stations config with the schedule URL and time zone;
+without it the Shows tab says the schedule is unavailable and everything else works).
 
 Upgrading: the recorders and the web app are upgraded independently. A web change never needs a recorder restart, and
 the recorders must not be restarted for one. Rebuild and restart only the web app with:
@@ -137,8 +188,10 @@ the recorders must not be restarted for one. Rebuild and restart only the web ap
 Look and feel: the pages follow the operating system's light or dark preference ("Auto"), or a choice of Light or
 Dark from the toggle at the top right, remembered in the browser (localStorage; without it the page simply follows
 the OS). The theme is set by a small script in the page head before anything is drawn, so there is no flash of the
-wrong theme. The UI uses the PanoramicData.Blazor components (toolbar, table and pager, tab set, progress bar, date
-picker, text boxes, combo box, toggle switch, buttons, busy overlay).
+wrong theme. The UI uses the PanoramicData.Blazor components, pinned to **10.0.366** (toolbar, table and pager, tab
+set, progress bar, date picker, text boxes, combo box, toggle switch, buttons, busy overlay, `PDCalendar` and
+`PDMediaPlayer`; the player's script is a module served from `_content/PanoramicData.Blazor`). Calendar and player
+colours come from Bootstrap's variables (`wwwroot/css/app.css`), so they follow the Light and Dark choice.
 
 Vendored front-end files (served from the container, no CDN, so the app works offline):
 
