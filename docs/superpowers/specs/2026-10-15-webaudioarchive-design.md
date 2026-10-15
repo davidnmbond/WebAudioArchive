@@ -228,6 +228,29 @@ analyses independently, so both need local whisper and an LLM, as you have confi
   how many before the watershed, clipping events and milliseconds, filler rate, dead air, and recording gaps
   per instance.
 
+**Playback screen** (added 2026-10-15, built in plan 4; the same page serves managers and presenters, with the
+same permission checks as every other audio request):
+
+- **Calendar picker:** shows are chosen from the schedule in a calendar view (week and month, showing each
+  occurrence as scheduled). A manager sees every occurrence and unassigned time; a presenter sees only their
+  assigned shows, so the calendar never reveals the titles of other shows. Occurrences with no recording or
+  partial coverage are marked as such.
+- **Player:** HTTP range playback of the cut show including the 5 minute margins, with playback speed options
+  (0.75x, 1x, 1.25x, 1.5x, 2x, pitch preserved), skip back and forward, and a position that survives reloads.
+  Speed is a browser feature (`playbackRate`), so no audio is re-encoded.
+- **Event navigation:** the events timeline (dead air, clipping, swearing, fillers and, later, songs) is drawn
+  along the seek bar and listed beside it; selecting an event jumps to its time, and previous or next event
+  buttons filter by type. Events come from `events.json` (3.6); nothing is computed in the browser.
+- **Search:** full-text search over the transcripts for a word or phrase, with the hits listed per show and
+  occurrence with a snippet and timestamp, each hit playing from a few seconds before the match. Scope follows
+  the same access rules (presenters search only their shows). Search also covers the derived facts (3.7: names,
+  artists, topics) and, when song identification exists, songs. Search is served from a SQLite FTS5 index built
+  from the transcript JSON, so it can be rebuilt at any time and holds no data that is not in the show files.
+- **Songs:** "cases of a song being played" needs song identification, which is a non-goal for v1 (3.9). Until
+  then it can only find songs that are named in ICY titles (Burst sends none, as measured on 2026-10-15), said
+  aloud in the transcript, or recorded in the enricher output. Real song search depends on the 3.9 work and is
+  recorded as a decision for the manager (section 7).
+
 ### 3.9 Songs (later, not built in v1)
 
 Reserved so it can be added without redesign: ICY titles are already captured when the stream provides them;
@@ -344,6 +367,7 @@ All packages pinned to exact versions.
 | Manager lists diverge between instances | Export and import of the user list; documented as manual. |
 | Public repo | Code only. No recordings, secrets or user data in git. |
 | Compliance requirement unknown | Retention is a setting with no default deletion; manager decides the period. |
+| Song search wanted but identification is deferred | Playback and transcript search ship in plan 4; song search is limited to ICY titles, spoken mentions and enricher output until 3.9 is built. Manager to decide whether to bring 3.9 forward. |
 
 ## 8. Decisions recorded
 
