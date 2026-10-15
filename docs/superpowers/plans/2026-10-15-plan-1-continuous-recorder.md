@@ -211,6 +211,9 @@ New-Item -ItemType Directory -Force src/WebAudioArchive.Core, src/WebAudioArchiv
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.0" />
   </ItemGroup>
   <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\src\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />
     <ProjectReference Include="..\..\src\WebAudioArchive.Worker\WebAudioArchive.Worker.csproj" />
   </ItemGroup>

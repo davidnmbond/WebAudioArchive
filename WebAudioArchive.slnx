@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WebAudioArchive.Core/WebAudioArchive.Core.csproj" />
+    <Project Path="src/WebAudioArchive.Worker/WebAudioArchive.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/WebAudioArchive.Tests/WebAudioArchive.Tests.csproj" />
+  </Folder>
+</Solution>
