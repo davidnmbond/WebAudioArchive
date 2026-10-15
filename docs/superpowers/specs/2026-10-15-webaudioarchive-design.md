@@ -37,8 +37,10 @@ sign in with Google and fetch only their own shows; the manager can see everythi
   `21:00`; each show is `<td class="show-cell" data-show="...">`.
 - The page states no timezone. `Europe/London` is assumed and is a config value.
 - The page lists no hosts as such. Some titles contain a name ("Breakfast with Mackenzie").
-- The stream is found from https://www.burstradio.org/listen: a RadioJar widget naming a Revma stream, MP3,
-  128 kbps, 44.1 kHz, stereo (measured 2026-10-15; no ICY track titles seen).
+- The stream is found from https://www.burstradio.org/listen: a RadioJar widget (streamName in a script block)
+  naming a Revma stream, MP3, 128 kbps, 44.1 kHz, stereo (measured 2026-10-15). The stream URL answers 302
+  with a short-lived token (rj-ttl=5), so the final URL must be requested afresh on every connect. The
+  response carries icy-metaint 16000, so ICY metadata is interleaved and must be removed from the audio.
 - Nothing is scheduled between 22:00 and 09:00. With the 24x7 requirement that audio is recorded anyway and
   appears as unassigned time (automation, silence or whatever the station plays).
 - Thursday 20:00 is "Backseat Aux", confirmed by Amy as hers and Raff's.
@@ -54,7 +56,7 @@ config/stations.json
    |
  StationSession  ---------- one always-on stream connection per station
    |  raw bytes (fan-out)
-   +--> MasterRecorder ---> /data/<station>/master/<yyyy>/<MM-dd>/<HH>.mp3   (gapless hourly segments)
+   +--> MasterRecorder ---> /data/<station>/master/<yyyy>/<MM-dd>/<HHmmss>.mp3   (gapless UTC-hour segments)
    +--> Analyser (decode once) --> PCM --> ClippingDetector
    |                              +--> Transcriber (whisper) --> transcript timeline
    |                                                              +--> SwearDetector, FillerDetector
@@ -77,7 +79,7 @@ requirement to produce up to two overlapping show files from one stream.
 `config/stations.json`, validated against a JSON schema at start-up (fail loudly, naming the field):
 `id`, `name`, `listenUrl`, `scheduleUrl`, `timezone` (default `Europe/London`), `scheduleParser`
 (`burst` or `llm`), `marginBefore` and `marginAfter` (default 5 minutes each), `scheduleRefresh` (default
-15 minutes), `segmentLength` (default one hour), `watershed` (default `21:00` local), `enabled`.
+15 minutes), `watershed` (default `21:00` local), `enabled`. The segment length is fixed at one UTC hour in plan 1 and is not configurable.
 Service-wide settings (data directory, endpoints and model names for whisper and Ollama, Google client id,
 bootstrap manager email, retention) are environment variables. Secrets are only ever environment variables or
 mounted files, never committed, because the repo is public.
@@ -127,11 +129,13 @@ mounted files, never committed, because the repo is public.
 
 ### 3.5 Master recorder
 
-- Writes hourly segments aligned to the station-local clock hour: `master/<yyyy>/<MM-dd>/<HH>.mp3` plus
-  `<HH>.json` (actual start and end, bytes, gaps, ICY titles, audio format, instance id).
+- Writes segments aligned to UTC clock hours, named by UTC: master/<yyyy>/<MM-dd>/<HHmmss>.mp3 (HHmmss is the
+  first frame's arrival time) plus <HHmmss>.json (actual start and end, bytes, gaps, ICY titles, audio format,
+  instance id, endedBy). UTC naming replaces station-local naming because local clock hours repeat when the
+  clocks go back and would collide. A restart makes a new segment starting at the restart time.
 - Splits only at MP3 frame boundaries, so every segment decodes on its own and concatenating segments in order
   reproduces the broadcast bytes exactly.
-- Writes to `<HH>.mp3.part`, renamed when the segment closes. On start-up any `.part` left by a crash is
+- Writes to `<HHmmss>.mp3.part`, renamed when the segment closes. On start-up any `.part` left by a crash is
   closed and marked `"truncated": true, "reason": "crash"`.
 - Each instance logs free disk space, warns below a threshold and, below a lower threshold, **keeps recording
   and stops everything else first** (analysis, cutting, web), because the record matters most.
@@ -250,7 +254,7 @@ Both instances run the full pipeline independently on separate storage. Conseque
 ```
 /data/<station>/
   schedule.json, schedule-changes.jsonl
-  master/<yyyy>/<MM-dd>/<HH>.mp3  <HH>.json
+  master/<yyyy>/<MM-dd>/<HHmmss>.mp3  <HHmmss>.json
   shows/<yyyy>/<yyyy-MM-dd>-<HHmm>-<show-slug>/
       show.mp3  show.json  show.transcript.jsonl  show.transcript.txt  clips/
   events/<yyyy>/<MM-dd>.jsonl
