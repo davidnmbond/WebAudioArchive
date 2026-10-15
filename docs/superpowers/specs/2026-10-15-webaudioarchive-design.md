@@ -352,5 +352,11 @@ All packages pinned to exact versions.
 - Web app: Google sign-in only; roles manager and presenter; presenters see only assigned shows with margins;
   manager assigns; both instances serve their own site; bootstrap manager by configured email. The secondary
   runs `manager-only` (managers only, no presenters, not internet-facing); the primary serves presenters.
-- Retention undecided: a setting, default keep everything.
+- Primary is the test cluster (presenters, HTTPS ingress); the manager's machine is the manager-only secondary.
+- Weekly report: coverage and gaps per instance, swearing by tier with before-watershed count, clipping and
+  dead air, filler rate per show (labelled an estimate).
+- Retention: keep everything indefinitely. No automatic deletion. The retention settings exist but are off;
+  deletion is manual, by a manager, logged. Revisit if a required period is found.
+- Google OAuth clients: not yet created. The operator will be guided through creating one per instance at
+  implementation time; client id and secret come from environment variables only.
 - Song identification deferred; events timeline reserves for it.
