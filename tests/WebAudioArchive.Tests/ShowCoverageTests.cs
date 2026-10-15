@@ -98,6 +98,11 @@ public sealed class ShowCoverageTests : IDisposable
         Assert.Contains("being recorded by A", live.Summary);
         Assert.Equal("show-live", live.CssClass);
 
+        // The show that ended at T0 is not "being recorded now", though the open .part rolled at T0 is estimated to start a moment earlier.
+        SegmentFiles.Open(B, "burst", T0, T0.AddMinutes(25), firstSeq: 0, burstSeconds: 0.5);
+        var before = ShowCoverage.Classify(Show(-10, 0), Catalog(), now);
+        Assert.All(before.Recorders, r => Assert.False(r.IncludesOpenSegment));
+
         var future = ShowCoverage.Classify(Show(60, 120), Catalog(), now);
         Assert.Equal(ShowState.Future, future.State);
         Assert.Equal("show-future", future.CssClass);

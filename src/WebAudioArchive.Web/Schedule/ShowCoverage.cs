@@ -100,8 +100,9 @@ public static class ShowCoverage
         {
             var relevant = r.Segments.Where(s => s.EndUtc > from && PositionModel.AudioStartUtc(s) < to).ToList();
             var covered = WindowCoverage.Covered(relevant, from, to);
-            list.Add(new RecorderCoverage(r.Recorder, covered.Sum(i => i.Seconds), (to - from).TotalSeconds, Uncovered(covered, from, to),
-                relevant.Any(s => s.IsOpen)));
+            // Only an open segment that holds part of the show counts (the next hour's .part can reach a moment back past the end).
+            var open = relevant.Any(s => s.IsOpen && WindowCoverage.Seconds([s], from, to) >= ToleranceSeconds);
+            list.Add(new RecorderCoverage(r.Recorder, covered.Sum(i => i.Seconds), (to - from).TotalSeconds, Uncovered(covered, from, to), open));
         }
 
         ShowState state;

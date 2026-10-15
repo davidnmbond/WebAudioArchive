@@ -100,3 +100,8 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 /* Phone width: the calendar's toolbar wraps and the week grid scrolls inside its own box, never the page. */
 .pdcal-week-scroll { overflow-x: auto; }
 .clip-player-clock code { overflow-wrap: anywhere; }
+.waa-item-head { display: inline-flex; align-items: center; gap: 0.25rem; flex: none; }
+
+/* The minutes box (margin): PDTextBox does not size its input here, so give it a fixed width and keep the words on one line. */
+.waa-minutes input.form-control { width: 5rem; flex: none; }
+.waa-minutes > span { white-space: nowrap; }
