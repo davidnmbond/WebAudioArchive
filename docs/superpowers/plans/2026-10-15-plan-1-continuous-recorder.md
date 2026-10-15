@@ -763,10 +763,11 @@ public delegate void AudioHandler(ReadOnlySpan<byte> audio);
 public sealed record IcyTitle(string Title, long AtAudioByte);
 
 /// <summary>Removes interleaved ICY metadata blocks from a stream, leaving the audio bytes untouched.</summary>
-public sealed partial class IcyDemuxer(int metaInt)
+public sealed partial class IcyDemuxer(int metaInterval)
 {
     long _audioTotal;
-    int _audioLeft = metaInt;
+    readonly int _metaInt = metaInterval;
+    int _audioLeft = metaInterval;
     int _metaLeft = -1; // -1: the next byte is the length byte
     byte[] _meta = [];
     int _metaFilled;
@@ -776,7 +777,7 @@ public sealed partial class IcyDemuxer(int metaInt)
 
     public void Push(ReadOnlySpan<byte> data, AudioHandler onAudio, Action<IcyTitle> onTitle)
     {
-        if (metaInt <= 0)
+        if (_metaInt <= 0)
         {
             _audioTotal += data.Length;
             onAudio(data);
@@ -799,7 +800,7 @@ public sealed partial class IcyDemuxer(int metaInt)
                 data = data[1..];
                 if (length == 0)
                 {
-                    _audioLeft = metaInt;
+                    _audioLeft = _metaInt;
                 }
                 else
                 {
@@ -819,7 +820,7 @@ public sealed partial class IcyDemuxer(int metaInt)
                 {
                     HandleMetadata(onTitle);
                     _metaLeft = -1;
-                    _audioLeft = metaInt;
+                    _audioLeft = _metaInt;
                 }
             }
         }
