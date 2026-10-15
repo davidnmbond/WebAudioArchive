@@ -5,84 +5,102 @@
 <h1 class="h3">Player</h1>
 <p class="text-body-secondary">Pick a UTC time range; the recorded hourly segments are joined into one clip. All times are UTC.</p>
 
-<div class="card mb-3">
+<section class="card mb-3" aria-label="Clip range">
     <div class="card-body">
-        <div class="row g-2 align-items-end">
-            <div class="col-auto">
+        <div class="row g-3 align-items-end">
+            <div class="col-12 col-sm-auto">
                 <UtcDatePicker Id="player-date" Label="Date (UTC)" @bind-Value="Form.Date" />
             </div>
-            <div class="col-auto">
-                <label class="form-label mb-1" for="player-from">From (UTC, HH:mm:ss)</label>
-                <input id="player-from" type="time" step="1" class="form-control form-control-sm" value="@Form.From" @onchange="e => Form.From = Text(e)" />
+            <div class="col-6 col-sm-auto">
+                <label class="form-label mb-1 small d-block" id="player-from">From (UTC, HH:mm:ss)
+                    <PDTextBox Value="@Form.From" ValueChanged="v => Form.From = v" Placeholder="HH:mm:ss" Width="8rem" ShowClearButton="false" />
+                </label>
             </div>
-            <div class="col-auto">
-                <label class="form-label mb-1" for="player-to">To (UTC, HH:mm:ss)</label>
-                <input id="player-to" type="time" step="1" class="form-control form-control-sm" value="@Form.To" @onchange="e => Form.To = Text(e)" />
+            <div class="col-6 col-sm-auto">
+                <label class="form-label mb-1 small d-block" id="player-to">To (UTC, HH:mm:ss)
+                    <PDTextBox Value="@Form.To" ValueChanged="v => Form.To = v" Placeholder="HH:mm:ss" Width="8rem" ShowClearButton="false" />
+                </label>
             </div>
-            <div class="col-auto">
-                <label class="form-label mb-1" for="player-recorder">Recorder</label>
-                <select id="player-recorder" class="form-select form-select-sm" @bind="Form.Recorder">
-                    <option value="auto">Auto (best coverage)</option>
-                    @foreach (var r in Settings.Recorders)
-                    {
-                        <option value="@r.Id">@r.Label</option>
-                    }
-                </select>
-            </div>
-            <div class="col-auto">
-                <div class="form-check mb-1">
-                    <input id="player-margin" class="form-check-input" type="checkbox" @bind="Form.AddMargin" />
-                    <label class="form-check-label" for="player-margin">add</label>
-                    <input id="player-margin-minutes" type="number" min="0" max="60" class="form-control form-control-sm d-inline-block mx-1" style="width: 5rem" @bind="Form.MarginMinutes" />
-                    <label class="form-check-label" for="player-margin">minutes before and after</label>
+            <div class="col-12 col-sm-auto">
+                <span class="form-label mb-1 small d-block" id="player-recorder-label">Recorder</span>
+                <div class="player-recorder" id="player-recorder" role="group" aria-labelledby="player-recorder-label">
+                    <PDComboBox TItem="RecorderChoice" Items="RecorderChoices" SelectedItem="SelectedRecorder" SelectedItemChanged="OnRecorderChanged"
+                                ItemToId="c => c.Id" ItemToString="c => c.Text" Filter="RecorderChoice.Matches" />
                 </div>
             </div>
-            <div class="col-auto">
-                <button id="player-prepare" class="btn btn-primary btn-sm" @onclick="PrepareAsync" disabled="@Busy">@(Busy ? "Preparing..." : "Prepare clip")</button>
+            <div class="col-12 col-sm-auto d-flex align-items-center gap-2 flex-wrap">
+                <PDToggleSwitch Id="player-margin" Label="add" Value="@Form.AddMargin" ValueChanged="v => Form.AddMargin = v" />
+                <label class="d-flex align-items-center gap-2 mb-0" id="player-margin-minutes">
+                    <PDTextBox Type="PDInputType.Number" Value="@MarginText" ValueChanged="OnMarginChanged" Width="5rem" ShowClearButton="false" ToolTip="Minutes before and after" />
+                    <span>minutes before and after</span>
+                </label>
+            </div>
+            <div class="col-12 col-sm-auto">
+                <PDButton Id="player-prepare" Text="@(Busy ? "Preparing..." : "Prepare clip")" IconCssClass="fas fa-cut" CssClass="btn-primary"
+                          IsEnabled="@(!Busy)" Click="_ => PrepareAsync()" />
             </div>
         </div>
         <div class="form-text">A To earlier than From means the next UTC day. The longest clip is 4 hours.</div>
     </div>
-</div>
+</section>
 
 @if (Error is not null)
 {
-    <div class="alert alert-danger" id="player-error">@Error</div>
-}
-
-@if (Clip is not null)
-{
-    <div class="card mb-3" id="player-result">
-        <div class="card-body">
-            <dl class="row mb-0">
-                <dt class="col-sm-3">Recorder used</dt><dd class="col-sm-9" id="clip-recorder">@Clip.Plan.Recorder.ToUpperInvariant()</dd>
-                <dt class="col-sm-3">Requested</dt><dd class="col-sm-9 utc">@Utc(Clip.Plan.WindowFrom) to @Utc(Clip.Plan.WindowTo)</dd>
-                <dt class="col-sm-3">Clip covers</dt><dd class="col-sm-9 utc" id="clip-covers">@Utc(Clip.Plan.StartUtc) to @Utc(Clip.Plan.EndUtc)</dd>
-                <dt class="col-sm-3">Duration</dt><dd class="col-sm-9">@Duration</dd>
-                <dt class="col-sm-3">Size</dt><dd class="col-sm-9">@Size</dd>
-            </dl>
-        </div>
+    <div class="alert alert-danger d-flex gap-2 align-items-start" id="player-error" role="alert">
+        <PDLabel IconCssClass="fas fa-times-circle" />
+        <div>@Error</div>
     </div>
-
-    @if (Clip.Plan.Warnings.Count > 0)
-    {
-        <div class="alert alert-warning" id="clip-warnings">
-            <strong>Warnings</strong>
-            <ul class="mb-0">
-                @foreach (var w in Clip.Plan.Warnings)
-                {
-                    <li>@w</li>
-                }
-            </ul>
-        </div>
-    }
-
-    <ul class="small text-body-secondary" id="clip-notes">
-        @foreach (var n in Clip.Plan.Notes)
-        {
-            <li>@n</li>
-        }
-    </ul>
-
-    <ClipPlayer Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds" Timeline="@Clip.Timeline()" />
 }
+
+<PDBusyOverlay IsBusy="@Busy" OverlayCssClass="fas fa-spinner fa-spin fa-2x">
+    @if (Clip is not null)
+    {
+        @if (Clip.Plan.Warnings.Count > 0)
+        {
+            <div class="alert alert-warning" id="clip-warnings" role="status">
+                <PDLabel IconCssClass="fas fa-exclamation-triangle" Text="Warnings" TextCssClass="fw-semibold" />
+                <ul class="mb-0 mt-1">
+                    @foreach (var w in Clip.Plan.Warnings)
+                    {
+                        <li>@w</li>
+                    }
+                </ul>
+            </div>
+        }
+
+        <ClipPlayer Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds" Timeline="@Clip.Timeline()" />
+
+        <PDTabSet CssClass="mt-3" TabMinWidth="0" @bind-SelectedTabId="SelectedTab">
+            <PDTab Id="DetailsTab" Title="Clip details" IconCssClass="fas fa-info-circle">
+                <div class="p-3" id="player-result">
+                    <dl class="row mb-0">
+                        <dt class="col-sm-3">Recorder used</dt><dd class="col-sm-9" id="clip-recorder">@Clip.Plan.Recorder.ToUpperInvariant()</dd>
+                        <dt class="col-sm-3">Requested</dt><dd class="col-sm-9 utc">@Utc(Clip.Plan.WindowFrom) to @Utc(Clip.Plan.WindowTo)</dd>
+                        <dt class="col-sm-3">Clip covers</dt><dd class="col-sm-9 utc" id="clip-covers">@Utc(Clip.Plan.StartUtc) to @Utc(Clip.Plan.EndUtc)</dd>
+                        <dt class="col-sm-3">Duration</dt><dd class="col-sm-9">@Duration</dd>
+                        <dt class="col-sm-3">Size</dt><dd class="col-sm-9">@Size</dd>
+                    </dl>
+                    <ul class="small text-body-secondary mt-3 mb-0" id="clip-notes">
+                        @foreach (var n in Clip.Plan.Notes)
+                        {
+                            <li>@n</li>
+                        }
+                    </ul>
+                </div>
+            </PDTab>
+            <PDTab Id="PiecesTab" Title="@($"Joined pieces ({Clip.Plan.Pieces.Count})")" IconCssClass="fas fa-puzzle-piece">
+                <div class="p-3 table-responsive">
+                    <table class="table table-sm mb-0" id="clip-pieces">
+                        <thead><tr><th>Segment start (UTC)</th><th>From (UTC)</th><th>To (UTC)</th><th>Bytes</th><th>Open</th></tr></thead>
+                        <tbody>
+                            @foreach (var p in Clip.Plan.Pieces)
+                            {
+                                <tr><td>@Utc(p.Segment.StartUtc)</td><td>@Utc(p.StartUtc)</td><td>@Utc(p.EndUtc)</td><td>@((p.EndByte - p.StartByte).ToString("N0", CultureInfo.InvariantCulture))</td><td>@(p.Segment.IsOpen ? "yes" : "no")</td></tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </PDTab>
+        </PDTabSet>
+    }
+</PDBusyOverlay>

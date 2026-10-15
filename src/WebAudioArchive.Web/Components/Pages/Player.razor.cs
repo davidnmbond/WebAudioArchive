@@ -21,6 +21,31 @@ public sealed partial class Player
     string? Error { get; set; }
     bool Busy { get; set; }
     string? _loadedQuery;
+    static readonly Guid DetailsTab = new("0d1e5c1a-6a0e-4b8e-9a51-1f2a3b4c5d01");
+    static readonly Guid PiecesTab = new("0d1e5c1a-6a0e-4b8e-9a51-1f2a3b4c5d02");
+    Guid? SelectedTab { get; set; } = DetailsTab;
+
+    /// <summary>A recorder choice for the combo box: auto, or one configured recorder.</summary>
+    public sealed record RecorderChoice(string Id, string Text)
+    {
+        public static bool Matches(RecorderChoice c, string search) =>
+            string.IsNullOrWhiteSpace(search) || c.Text.Contains(search, StringComparison.OrdinalIgnoreCase);
+    }
+
+    List<RecorderChoice> RecorderChoices =>
+        [new("auto", "Auto (best coverage)"), .. Settings.Recorders.Select(r => new RecorderChoice(r.Id, "Recorder " + r.Label))];
+
+    RecorderChoice SelectedRecorder => RecorderChoices.FirstOrDefault(c => c.Id == Form.Recorder) ?? RecorderChoices[0];
+
+    void OnRecorderChanged(RecorderChoice? choice) => Form.Recorder = choice?.Id ?? "auto";
+
+    string MarginText => Form.MarginMinutes.ToString(CultureInfo.InvariantCulture);
+
+    void OnMarginChanged(string value)
+    {
+        if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var m)) Form.MarginMinutes = m;
+    }
+
 
     string Duration => TimeSpan.FromSeconds(Math.Round(Clip!.File.Seconds)).ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture)
                        + string.Create(CultureInfo.InvariantCulture, $" ({Clip.File.Seconds:0.0} s)");
@@ -28,8 +53,6 @@ public sealed partial class Player
     string Size => string.Create(CultureInfo.InvariantCulture, $"{Clip!.File.Bytes / 1_000_000.0:0.00} MB ({Clip.File.Bytes} bytes)");
 
     static string Utc(DateTimeOffset t) => ClipPlanner.Utc(t);
-
-    static string Text(ChangeEventArgs e) => e.Value?.ToString() ?? "";
 
     protected override void OnInitialized()
     {

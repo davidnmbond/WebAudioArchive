@@ -224,6 +224,72 @@ public sealed class WebAppTests : IAsyncLifetime
         foreach (var speed in new[] { "0.75x", "1x", "1.25x", "1.5x", "2x" }) Assert.Contains(speed, html);
     }
 
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/recordings")]
+    [InlineData("/player")]
+    public async Task Every_page_sets_the_theme_before_first_paint_and_has_the_theme_toggle(string url)
+    {
+        var html = await _client.GetStringAsync(url);
+
+        // The theme script sits in <head>, before any stylesheet, so the right theme is applied before first paint.
+        var head = html[..html.IndexOf("</head>", StringComparison.Ordinal)];
+        var script = head.IndexOf("id=\"theme-boot\"", StringComparison.Ordinal);
+        Assert.True(script > 0);
+        Assert.True(script < head.IndexOf("stylesheet", StringComparison.Ordinal));
+        Assert.Contains("prefers-color-scheme: dark", head);
+        Assert.Contains("data-bs-theme", head);
+        Assert.Contains("localStorage", head);
+        foreach (var choice in new[] { "auto", "light", "dark" })
+            Assert.Contains($"data-theme-choice=\"{choice}\"", html);
+
+        // Library assets: Font Awesome for its icons, then its own and its scoped styles.
+        var fa = head.IndexOf("lib/font-awesome/css/all.min.css", StringComparison.Ordinal);
+        var lib = head.IndexOf("_content/PanoramicData.Blazor/css/main.min.css", StringComparison.Ordinal);
+        Assert.True(fa > 0 && fa < lib);
+        Assert.Contains("WebAudioArchive.Web.styles.css", head);
+    }
+
+    [Theory]
+    [InlineData("/lib/font-awesome/css/all.min.css", "text/css")]
+    [InlineData("/lib/font-awesome/webfonts/fa-solid-900.woff2", "font/woff2")]
+    [InlineData("/lib/bootstrap/bootstrap.min.css", "text/css")]
+    [InlineData("/css/app.css", "text/css")]
+    public async Task Vendored_assets_are_served_locally(string url, string type)
+    {
+        var response = await _client.GetAsync(url);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(type, response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task App_css_uses_bootstrap_variables_and_hides_the_programmatic_heading_focus_ring()
+    {
+        var css = await _client.GetStringAsync("/css/app.css");
+
+        Assert.Contains("h1:focus", css);
+        Assert.Contains("outline: none", css);
+        Assert.Contains("var(--bs-", css);
+        Assert.DoesNotMatch("#[0-9a-fA-F]{3,6}\\b", css);
+    }
+
+    [Fact]
+    public async Task Pages_use_the_library_components()
+    {
+        var status = await _client.GetStringAsync("/");
+        Assert.Contains("pd-progressbar", status);
+        Assert.Contains("pdtoolbar", status);
+
+        var recordings = await _client.GetStringAsync("/recordings");
+        Assert.Contains("pdtoggleswitch", recordings);
+        Assert.Contains("pddatetime", recordings);
+
+        var player = await _client.GetStringAsync("/player?from=2026-10-15T15:52:00Z&to=2026-10-15T15:53:00Z");
+        Assert.Contains("pd-combobox", player);
+        Assert.Contains("pd-busy-overlay", player);
+        Assert.Contains("Joined pieces (1)", player);
+    }
+
     [Fact]
     public async Task Player_page_without_a_link_shows_the_form()
     {

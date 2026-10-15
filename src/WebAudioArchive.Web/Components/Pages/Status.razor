@@ -4,10 +4,12 @@
 <PageTitle>Status - WebAudioArchive</PageTitle>
 
 <h1 class="h3">Status</h1>
-<p class="text-body-secondary">
-    Station <strong>@Settings.Station</strong>. Checked at <span class="utc">@CheckedText</span>; refreshes every @RefreshSeconds s.
-    <button class="btn btn-sm btn-outline-secondary ms-2" @onclick="RefreshAsync">Refresh now</button>
-</p>
+<PDToolbar CssClass="mb-3">
+    <PDToolbarPlaceholder>
+        <span class="text-body-secondary toolbar-text">Station <strong>@Settings.Station</strong>. Checked at <span class="utc">@CheckedText</span>; refreshes every @RefreshSeconds s.</span>
+    </PDToolbarPlaceholder>
+    <PDToolbarButton Key="refresh" Text="Refresh now" IconCssClass="fas fa-sync-alt" CssClass="btn-outline-secondary" Size="ButtonSizes.Small" Click="_ => RefreshAsync()" />
+</PDToolbar>
 
 @if (Statuses is null)
 {
@@ -19,14 +21,21 @@ else
         @foreach (var s in Statuses)
         {
             <div class="col-12 col-xl-6">
-                <div class="card border-3 @BorderClass(s.Level)" data-recorder="@s.Recorder.Id" data-level="@s.Level">
-                    <div class="card-header d-flex align-items-center">
-                        <span class="badge @BadgeClass(s.Level) me-2">@LevelText(s.Level)</span>
+                <section class="card border-2 @BorderClass(s.Level)" data-recorder="@s.Recorder.Id" data-level="@s.Level" aria-label="Recorder @s.Recorder.Label">
+                    <div class="card-header d-flex align-items-center flex-wrap gap-2">
+                        <PDLabel Text="@LevelText(s.Level)" IconCssClass="@LevelIcon(s.Level)" CssClass="@($"badge {BadgeClass(s.Level)} status-badge")" />
                         <strong>Recorder @s.Recorder.Label</strong>
                         <span class="ms-auto text-body-secondary small">@(s.Health?.Instance ?? "")</span>
                     </div>
                     <div class="card-body">
                         <p class="mb-2">@s.Summary</p>
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between small mb-1">
+                                <span>Coverage, last 24 hours</span>
+                                <span>@Coverage(s)</span>
+                            </div>
+                            <PDProgressBar Value="@(s.Coverage24hFraction * 100)" Total="100" DecimalPlaces="1" Height="1.25rem" />
+                        </div>
                         <table class="table table-sm mb-0">
                             <tbody>
                                 <tr><th scope="row">Connected</th><td>@YesNo(s.Health?.Connected)</td></tr>
@@ -35,13 +44,12 @@ else
                                 <tr><th scope="row">Current segment start</th><td class="utc">@Utc(s.Health?.CurrentSegmentStartUtc)</td></tr>
                                 <tr><th scope="row">Reconnects</th><td>@(s.Health?.Reachable == true ? s.Health.Reconnects.ToString(CultureInfo.InvariantCulture) : "-")</td></tr>
                                 <tr><th scope="row">Recorder uptime</th><td>@Seconds(s.Health?.UptimeSeconds)</td></tr>
-                                <tr><th scope="row">Coverage, last 24 hours</th><td>@Coverage(s)</td></tr>
                                 <tr><th scope="row">Latest segment</th><td class="utc">@Latest(s)</td></tr>
                                 <tr><th scope="row">Data root</th><td><code>@s.Recorder.Root</code> (read-only)</td></tr>
                             </tbody>
                         </table>
                     </div>
-                </div>
+                </section>
             </div>
         }
     </div>

@@ -1,0 +1,9 @@
+@* Auto (follows the operating system), Light or Dark. The clicks are handled by the theme script in App.razor's head,
+   so the choice works before and without the Blazor circuit and is kept in localStorage when that is available. *@
+<div class="btn-group btn-group-sm theme-toggle" role="group" aria-label="Colour theme">
+    @foreach (var (value, text, icon) in Choices)
+    {
+        <PDButton Text="@text" IconCssClass="@icon" CssClass="btn-outline-secondary" Size="ButtonSizes.Small" ToolTip="@($"Theme: {text}")"
+                  Attributes="@AttributesFor(value)" />
+    }
+</div>

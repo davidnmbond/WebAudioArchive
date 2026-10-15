@@ -1,17 +1,28 @@
 @inherits LayoutComponentBase
 
-<nav class="navbar navbar-expand bg-body-tertiary border-bottom mb-3">
-    <div class="container-fluid">
-        <span class="navbar-brand">WebAudioArchive</span>
-        <ul class="navbar-nav me-auto">
-            <li class="nav-item"><NavLink class="nav-link" href="" Match="NavLinkMatch.All">Status</NavLink></li>
-            <li class="nav-item"><NavLink class="nav-link" href="recordings">Recordings</NavLink></li>
-            <li class="nav-item"><NavLink class="nav-link" href="player">Player</NavLink></li>
-        </ul>
-        <span class="badge text-bg-secondary me-2" title="Every time on these pages is UTC">All times UTC</span>
-        <span class="badge text-bg-warning" title="This MVP has no sign-in. Publish it on 127.0.0.1 only.">No sign-in: loopback only</span>
-    </div>
-</nav>
+<header class="app-header border-bottom mb-3">
+    <PDToolbar CssClass="app-toolbar container-fluid py-2">
+        <PDToolbarPlaceholder ItemCssClass="me-2">
+            <span class="app-brand"><i class="fas fa-broadcast-tower me-1" aria-hidden="true"></i>WebAudioArchive</span>
+        </PDToolbarPlaceholder>
+        <PDToolbarPlaceholder>
+            <nav aria-label="Pages" class="d-flex flex-wrap gap-1">
+                <PDNavLink href="" Match="NavLinkMatch.All" class="btn btn-sm btn-outline-primary" ActiveClass="active"><i class="fas fa-heartbeat me-1" aria-hidden="true"></i>Status</PDNavLink>
+                <PDNavLink href="recordings" class="btn btn-sm btn-outline-primary" ActiveClass="active"><i class="fas fa-list me-1" aria-hidden="true"></i>Recordings</PDNavLink>
+                <PDNavLink href="player" class="btn btn-sm btn-outline-primary" ActiveClass="active"><i class="fas fa-play me-1" aria-hidden="true"></i>Player</PDNavLink>
+            </nav>
+        </PDToolbarPlaceholder>
+        <PDToolbarPlaceholder ShiftRight="true">
+            <span class="badge text-bg-secondary" title="Every time on these pages is UTC">All times UTC</span>
+        </PDToolbarPlaceholder>
+        <PDToolbarPlaceholder>
+            <span class="badge text-bg-warning" title="This MVP has no sign-in. Publish it on 127.0.0.1 only.">No sign-in: loopback only</span>
+        </PDToolbarPlaceholder>
+        <PDToolbarPlaceholder>
+            <ThemeToggle />
+        </PDToolbarPlaceholder>
+    </PDToolbar>
+</header>
 
 <main class="container-fluid pb-4">
     @Body

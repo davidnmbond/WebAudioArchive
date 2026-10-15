@@ -63,6 +63,13 @@ public sealed partial class Status
         _ => "PROBLEM",
     };
 
+    static string LevelIcon(HealthLevel l) => l switch
+    {
+        HealthLevel.Green => "fas fa-check-circle",
+        HealthLevel.Amber => "fas fa-exclamation-triangle",
+        _ => "fas fa-times-circle",
+    };
+
     static string BadgeClass(HealthLevel l) => l switch
     {
         HealthLevel.Green => "text-bg-success",

@@ -1,11 +1,53 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="light">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <base href="/" />
+    <script id="theme-boot">
+        // Runs before first paint, so there is no flash of the wrong theme. The choice (auto, light or dark) is kept in
+        // localStorage when it is available; auto follows the operating system and changes live with it.
+        (function () {
+            var key = "waa-theme";
+            var media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+            function choice() {
+                try { var v = localStorage.getItem(key); return v === "light" || v === "dark" ? v : "auto"; } catch (e) { return "auto"; }
+            }
+            function mark() {
+                var c = choice();
+                var buttons = document.querySelectorAll("button[data-theme-choice]");
+                for (var i = 0; i < buttons.length; i++) {
+                    var on = buttons[i].getAttribute("data-theme-choice") === c;
+                    buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+                    buttons[i].classList.toggle("active", on);
+                }
+            }
+            function apply() {
+                var c = choice();
+                var dark = c === "dark" || (c === "auto" && media !== null && media.matches);
+                document.documentElement.setAttribute("data-bs-theme", dark ? "dark" : "light");
+                document.documentElement.setAttribute("data-theme", c);
+                mark();
+            }
+            apply();
+            if (media !== null && media.addEventListener) media.addEventListener("change", apply);
+            document.addEventListener("click", function (e) {
+                var b = e.target && e.target.closest ? e.target.closest("button[data-theme-choice]") : null;
+                if (!b) return;
+                try { localStorage.setItem(key, b.getAttribute("data-theme-choice")); } catch (err) { }
+                apply();
+            });
+            document.addEventListener("DOMContentLoaded", mark);
+            // Blazor renders the toggle after start-up; keep its pressed state in step.
+            new MutationObserver(function () { mark(); }).observe(document.documentElement, { childList: true, subtree: true });
+            window.waaTheme = { apply: apply, choice: choice };
+        })();
+    </script>
     <link rel="stylesheet" href="lib/bootstrap/bootstrap.min.css" />
+    <link rel="stylesheet" href="lib/font-awesome/css/all.min.css" />
     <link rel="stylesheet" href="_content/PanoramicData.Blazor/css/main.min.css" />
+    <link rel="stylesheet" href="WebAudioArchive.Web.styles.css" />
     <link rel="stylesheet" href="css/app.css" />
     <HeadOutlet @rendermode="InteractiveServer" />
 </head>

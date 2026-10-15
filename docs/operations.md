@@ -133,3 +133,16 @@ Upgrading: the recorders and the web app are upgraded independently. A web chang
 the recorders must not be restarted for one. Rebuild and restart only the web app with:
 
     docker compose -f docker/docker-compose.yml up -d --build web
+
+Look and feel: the pages follow the operating system's light or dark preference ("Auto"), or a choice of Light or
+Dark from the toggle at the top right, remembered in the browser (localStorage; without it the page simply follows
+the OS). The theme is set by a small script in the page head before anything is drawn, so there is no flash of the
+wrong theme. The UI uses the PanoramicData.Blazor components (toolbar, table and pager, tab set, progress bar, date
+picker, text boxes, combo box, toggle switch, buttons, busy overlay).
+
+Vendored front-end files (served from the container, no CDN, so the app works offline):
+
+- Bootstrap 5.3.3 CSS (`wwwroot/lib/bootstrap`, MIT, licence beside it).
+- Font Awesome Free 5.14.0 (`wwwroot/lib/font-awesome`: `css/all.min.css` and the woff2, woff and ttf fonts), the same
+  version the PanoramicData.Blazor demo pins; the library's icons (pager, sort arrows, buttons) need it. Licence file
+  beside it: icons CC BY 4.0, fonts SIL OFL 1.1, code MIT.

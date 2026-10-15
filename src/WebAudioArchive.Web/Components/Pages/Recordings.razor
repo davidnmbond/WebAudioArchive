@@ -5,13 +5,20 @@
 <h1 class="h3">Recordings</h1>
 <p class="text-body-secondary">Every master segment of station <strong>@Settings.Station</strong> from every recorder, newest first. All times are UTC.</p>
 
-<div class="d-flex flex-wrap gap-2 align-items-end mb-3">
-    <UtcDatePicker Id="recordings-date" Label="Date (UTC)" Value="FilterDate" ValueChanged="OnDateChangedAsync" />
-    <button class="btn btn-sm btn-outline-secondary" @onclick="ClearDateAsync">All dates</button>
-    <button class="btn btn-sm btn-outline-secondary" @onclick="ReloadAsync">Reload</button>
-    <span class="ms-2 text-body-secondary small" id="recordings-count">@Provider.Rows.Count segments@(FilterDate is null ? "" : " on " + FilterDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + " UTC")</span>
-</div>
+<PDToolbar CssClass="mb-3 align-items-end">
+    <PDToolbarPlaceholder>
+        <PDToggleSwitch Id="recordings-filter" Label="Only one UTC date" Value="@Filtering" ValueChanged="OnFilteringChangedAsync" />
+    </PDToolbarPlaceholder>
+    <PDToolbarPlaceholder>
+        <UtcDatePicker Id="recordings-date" Label="Date (UTC)" Value="FilterDate" ValueChanged="OnDateChangedAsync" Fallback="Today" IsEnabled="Filtering" />
+    </PDToolbarPlaceholder>
+    <PDToolbarButton Key="reload" Text="Reload" IconCssClass="fas fa-sync-alt" CssClass="btn-outline-secondary" Size="ButtonSizes.Small" Click="_ => ReloadAsync()" />
+    <PDToolbarPlaceholder>
+        <span class="text-body-secondary small" id="recordings-count">@Provider.Rows.Count segments@(Filtering && FilterDate is not null ? " on " + FilterDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + " UTC" : "")</span>
+    </PDToolbarPlaceholder>
+</PDToolbar>
 
+<div class="table-responsive">
 <PDTable @ref="Table"
          TItem="RecordingRow"
          Id="recordings-table"
@@ -33,6 +40,7 @@
     <PDColumn TItem="RecordingRow" Id="gaps" Field="r => r.Gaps" Title="Gaps" />
     <PDColumn TItem="RecordingRow" Id="open" Field="r => r.Open" Title="Open" />
     <PDColumn TItem="RecordingRow" Id="play" Title="Play" Sortable="false">
-        <Template Context="row"><a class="btn btn-sm btn-primary" href="@row.PlayerUrl">Play</a></Template>
+        <Template Context="row"><PDLinkButton Url="@row.PlayerUrl" Text="Play" IconCssClass="fas fa-play" CssClass="btn-primary" Size="ButtonSizes.Small" ToolTip="Open this segment in the Player" /></Template>
     </PDColumn>
 </PDTable>
+</div>
