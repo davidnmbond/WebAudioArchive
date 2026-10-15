@@ -1,0 +1,11 @@
+{
+  "stations": [
+    {
+      "id": "burst",
+      "name": "Burst Radio",
+      "listenUrl": "https://www.burstradio.org/listen",
+      "scheduleUrl": "https://www.burstradio.org/schedule",
+      "timezone": "Europe/London"
+    }
+  ]
+}
