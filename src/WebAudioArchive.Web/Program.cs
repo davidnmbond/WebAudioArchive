@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using PanoramicData.Blazor.Extensions;
 using WebAudioArchive.Web;
 using WebAudioArchive.Web.Clips;
@@ -36,6 +37,11 @@ catch (SettingsException ex)
 if (builder.Configuration["urls"] is null && Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is null)
     builder.WebHost.UseUrls($"http://+:{Setting("WAA_PORT") ?? "8080"}");
 
+// Keys for the circuit and antiforgery cookies live in the cache volume, so an open page survives a web restart.
+// Housekeeping only touches clip files at the top of the cache, never this folder.
+builder.Services.AddDataProtection()
+    .SetApplicationName("WebAudioArchive.Web")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(settings.CacheDir, "keys")));
 builder.Services.AddSingleton(settings);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<SegmentCatalog>();
