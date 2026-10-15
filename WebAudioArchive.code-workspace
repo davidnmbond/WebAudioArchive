@@ -1,0 +1,12 @@
+{
+  "folders": [
+    { "path": "." },
+    {
+      "name": "PanoramicData Skills (shared, do not edit here)",
+      "path": "../PanoramicData.Skills/.github/skills"
+    }
+  ],
+  "settings": {
+    "powershell.cwd": "WebAudioArchive"
+  }
+}

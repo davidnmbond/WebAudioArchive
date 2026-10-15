@@ -1,0 +1,23 @@
+# The web app (Status, Recordings, Player and the clip API). Built and run separately from the recorder image, so a web
+# change never rebuilds or restarts a recorder: docker compose -f docker/docker-compose.yml up -d --build web
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY global.json Directory.Build.props ./
+COPY src/WebAudioArchive.Core/ src/WebAudioArchive.Core/
+COPY src/WebAudioArchive.Web/ src/WebAudioArchive.Web/
+RUN dotnet publish src/WebAudioArchive.Web -c Release -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+WORKDIR /app
+COPY --from=build /app .
+ENV WAA_STATION=burst \
+    WAA_CACHE=/cache \
+    WAA_PORT=8080
+# The data is mounted read-only at /data; the clip cache is the only place this container writes.
+RUN mkdir -p /cache && chown $APP_UID /cache
+VOLUME /cache
+EXPOSE 8080
+USER $APP_UID
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD ["dotnet", "WebAudioArchive.Web.dll", "--healthcheck"]
+ENTRYPOINT ["dotnet", "WebAudioArchive.Web.dll"]

@@ -18,3 +18,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f docker/Dockerfile -t webaudioarchive:ci .
+      - run: docker build -f docker/Dockerfile.web -t webaudioarchive-web:ci .
