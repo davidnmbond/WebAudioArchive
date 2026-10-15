@@ -191,6 +191,16 @@ public sealed class ClipPlannerTests : IDisposable
     }
 
     [Fact]
+    public void A_fraction_of_a_second_more_coverage_is_still_a_tie_that_goes_to_A()
+    {
+        // As seen live across 16:00: B's segments started and rolled a few milliseconds apart from A's.
+        SegmentFiles.Closed(Root("a"), "burst", T0.AddSeconds(0.3), 60, firstSeq: 0);
+        SegmentFiles.Closed(Root("b"), "burst", T0, 60, firstSeq: 0);
+
+        Assert.Equal("a", Plan(Window(T0, T0.AddSeconds(50)), Catalog("a", "b")).Recorder);
+    }
+
+    [Fact]
     public void When_both_recorders_have_gaps_the_clip_comes_from_one_and_says_they_are_not_mixed()
     {
         SegmentFiles.Closed(Root("a"), "burst", T0, 60, firstSeq: 0,

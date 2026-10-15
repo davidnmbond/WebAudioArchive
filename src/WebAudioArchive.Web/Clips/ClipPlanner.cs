@@ -59,7 +59,7 @@ public static class ClipPlanner
             .ToList();
 
         var chosen = request.Recorder == "auto"
-            ? candidates.Where(c => c.Segments.Count > 0).OrderByDescending(c => Math.Round(coverage[c.Recorder], 3)).FirstOrDefault()
+            ? BestCovered(candidates, coverage)
             : candidates.First(c => c.Recorder == request.Recorder);
 
         if (chosen.Recorder is null || chosen.Segments.Count == 0)
@@ -95,6 +95,22 @@ public static class ClipPlanner
         notes.Add(AccuracyNote);
 
         return new ClipPlan(chosen.Recorder, request.From, request.To, from, to, pieces, warnings, notes, coverage);
+    }
+
+    /// <summary>
+    /// The recorder covering most of the window. Differences under <see cref="BreakSeconds"/> (the two connections never
+    /// start or roll at exactly the same instant) count as a tie, and ties go to the first configured recorder (A).
+    /// </summary>
+    static (string Recorder, List<CatalogSegment> Segments) BestCovered(
+        List<(string Recorder, List<CatalogSegment> Segments)> candidates, Dictionary<string, double> coverage)
+    {
+        (string Recorder, List<CatalogSegment> Segments) best = default;
+        foreach (var c in candidates.Where(c => c.Segments.Count > 0))
+        {
+            if (best.Recorder is null || coverage[c.Recorder] > coverage[best.Recorder] + BreakSeconds) best = c;
+        }
+
+        return best;
     }
 
     static (DateTimeOffset From, DateTimeOffset To) Window(ClipRequest r, DateTimeOffset now, TimeSpan maxClip, List<string> warnings)
