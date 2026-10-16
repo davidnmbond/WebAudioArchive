@@ -117,6 +117,25 @@ Pages:
   (the clip's real start plus the position, following any jump across a gap), which the player itself does not know.
   A link such as `/player?from=2026-10-15T15:15:00Z&to=2026-10-15T15:16:00Z&recorder=auto` prepares the clip on load.
 
+Rendering without flicker. The pages are prerendered on the server and then taken over by the interactive circuit,
+which draws them again from scratch; each page makes that second render match the first, so the hand-over shows no
+change:
+
+- Status shows the last reading at once (with the time it was read) and refreshes behind it, rather than drawing
+  "Reading the recorders..." between the prerendered cards and the new ones. A reading older than 15 s is read again
+  before a page is prerendered.
+- Show and Player take a clip that is already in the cache in the same render, so the page does not draw the busy
+  overlay without a player first. Only a clip that has to be built shows the overlay.
+- The calendars keep their scroll position: Shows keeps where its week grid was scrolled to (per browser tab) through
+  the hand-over, view switches and Back from a show; Recordings starts its grid at three hours before now. Both are
+  placed by `wwwroot/js/calendar-state.js` before the frame is painted (PDCalendar's own ScrollToHour scrolls after a
+  frame at the top has been drawn). The Shows week and view are kept in the address (`?view=...&date=...`), so Back
+  from a show returns to the same week.
+- The Recordings table says "Loading recordings..." until it has its rows (PDTable reads them after its first render).
+- The Font Awesome fonts are preloaded, so icons do not appear after the text and shift it.
+- Idle pages do not churn: the Shows calendar changes only its current time line once a minute, and Status changes only
+  the text of its readings every 15 s.
+
 Schedule (the Shows tab):
 
 - The web app reads the station's `scheduleUrl` and `timezone` from the stations config (`WAA_STATIONS_CONFIG`; in
