@@ -44,14 +44,31 @@ public sealed class ClipService(WebSettings settings, SegmentCatalog catalog, Ti
 
     public PreparedClip Prepare(string? station, ClipRequest request)
     {
+        var plan = Plan(station, request);
+        var file = _builder.Build(settings.Station, plan);
+        return new PreparedClip(settings.Station, file, plan);
+    }
+
+    /// <summary>
+    /// The clip for this request when it is already in the cache, without building anything (planning only reads the
+    /// catalog), so a page can show it in the same render rather than drawing a busy state first and the player after.
+    /// Null when the clip would have to be built; then call <see cref="Prepare"/> off the render thread. Invalid requests
+    /// throw <see cref="ClipException"/> as <see cref="Prepare"/> does.
+    /// </summary>
+    public PreparedClip? TryPrepareCached(string? station, ClipRequest request)
+    {
+        var plan = Plan(station, request);
+        return _builder.TryReuse(settings.Station, plan) is { } file ? new PreparedClip(settings.Station, file, plan) : null;
+    }
+
+    ClipPlan Plan(string? station, ClipRequest request)
+    {
         if (station is not null && station != settings.Station)
             throw new ClipException(400, $"Unknown station '{station}'. This app serves '{settings.Station}'.");
         if (request.Recorder != "auto" && settings.Find(request.Recorder) is null)
             throw new ClipException(400, $"Unknown recorder '{request.Recorder}'. Use auto or one of: {string.Join(", ", settings.Recorders.Select(r => r.Id))}.");
 
-        var plan = ClipPlanner.Plan(request, catalog.All(), time.GetUtcNow(), ClipPlanner.DefaultMaxClip);
-        var file = _builder.Build(settings.Station, plan);
-        return new PreparedClip(settings.Station, file, plan);
+        return ClipPlanner.Plan(request, catalog.All(), time.GetUtcNow(), ClipPlanner.DefaultMaxClip);
     }
 
     /// <summary>Parses the API's query values. Times are ISO 8601; a time without an offset is taken as UTC. Margins are minutes.</summary>

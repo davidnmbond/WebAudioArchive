@@ -44,6 +44,12 @@
             window.waaTheme = { apply: apply, choice: choice };
         })();
     </script>
+    <script src="js/calendar-state.js"></script>
+    @* The icon fonts are fetched up front: otherwise the browser asks for them only once it lays out the first icon, so the
+       page is painted without icons and then shifts as they arrive (font-display: block), and the regular face used by
+       a few icons arrived only on the first visit to the Shows page. *@
+    <link rel="preload" href="lib/font-awesome/webfonts/fa-solid-900.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="lib/font-awesome/webfonts/fa-regular-400.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="lib/bootstrap/bootstrap.min.css" />
     <link rel="stylesheet" href="lib/font-awesome/css/all.min.css" />
     <link rel="stylesheet" href="_content/PanoramicData.Blazor/css/main.min.css" />

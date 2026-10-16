@@ -18,7 +18,7 @@
     </PDToolbarPlaceholder>
 </PDToolbar>
 
-<section class="mb-4" aria-label="Recordings calendar" id="recordings-calendar">
+<section class="mb-4" aria-label="Recordings calendar" id="recordings-calendar" data-scroll-hour="@ScrollHour">
     <h2 class="h5">Calendar</h2>
     <p class="small text-body-secondary mb-2">
         Each recorder's hourly segments and its recording gaps, by UTC day and hour. Select one to play that range in the Player.
@@ -37,7 +37,6 @@
                 FirstDayOfWeek="DayOfWeek.Monday"
                 TimeZone="TimeZoneInfo.Utc"
                 Clock="Time"
-                ScrollToHour="ScrollHour"
                 ScrollHeight="28rem"
                 MinItemHeight="18"
                 TimeFormat="HH:mm"
@@ -59,7 +58,8 @@
          PageCriteria="Paging"
          PageSizeChoices="PageSizes"
          ShowOverlay="false"
-         NoDataMessage="No recordings found.">
+         NoDataMessage="@(TableReady ? "No recordings found." : "Loading recordings...")"
+         Ready="() => TableReady = true">
     <PDColumn TItem="RecordingRow" Id="recorder" Field="r => r.Recorder" Title="Recorder" />
     <PDColumn TItem="RecordingRow" Id="start" Field="r => r.StartUtc" Title="Start (UTC)" Format="yyyy-MM-dd HH:mm:ss" />
     <PDColumn TItem="RecordingRow" Id="end" Field="r => r.EndUtc" Title="End (UTC)" Format="yyyy-MM-dd HH:mm:ss" />

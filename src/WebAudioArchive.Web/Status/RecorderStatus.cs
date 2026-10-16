@@ -103,12 +103,32 @@ public static class StatusRules
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && v.TryGetDateTimeOffset(out var t) ? t.ToUniversalTime() : null;
 }
 
+/// <summary>The recorders' statuses and the UTC time they were read.</summary>
+public sealed record StatusSnapshot(IReadOnlyList<RecorderStatus> Statuses, DateTimeOffset CheckedUtc);
+
 /// <summary>Builds the Status page: each recorder's health (fetched server side) and its last 24 hours of coverage.</summary>
 public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, IHttpClientFactory http, TimeProvider time)
 {
     public const string HttpClientName = "recorder-health";
 
-    public async Task<IReadOnlyList<RecorderStatus>> GetAsync(CancellationToken ct)
+    /// <summary>
+    /// The most recent statuses read by anyone, so that a page can show them at once (with the time they were read) and
+    /// refresh behind them, rather than first rendering an empty "reading" state. Without it the Status page drew its
+    /// cards when prerendered, then nothing when the circuit started, then the cards again a few hundred ms later.
+    /// </summary>
+    public StatusSnapshot? Last { get; private set; }
+
+    public async Task<IReadOnlyList<RecorderStatus>> GetAsync(CancellationToken ct) => (await ReadAsync(ct)).Statuses;
+
+    /// <summary>Reads every recorder now and keeps the result as <see cref="Last"/>.</summary>
+    public async Task<StatusSnapshot> ReadAsync(CancellationToken ct)
+    {
+        var snapshot = new StatusSnapshot(await ReadStatusesAsync(ct), time.GetUtcNow());
+        Last = snapshot;
+        return snapshot;
+    }
+
+    async Task<IReadOnlyList<RecorderStatus>> ReadStatusesAsync(CancellationToken ct)
     {
         var now = time.GetUtcNow();
         var tasks = settings.Recorders.Select(async r =>

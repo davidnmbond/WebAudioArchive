@@ -78,7 +78,8 @@ public sealed partial class Player
         try
         {
             var request = Form.ToRequest();
-            Clip = await Task.Run(() => Clips.Prepare(null, request));
+            // A clip already in the cache is shown in this same render; only a new one is built off the render thread.
+            Clip = Clips.TryPrepareCached(null, request) ?? await Task.Run(() => Clips.Prepare(null, request));
             Markers = ClipMarkers.ForPlayer(Clip);
         }
         catch (ClipException ex)

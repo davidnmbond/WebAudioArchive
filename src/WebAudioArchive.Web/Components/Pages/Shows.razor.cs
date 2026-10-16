@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.AspNetCore.Components;
+using Microsoft.JSInterop;
 using PanoramicData.Blazor.Enums;
 using WebAudioArchive.Web.Clips;
 using WebAudioArchive.Web.Schedule;
@@ -16,6 +17,7 @@ public sealed partial class Shows
     [Inject] public required WebSettings Settings { get; set; }
     [Inject] public required TimeProvider Time { get; set; }
     [Inject] public required NavigationManager Nav { get; set; }
+    [Inject] public required IJSRuntime JS { get; set; }
 
     /// <summary>?view=week|month|agenda and ?date=yyyy-MM-dd (a UTC date) pick what is shown first.</summary>
     [SupplyParameterFromQuery(Name = "view")] public string? QueryView { get; set; }
@@ -80,6 +82,44 @@ public sealed partial class Shows
         finally
         {
             Loading = false;
+        }
+    }
+
+    // The calendar raises these, then OnVisibleRangeChanged, then renders once. They must not await anything, or the
+    // calendar would render the new week with the old week's items (an empty grid) before the new items are loaded.
+    void OnViewChanged(CalendarView view)
+    {
+        View = view;
+        KeepInAddress();
+    }
+
+    void OnDateChanged(DateOnly? date)
+    {
+        FocusDate = date;
+        KeepInAddress();
+    }
+
+    /// <summary>The address of the shown view and date, such as shows?view=month&amp;date=2026-10-19 (a UTC date).</summary>
+    public static string AddressFor(CalendarView view, DateOnly date) =>
+        $"shows?view={view.ToString().ToLowerInvariant()}&date={date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}";
+
+    // Puts the shown view and date in the address without a navigation (so nothing re-renders and focus stays on the
+    // calendar), so that Back from a show comes back to the same week and view. Not awaited; see above.
+    void KeepInAddress()
+    {
+        var date = FocusDate ?? DateOnly.FromDateTime(Time.GetUtcNow().UtcDateTime);
+        _ = ReplaceAddressAsync(AddressFor(View, date));
+    }
+
+    async Task ReplaceAddressAsync(string url)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("waaCalendar.replaceUrl", url);
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or TaskCanceledException or InvalidOperationException)
+        {
+            // Only the address is not updated; Back then shows the current week.
         }
     }
 

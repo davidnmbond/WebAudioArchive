@@ -84,7 +84,9 @@ public sealed partial class ShowPage
             var now = Time.GetUtcNow();
             Coverage = ShowCoverage.Classify(Show, Catalog.All(), now);
             var request = ShowTimeline.Request(Show, MarginMinutes, Recorder, now);
-            var clip = await Task.Run(() => Clips.Prepare(null, request));
+            // A clip already in the cache (always, after the prerender built it) is shown in this same render, so the page
+            // does not draw the busy overlay without a player and then the player; only a new clip is built off the render thread.
+            var clip = Clips.TryPrepareCached(null, request) ?? await Task.Run(() => Clips.Prepare(null, request));
             if (Coverage.State == ShowState.Partial)
                 Warnings.Add("Only part of this show was recorded; the player plays what exists, joined across the gaps listed above.");
             Warnings.AddRange(clip.Plan.Warnings);

@@ -22,6 +22,7 @@ public sealed class WebAppTests : IAsyncLifetime
     readonly ManualTimeProvider _time = new(T0.AddHours(1).AddMinutes(30));
     WebApplicationFactory<WebEntryPoint> _factory = null!;
     HttpClient _client = null!;
+    StubHandler _health = null!;
 
     string DataA => Path.Combine(_root, "data", "a");
     string DataB => Path.Combine(_root, "data", "b");
@@ -41,7 +42,7 @@ public sealed class WebAppTests : IAsyncLifetime
         SegmentFiles.Closed(DataB, "burst", T0.AddHours(1), 600, firstSeq: 0, burstSeconds: 5,
             gaps: [new SegmentGap(T0.AddHours(1).AddMinutes(2), T0.AddHours(1).AddMinutes(2).AddSeconds(3), 3, "end-of-stream")]);
 
-        var stub = new StubHandler(req => req.RequestUri!.Host == "recorder-a"
+        var stub = _health = new StubHandler(req => req.RequestUri!.Host == "recorder-a"
             ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(HealthA) }
             : throw new HttpRequestException("Connection refused (recorder-b:8080)"));
 
@@ -379,5 +380,107 @@ public sealed class WebAppTests : IAsyncLifetime
         Assert.Contains("WAA_STATIONS_CONFIG", html);
         Assert.Contains("href=\"recordings\" id=\"schedule-fallback\"", html);
         Assert.DoesNotContain("pdcal", html);
+    }
+
+    // Flicker: the page's first interactive render must match the prerendered one, so the circuit start shows no change.
+
+    [Fact]
+    public async Task Status_page_reuses_a_fresh_reading_instead_of_reading_again()
+    {
+        await _client.GetStringAsync("/");
+        var reads = _health.Requests.Count;
+        Assert.Equal(2, reads); // both recorders once
+
+        // Within one refresh period the reading is reused, as the circuit's first render does after the prerender.
+        _time.Advance(TimeSpan.FromSeconds(web::WebAudioArchive.Web.Components.Pages.Status.RefreshSeconds - 1));
+        var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/"));
+        Assert.Equal(reads, _health.Requests.Count);
+        Assert.Contains("data-level=\"Green\"", html);
+        Assert.DoesNotContain("Reading the recorders", html);
+        Assert.Contains("Checked at <span class=\"utc\">2026-10-15 16:30:00 UTC</span>", html); // when it was read, not now
+
+        // A stale reading is read again before it is prerendered.
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await _client.GetStringAsync("/");
+        Assert.Equal(reads * 2, _health.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Status_service_keeps_its_last_reading()
+    {
+        var service = _factory.Services.GetRequiredService<StatusService>();
+        Assert.Null(service.Last);
+
+        var snapshot = await service.ReadAsync(CancellationToken.None);
+
+        Assert.Same(snapshot, service.Last);
+        Assert.Equal(_time.GetUtcNow(), snapshot.CheckedUtc);
+        Assert.Equal(["a", "b"], snapshot.Statuses.Select(s => s.Recorder.Id));
+    }
+
+    [Theory]
+    [InlineData(0, false, 15)]
+    [InlineData(10, false, 5)]
+    [InlineData(15, true, 0)]
+    [InlineData(600, true, 0)]
+    public void A_status_reading_is_due_for_refresh_after_one_period(int ageSeconds, bool stale, int dueSeconds)
+    {
+        var now = T0;
+        var reading = new StatusSnapshot([], now.AddSeconds(-ageSeconds));
+
+        Assert.Equal(stale, web::WebAudioArchive.Web.Components.Pages.Status.IsStale(reading, now));
+        Assert.Equal(TimeSpan.FromSeconds(dueSeconds), web::WebAudioArchive.Web.Components.Pages.Status.DueIn(reading.CheckedUtc, now));
+    }
+
+    [Fact]
+    public void A_cached_clip_is_found_without_building_and_a_new_one_is_not()
+    {
+        var clips = _factory.Services.GetRequiredService<web::WebAudioArchive.Web.Clips.ClipService>();
+        var request = web::WebAudioArchive.Web.Clips.ClipService.ParseQuery("2026-10-15T15:55:00Z", "2026-10-15T15:55:20Z", null, null, "auto");
+
+        Assert.Null(clips.TryPrepareCached(null, request));
+        Assert.False(Directory.Exists(Cache) && Directory.EnumerateFiles(Cache, "*.mp3").Any()); // nothing was built
+
+        var built = clips.Prepare(null, request);
+        var cached = clips.TryPrepareCached(null, request);
+
+        Assert.NotNull(cached);
+        Assert.True(cached.File.Reused);
+        Assert.Equal(built.File.Id, cached.File.Id);
+        Assert.Equal(built.Url, cached.Url);
+        Assert.Equal(built.File.Bytes, cached.File.Bytes);
+        Assert.Throws<web::WebAudioArchive.Web.Clips.ClipException>(() => clips.TryPrepareCached("other", request));
+    }
+
+    [Fact]
+    public async Task Recordings_page_says_loading_until_the_table_has_its_rows_and_starts_the_grid_at_an_hour()
+    {
+        var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/recordings"));
+
+        // PDTable reads its rows only after its first render; the prerendered table must not claim there are none.
+        Assert.Contains("Loading recordings...", html);
+        Assert.DoesNotContain("No recordings found.", html);
+        // 16:30 UTC: the week grid starts at 13:00, placed by js/calendar-state.js in the frame it is drawn.
+        Assert.Contains("data-scroll-hour=\"13\"", html);
+    }
+
+    [Fact]
+    public async Task Every_page_loads_the_calendar_script_and_preloads_the_icon_fonts_before_the_styles()
+    {
+        var html = await _client.GetStringAsync("/");
+
+        var script = html.IndexOf("<script src=\"js/calendar-state.js\"></script>", StringComparison.Ordinal);
+        var solid = html.IndexOf("<link rel=\"preload\" href=\"lib/font-awesome/webfonts/fa-solid-900.woff2\" as=\"font\" type=\"font/woff2\" crossorigin", StringComparison.Ordinal);
+        var regular = html.IndexOf("<link rel=\"preload\" href=\"lib/font-awesome/webfonts/fa-regular-400.woff2\" as=\"font\" type=\"font/woff2\" crossorigin", StringComparison.Ordinal);
+        var styles = html.IndexOf("<link rel=\"stylesheet\"", StringComparison.Ordinal);
+        Assert.True(script > 0 && solid > 0 && regular > 0, "the calendar script and both font preloads are in the head");
+        Assert.True(script < styles && solid < styles && regular < styles, "they come before the first stylesheet");
+        Assert.True(html.IndexOf("theme-boot", StringComparison.Ordinal) < script, "the theme script still runs first");
+
+        foreach (var url in new[] { "/js/calendar-state.js", "/lib/font-awesome/webfonts/fa-solid-900.woff2", "/lib/font-awesome/webfonts/fa-regular-400.woff2" })
+            Assert.Equal(HttpStatusCode.OK, (await _client.GetAsync(url)).StatusCode);
+        var js = await _client.GetStringAsync("/js/calendar-state.js");
+        Assert.Contains("data-keep-scroll", js);
+        Assert.Contains("replaceUrl", js);
     }
 }

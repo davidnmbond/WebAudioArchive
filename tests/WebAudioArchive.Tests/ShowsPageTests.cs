@@ -113,6 +113,31 @@ public sealed class ShowsPageTests(ShowsAppFixture app) : IClassFixture<ShowsApp
         Assert.Contains("Breakfast with Mackenzie\n2026-10-26 09:00:00 UTC to 2026-10-26 10:00:00 UTC", agenda);
     }
 
+    [Theory]
+    [InlineData(PanoramicData.Blazor.Enums.CalendarView.Week, "2026-10-21", "shows?view=week&date=2026-10-21", "19 to 25 Oct 2026")]
+    [InlineData(PanoramicData.Blazor.Enums.CalendarView.Month, "2026-11-03", "shows?view=month&date=2026-11-03", "November 2026")]
+    [InlineData(PanoramicData.Blazor.Enums.CalendarView.Agenda, "2026-10-26", "shows?view=agenda&date=2026-10-26", "pdcal-view-agenda")]
+    public async Task The_address_kept_for_back_opens_the_same_view_and_date(PanoramicData.Blazor.Enums.CalendarView view, string date, string address, string expected)
+    {
+        // The calendar's week and view are written to the address (history.replaceState) so Back from a show returns to them.
+        Assert.Equal(address, web::WebAudioArchive.Web.Components.Pages.Shows.AddressFor(view, DateOnly.Parse(date, System.Globalization.CultureInfo.InvariantCulture)));
+
+        var html = await app.Page("/" + address);
+        Assert.Contains("pdcal-view-" + view.ToString().ToLowerInvariant(), html);
+        Assert.Contains(expected, html);
+    }
+
+    [Fact]
+    public async Task The_shows_calendar_keeps_its_scroll_position_through_the_page_script()
+    {
+        var html = await app.Page("/shows");
+
+        // js/calendar-state.js puts the week grid back where it was, before the browser paints, for this host.
+        var host = html.IndexOf("<div data-keep-scroll=\"shows\">", StringComparison.Ordinal);
+        Assert.True(host > 0, "the calendar is inside the data-keep-scroll host");
+        Assert.True(host < html.IndexOf("pdcal-week-scroll", StringComparison.Ordinal));
+        Assert.DoesNotContain("data-scroll-hour", html);
+    }
     [Fact]
     public async Task A_recorded_show_opens_its_timeline_with_margins_markers_and_segments()
     {

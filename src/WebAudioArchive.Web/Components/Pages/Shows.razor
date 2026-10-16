@@ -20,6 +20,8 @@
         }
     </div>
 
+    @* data-keep-scroll: the grid keeps its scroll position across the prerender hand-over, view switches and Back (js/calendar-state.js). *@
+    <div data-keep-scroll="shows">
     <PDCalendar TItem="ShowItem"
                 Items="Items"
                 StartSelector="i => i.Show.StartUtc"
@@ -29,7 +31,8 @@
                 CssClassSelector="@(i => "show-item " + i.Coverage.CssClass)"
                 TooltipSelector="Tooltip"
                 View="View"
-                ViewChanged="v => View = v"
+                ViewChanged="OnViewChanged"
+                DateChanged="OnDateChanged"
                 Date="FocusDate"
                 AvailableViews="Views"
                 FirstDayOfWeek="DayOfWeek.Monday"
@@ -54,6 +57,7 @@
             <span class="visually-hidden">, @item.Coverage.Label</span>
         </ItemTemplate>
     </PDCalendar>
+    </div>
     <p class="small text-body-secondary mt-2" id="shows-range">
         Showing @Items.Count shows from <span class="utc">@Utc(Range.From)</span> to <span class="utc">@Utc(Range.To)</span>.
         Select a show to play it with @Settings.DefaultMarginMinutes minutes either side.

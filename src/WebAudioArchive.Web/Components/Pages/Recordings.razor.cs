@@ -25,7 +25,12 @@ public sealed partial class Recordings
     static readonly IReadOnlyList<CalendarView> CalendarViews = [CalendarView.Week, CalendarView.Month, CalendarView.Agenda];
     IReadOnlyList<RecordingCalendarItem> CalendarItems { get; set; } = [];
     (DateTimeOffset From, DateTimeOffset To) CalendarRange { get; set; }
+    // The week grid starts here (data-scroll-hour, js/calendar-state.js) in the frame it is drawn, rather than through
+    // PDCalendar's ScrollToHour, which scrolls after a frame at midnight has been painted.
     int ScrollHour => Math.Max(0, Time.GetUtcNow().UtcDateTime.Hour - 3);
+
+    // PDTable fetches its rows only after its first render, so until then it would say there are none.
+    bool TableReady { get; set; }
 
     protected override void OnInitialized()
     {

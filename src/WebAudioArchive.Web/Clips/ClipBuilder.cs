@@ -56,6 +56,20 @@ public sealed class ClipBuilder(string cacheDir, ILogger log)
         }
     }
 
+    /// <summary>The cached clip for this plan when it has already been built; null when it would have to be built.</summary>
+    public ClipFile? TryReuse(string station, ClipPlan plan)
+    {
+        var id = IdFor(station, plan);
+        var final = PathFor(cacheDir, id);
+        var known = ReadInfo(cacheDir, id);
+        if (known is null || !File.Exists(final)) return null;
+
+        // Touch it so housekeeping, which removes the oldest first, keeps a clip that is in use.
+        try { File.SetLastWriteTimeUtc(final, DateTime.UtcNow); }
+        catch (IOException) { }
+        return new ClipFile(id, final, known.Bytes, known.Seconds, known.DownloadName, Reused: true);
+    }
+
     public ClipFile Build(string station, ClipPlan plan)
     {
         Directory.CreateDirectory(cacheDir);
@@ -63,14 +77,7 @@ public sealed class ClipBuilder(string cacheDir, ILogger log)
         var final = PathFor(cacheDir, id);
         var name = DownloadName(station, plan);
 
-        var known = ReadInfo(cacheDir, id);
-        if (known is not null && File.Exists(final))
-        {
-            // Touch it so housekeeping, which removes the oldest first, keeps a clip that is in use.
-            try { File.SetLastWriteTimeUtc(final, DateTime.UtcNow); }
-            catch (IOException) { }
-            return new ClipFile(id, final, known.Bytes, known.Seconds, known.DownloadName, Reused: true);
-        }
+        if (TryReuse(station, plan) is { } reused) return reused;
 
         var tmp = Path.Combine(cacheDir, $"{id}.{Guid.NewGuid():N}.tmp");
         try

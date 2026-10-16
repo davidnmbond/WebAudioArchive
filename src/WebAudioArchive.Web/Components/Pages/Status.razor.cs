@@ -19,12 +19,31 @@ public sealed partial class Status
 
     string CheckedText => Utc(Checked);
 
-    protected override async Task OnInitializedAsync() => await LoadAsync();
+    protected override async Task OnInitializedAsync()
+    {
+        // Show the last reading at once when there is one: the circuit's first render then matches the prerendered
+        // page (and an in-app visit draws the cards straight away), instead of "Reading the recorders..." in between.
+        // While prerendering, a stale reading is replaced by a fresh one first, as before.
+        var last = StatusService.Last;
+        if (last is not null && (RendererInfo.IsInteractive || !IsStale(last, Time.GetUtcNow()))) Show(last);
+        else await LoadAsync();
+    }
 
     protected override void OnAfterRender(bool firstRender)
     {
-        if (firstRender)
-            _timer = new Timer(_ => InvokeAsync(RefreshAsync), null, TimeSpan.FromSeconds(RefreshSeconds), TimeSpan.FromSeconds(RefreshSeconds));
+        if (!firstRender) return;
+        var due = Checked is null ? TimeSpan.Zero : DueIn(Checked.Value, Time.GetUtcNow());
+        _timer = new Timer(_ => InvokeAsync(RefreshAsync), null, due, TimeSpan.FromSeconds(RefreshSeconds));
+    }
+
+    /// <summary>A reading older than one refresh period is stale.</summary>
+    public static bool IsStale(StatusSnapshot s, DateTimeOffset now) => now - s.CheckedUtc >= TimeSpan.FromSeconds(RefreshSeconds);
+
+    /// <summary>How long until a reading taken at <paramref name="checkedUtc"/> is due for its refresh (zero when overdue).</summary>
+    public static TimeSpan DueIn(DateTimeOffset checkedUtc, DateTimeOffset now)
+    {
+        var due = TimeSpan.FromSeconds(RefreshSeconds) - (now - checkedUtc);
+        return due < TimeSpan.Zero ? TimeSpan.Zero : due;
     }
 
     async Task RefreshAsync()
@@ -33,10 +52,12 @@ public sealed partial class Status
         StateHasChanged();
     }
 
-    async Task LoadAsync()
+    async Task LoadAsync() => Show(await StatusService.ReadAsync(CancellationToken.None));
+
+    void Show(StatusSnapshot s)
     {
-        Statuses = await StatusService.GetAsync(CancellationToken.None);
-        Checked = Time.GetUtcNow();
+        Statuses = s.Statuses;
+        Checked = s.CheckedUtc;
     }
 
     public void Dispose() => _timer?.Dispose();
