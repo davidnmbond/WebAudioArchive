@@ -70,4 +70,33 @@ public sealed class CoverageReaderTests : IDisposable
 
         Assert.Equal(1800 + 600, c.CoveredSeconds, 3); // the good segment plus the one with null gaps
     }
+
+    [Fact]
+    public void Several_windows_in_one_pass_match_separate_reads()
+    {
+        Segment("100000", At(10, 0), At(10, 30));
+        Segment("103500", At(10, 35), At(11, 0), new SegmentGap(At(10, 40), At(10, 41), 60, "x"));
+
+        var many = CoverageReader.Read(_dir, At(11, 0), [TimeSpan.FromHours(1), TimeSpan.FromMinutes(30)]);
+
+        Assert.Equal(2, many.Count);
+        Assert.Equal(CoverageReader.Read(_dir, At(11, 0), TimeSpan.FromHours(1)), many[0]);
+        Assert.Equal(CoverageReader.Read(_dir, At(11, 0), TimeSpan.FromMinutes(30)), many[1]);
+    }
+
+    [Fact]
+    public void Day_folders_that_end_well_before_the_window_are_not_read()
+    {
+        Segment("100000", At(10, 0), At(10, 30));
+        // A sidecar filed under a day long before the window. Its times are deliberately inside the window, so it
+        // would count if the reader opened it; the reader must skip the folder by name without opening it.
+        var old = Path.Combine(_dir, "2026", "09-01");
+        Directory.CreateDirectory(old);
+        SegmentMetaStore.Write(Path.Combine(old, "100000.json"), new SegmentMeta(
+            1, "i", "burst", "100000.mp3", At(10, 30), At(10, 40), 0, 0, 600, null, null, [], [], "hour-boundary"));
+
+        var c = CoverageReader.Read(_dir, now: At(11, 0), window: TimeSpan.FromHours(1));
+
+        Assert.Equal(1800, c.CoveredSeconds, 3);
+    }
 }

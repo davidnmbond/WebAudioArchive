@@ -54,6 +54,7 @@ var runtimes = stations.Select(s => new StationRuntime(
 builder.Services.AddSingleton<IClock>(clock);
 builder.Services.AddSingleton(new StationRegistry(instanceId, runtimes));
 builder.Services.AddHostedService<StationRecorderService>();
+builder.Services.AddHostedService<CoverageRefreshService>();
 
 var app = builder.Build();
 
@@ -68,6 +69,7 @@ app.MapGet("/healthz", (StationRegistry registry) =>
         var lastFrame = s.Health.LastFrameWrittenUtc;
         var silent = HealthRules.IsUnhealthy(s.Config.Enabled, uptime, lastFrame, now);
         if (silent) unhealthy = true;
+        var coverage = s.Coverage.Latest;
         return new
         {
             id = s.Config.Id,
@@ -81,8 +83,9 @@ app.MapGet("/healthz", (StationRegistry registry) =>
             lastErrorUtc = s.Health.LastError?.Utc,
             reconnects = s.Health.Reconnects,
             currentSegmentStartUtc = s.Recorder.CurrentSegmentStartUtc,
-            coverage24h = CoverageReader.Read(s.Recorder.MasterDir, now, TimeSpan.FromHours(24)).Fraction,
-            coverage30d = CoverageReader.Read(s.Recorder.MasterDir, now, TimeSpan.FromDays(30)).Fraction,
+            coverage24h = coverage?.Fraction24h,
+            coverage30d = coverage?.Fraction30d,
+            coverageComputedUtc = coverage?.ComputedUtc,
         };
     }).ToList();
 

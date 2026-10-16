@@ -46,7 +46,8 @@ public sealed class WorkerHostTests : IDisposable
             body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
             var current = body.GetProperty("stations")[0];
             if (current.GetProperty("lastFrameWrittenUtc").ValueKind != JsonValueKind.Null
-                && current.GetProperty("currentSegmentStartUtc").ValueKind != JsonValueKind.Null) break;
+                && current.GetProperty("currentSegmentStartUtc").ValueKind != JsonValueKind.Null
+                && current.GetProperty("coverageComputedUtc").ValueKind != JsonValueKind.Null) break;
             await Task.Delay(50);
         }
 
@@ -59,6 +60,10 @@ public sealed class WorkerHostTests : IDisposable
         Assert.NotEqual(JsonValueKind.Null, s.GetProperty("secondsSinceLastFrameWritten").ValueKind);
         Assert.Equal(JsonValueKind.Null, s.GetProperty("lastError").ValueKind);
         Assert.NotEqual(JsonValueKind.Null, s.GetProperty("currentSegmentStartUtc").ValueKind);
+        // Coverage comes from the background refresh, not from reading sidecars on each request.
+        Assert.NotEqual(JsonValueKind.Null, s.GetProperty("coverageComputedUtc").ValueKind);
+        Assert.Equal(JsonValueKind.Number, s.GetProperty("coverage24h").ValueKind);
+        Assert.Equal(JsonValueKind.Number, s.GetProperty("coverage30d").ValueKind);
         Assert.NotEmpty(Directory.EnumerateFiles(Path.Combine(data, "fake", "master"), "*.part", SearchOption.AllDirectories));
     }
 }
