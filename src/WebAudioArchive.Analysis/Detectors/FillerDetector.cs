@@ -63,17 +63,17 @@ public static partial class FillerDetector
         return new FillerResult(hits, speech);
     }
 
-    /// <summary>"you know" set off as an aside: "know" ends in a comma, or "you" follows a word ending in a comma.</summary>
+    /// <summary>"you know" set off as an aside: "you" follows a word ending in a comma, or opens the segment and "know" ends in a comma. "Do you know, the way" is a question, not a filler.</summary>
     static bool IsYouKnow(IReadOnlyList<TranscriptWord> words, int j)
     {
         if (WordNormaliser.Normalise(words[j].Text) != "you" || WordNormaliser.Normalise(words[j + 1].Text) != "know") return false;
         var knowEndsWithComma = words[j + 1].Text.TrimEnd().EndsWith(',');
         var afterComma = j > 0 && words[j - 1].Text.TrimEnd().EndsWith(',');
-        return knowEndsWithComma || afterComma;
+        return afterComma || (j == 0 && knowEndsWithComma);
     }
 
     static FillerHit Hit(int segment, int word, string text, string canonical, double start, double end, double probability) =>
-        new(segment, word, text, canonical, start, Math.Max(start, end), Math.Round(Math.Clamp(probability, 0, 1) * EstimateFactor, 3));
+        new(segment, word, text, canonical, start, Math.Max(start, end), Math.Round((double.IsNaN(probability) ? 0 : Math.Clamp(probability, 0, 1)) * EstimateFactor, 3));
 
     [GeneratedRegex("^u+m+$")]
     private static partial Regex Um();

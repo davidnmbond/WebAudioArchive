@@ -63,6 +63,21 @@ public class DeadAirDetectorTests
     }
 
     [Fact]
+    public void Silence_at_the_start_of_the_segment_is_reported_from_zero()
+    {
+        var e = Assert.Single(Detect(Signals.Concat(Signals.Silence(6), Signals.Sine(3))));
+        Assert.Equal(0.0, e.StartSeconds, 2);
+        Assert.Equal(6.0, e.EndSeconds, 2);
+    }
+
+    [Fact]
+    public void Quiet_music_just_under_the_minimum_length_is_not_dead_air()
+    {
+        // 4.9 s at -55 dBFS is below the -50 threshold but shorter than the 5 s minimum.
+        Assert.Empty(Detect(Signals.Concat(Signals.Sine(2), Signals.Noise(4.9, -55, 2), Signals.Sine(2))));
+    }
+
+    [Fact]
     public void The_threshold_comes_from_config()
     {
         var quiet = Signals.Concat(Signals.Sine(1), Signals.Noise(10, -45, 1), Signals.Sine(1));

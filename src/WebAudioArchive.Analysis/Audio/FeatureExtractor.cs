@@ -37,6 +37,7 @@ public sealed record AudioFeatures(
 /// </summary>
 public sealed class FeatureExtractor
 {
+    /// <summary>The nominal window; the real one is a whole number of frames, so use AudioFeatures.WindowSeconds for times.</summary>
     public const double WindowSeconds = 0.05;
 
     readonly int _rate;
@@ -128,7 +129,7 @@ public sealed class FeatureExtractor
         var clips = ClipLevels.Levels
             .Select((level, l) => new ClipLevelRuns(level, _counts[l], _truncated[l], _runs[l].OrderBy(r => r.StartFrame).ThenBy(r => r.Channel).ToList()))
             .ToList();
-        return new AudioFeatures(AudioFeatures.CurrentSchema, _rate, _channels, _frame, WindowSeconds, _windows.ToList(), clips);
+        return new AudioFeatures(AudioFeatures.CurrentSchema, _rate, _channels, _frame, (double)_windowFrames / _rate, _windows.ToList(), clips);
     }
 
     void TrackRuns(int c, float a)

@@ -2225,7 +2225,10 @@ public class ClippingDetectorTests
             Assert.Equal(Shape(whole), Shape(other));
         }
 
-        Assert.Equal(2, ClippingDetector.Detect(whole, Defaults).Events[0].Channels.Count);
+        var wholeEvent = Assert.Single(ClippingDetector.Detect(whole, Defaults).Events);
+        Assert.Equal(2, wholeEvent.Channels.Count);
+        Assert.Equal(2, wholeEvent.Runs);
+        Assert.Equal(100, wholeEvent.ClippedSamples);
     }
 
     [Fact]
@@ -2238,6 +2241,18 @@ public class ClippingDetectorTests
         Assert.Equal(2, events.Count);
         Assert.Equal(1.2, events[0].Peak, 3);
         Assert.Equal(1.0, events[1].Peak, 3);
+    }
+
+    [Fact]
+    public void Run_still_open_at_the_end_of_the_audio_is_kept()
+    {
+        var sine = Signals.Sine(1);
+        var s = Signals.Clip(sine, 1.0 - 6 * OneSample, 6);
+
+        var e = Assert.Single(ClippingDetector.Detect(Features(s), Defaults).Events);
+
+        Assert.Equal(6, e.ClippedSamples);
+        Assert.Equal(1.0, e.EndSeconds, OneSample * 2);
     }
 
     [Fact]
@@ -2267,6 +2282,22 @@ public class ClippingDetectorTests
         Assert.Equal(-3.0, f.WindowDbfs(5), 0);
         Assert.Equal(-120, f.WindowDbfs(30));
         Assert.Equal(2.0, f.Seconds, 6);
+    }
+
+    [Fact]
+    public void Window_timing_uses_the_real_window_length_at_rates_that_do_not_divide_by_twenty()
+    {
+        const int rate = 11025; // 0.05 s is 551.25 frames, so a window is 551 frames
+        var s = Signals.Concat(Signals.Sine(600, rate: rate), Signals.Silence(6, rate), Signals.Sine(2, rate: rate));
+        var fx = new FeatureExtractor(rate, 1);
+        fx.Push(s);
+        var f = fx.Complete();
+
+        Assert.Equal(551.0 / rate, f.WindowSeconds, 12);
+
+        var e = Assert.Single(DeadAirDetector.Detect(f, new DeadAirOptions()));
+        Assert.Equal(600.0, e.StartSeconds, 0.1);
+        Assert.Equal(606.0, e.EndSeconds, 0.1);
     }
 
     [Fact]
@@ -2339,6 +2370,7 @@ public sealed record AudioFeatures(
 /// </summary>
 public sealed class FeatureExtractor
 {
+    /// <summary>The nominal window; the real one is a whole number of frames, so use AudioFeatures.WindowSeconds for times.</summary>
     public const double WindowSeconds = 0.05;
 
     readonly int _rate;
@@ -2430,7 +2462,7 @@ public sealed class FeatureExtractor
         var clips = ClipLevels.Levels
             .Select((level, l) => new ClipLevelRuns(level, _counts[l], _truncated[l], _runs[l].OrderBy(r => r.StartFrame).ThenBy(r => r.Channel).ToList()))
             .ToList();
-        return new AudioFeatures(AudioFeatures.CurrentSchema, _rate, _channels, _frame, WindowSeconds, _windows.ToList(), clips);
+        return new AudioFeatures(AudioFeatures.CurrentSchema, _rate, _channels, _frame, (double)_windowFrames / _rate, _windows.ToList(), clips);
     }
 
     void TrackRuns(int c, float a)
@@ -2551,7 +2583,7 @@ public static class ClippingDetector
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~ClippingDetectorTests`
-Expected: PASS, 10 tests. (`ClipEvent` holds a list, so record equality would compare `Channels` by reference; that is why the split-read test compares a text shape of each event.)
+Expected: PASS, 12 tests. (`ClipEvent` holds a list, so record equality would compare `Channels` by reference; that is why the split-read test compares a text shape of each event.)
 
 - [ ] **Step 5: Commit**
 
@@ -2641,6 +2673,21 @@ public class DeadAirDetectorTests
     }
 
     [Fact]
+    public void Silence_at_the_start_of_the_segment_is_reported_from_zero()
+    {
+        var e = Assert.Single(Detect(Signals.Concat(Signals.Silence(6), Signals.Sine(3))));
+        Assert.Equal(0.0, e.StartSeconds, 2);
+        Assert.Equal(6.0, e.EndSeconds, 2);
+    }
+
+    [Fact]
+    public void Quiet_music_just_under_the_minimum_length_is_not_dead_air()
+    {
+        // 4.9 s at -55 dBFS is below the -50 threshold but shorter than the 5 s minimum.
+        Assert.Empty(Detect(Signals.Concat(Signals.Sine(2), Signals.Noise(4.9, -55, 2), Signals.Sine(2))));
+    }
+
+    [Fact]
     public void The_threshold_comes_from_config()
     {
         var quiet = Signals.Concat(Signals.Sine(1), Signals.Noise(10, -45, 1), Signals.Sine(1));
@@ -2672,7 +2719,9 @@ public sealed record DeadAirEvent(double StartSeconds, double EndSeconds, double
 /// <summary>
 /// Dead air: every 50 ms window (loudest channel) below ThresholdDbfs for at least MinSeconds. Pauses in speech and
 /// the gap between songs are far shorter, which is how intentional pauses are excluded; quiet room tone above the
-/// threshold is not dead air. A recording gap is not dead air either: the audio is joined across it, so it never
+/// threshold is not dead air. Windows are fixed 50 ms steps, so a silence that starts or ends part way through a window can
+/// lose up to two partial windows (about 100 ms) from the reported span; the minimum length is applied to the span of whole
+/// quiet windows. A recording gap is not dead air either: the audio is joined across it, so it never
 /// reaches the decoder (gaps are reported from the sidecars instead).
 /// </summary>
 public static class DeadAirDetector
@@ -2721,7 +2770,7 @@ public static class DeadAirDetector
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~DeadAirDetectorTests`
-Expected: PASS, 8 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -2743,9 +2792,9 @@ git commit -m "Analysis: dead air detector from window levels (#81)"
 - Consumes: `SwearList`, `SwearTiers`, `SwearOptions`, `AnalysisConfigLoader` (Task 2); `TranscriptDocument`, `TranscriptSegment`, `TranscriptWord`, `TimelineAnchor`, `Severities` (Task 3).
 - Produces:
   - `static class WordNormaliser { string Normalise(string raw); }` (lower-case letters, digits and `*` only)
-  - `sealed record SwearMatch(string Form, string Tier, bool Masked, double Certainty)`; `SwearMatch? SwearList.Match(string rawWord)`
+  - `sealed record SwearMatch(string Form, string Tier, bool Masked, double Certainty, string SeverityTier, IReadOnlyList<string> CandidateTiers)` (SeverityTier is the lowest candidate tier for a masked word that spans tiers; hyphenated words match as the joined word or any part); `SwearMatch? SwearList.Match(string rawWord)`
   - `sealed class Watershed(TimeZoneInfo zone, TimeOnly start, TimeOnly end) { static Watershed From(SwearOptions, TimeZoneInfo); bool IsBeforeWatershed(DateTimeOffset utc); DateTimeOffset StartUtcOn(DateTimeOffset utc); }`
-  - `sealed record SwearHit(int Segment, int Word, string Text, string Form, string Tier, bool Masked, double Confidence, double Start, double End, string Context)`; `static class SwearDetector { const string Name = "swear"; const string Version = "1"; IReadOnlyList<SwearHit> Detect(TranscriptDocument, SwearList); string Severity(string tier, bool beforeWatershed); }`
+  - `sealed record SwearHit(int Segment, int Word, string Text, string Form, string Tier, bool Masked, double Confidence, double Start, double End, string Context, string SeverityTier, IReadOnlyList<string> CandidateTiers, string? SuppressedReason = null, int RunLength = 1)`; `static class SwearDetector { const string Name = "swear"; const string Version = "1"; IReadOnlyList<SwearHit> Detect(TranscriptDocument, SwearList) /* normal hits */; IReadOnlyList<SwearHit> DetectSuppressed(TranscriptDocument, SwearList) /* one event per suppressed run, confidence at most 0.3, never counted */; string Severity(string tier, bool beforeWatershed) /* pass SeverityTier */; }`
   - Test helper `TranscriptFixtures.Of(DateTimeOffset start, params string[] lines)` and `TranscriptFixtures.OfSegments(DateTimeOffset start, params (string Text, string? Suppressed)[] lines)`: segment i starts at i * 10 s, one word every 0.5 s, word probability 0.9, timeline anchored at `start`.
 
 - [ ] **Step 1: Write the transcript fixture helper**
@@ -2838,6 +2887,92 @@ public class SwearDetectorTests
         Assert.Null(List.Match(word));
     }
 
+    [Theory]
+    [InlineData("f***", 0.5)]
+    [InlineData("f*ck", 0.5)]
+    [InlineData("f***ing", 0.5)]
+    [InlineData("s***", 0.3)]
+    [InlineData("a***", 0.5)]
+    [InlineData("t***", 0.5)]
+    public void Masked_certainty_is_exact(string word, double certainty)
+    {
+        var m = List.Match(word);
+        Assert.NotNull(m);
+        Assert.True(m.Masked);
+        Assert.Equal(certainty, m.Certainty);
+    }
+
+    [Theory]
+    [InlineData("fucking-hell", SwearTiers.Severe, "fucking")]
+    [InlineData("shit-hot", SwearTiers.Strong, "shit")]
+    [InlineData("arse-licking", SwearTiers.Mild, "arse")]
+    [InlineData("Bloody-hell,", SwearTiers.Mild, "bloody")]
+    [InlineData("well-fucking-done", SwearTiers.Severe, "fucking")]
+    [InlineData("bloody-fucking", SwearTiers.Severe, "fucking")]
+    [InlineData("f***ing-hell", SwearTiers.Severe, "f***ing")]
+    public void Hyphenated_compounds_match_on_their_highest_part(string word, string tier, string form)
+    {
+        var m = List.Match(word);
+        Assert.NotNull(m);
+        Assert.Equal(tier, m.Tier);
+        Assert.Equal(form, m.Form);
+    }
+
+    [Theory]
+    [InlineData("well-known")]
+    [InlineData("ice-cold")]
+    [InlineData("self-assessed")]
+    [InlineData("Scunthorpe-based")]
+    [InlineData("pricked-up")]
+    [InlineData("-")]
+    [InlineData("--")]
+    public void Hyphenated_words_without_a_listed_part_do_not_match(string word)
+    {
+        Assert.Null(List.Match(word));
+    }
+
+    [Fact]
+    public void A_hyphenated_swear_is_reported_once()
+    {
+        var t = TranscriptFixtures.Of(new DateTimeOffset(2026, 10, 16, 19, 0, 0, TimeSpan.Zero), "that was fucking-hell loud");
+
+        var hit = Assert.Single(SwearDetector.Detect(t, List));
+
+        Assert.Equal("fucking-hell", hit.Text);
+        Assert.Equal(2, hit.Word);
+    }
+
+    const string SyntheticJson = """{"version":"t1","suffixes":["s"],"tiers":{"strong":["knob"]},"allow":["knobs"]}""";
+
+    [Fact]
+    public void The_allow_list_is_the_only_thing_that_stops_a_listed_form()
+    {
+        var withAllow = SwearList.Parse(SyntheticJson, "test");
+        var withoutAllow = SwearList.Parse(SyntheticJson.Replace("\"knobs\"", ""), "test");
+
+        Assert.Null(withAllow.Match("knobs"));
+        Assert.Null(withAllow.Match("Knobs!"));
+        Assert.Null(withAllow.Match("k***s"));
+        Assert.Null(withAllow.Match("knobs-up"));
+        Assert.Equal("knob", withAllow.Match("knob")?.Form);
+
+        Assert.Equal(SwearTiers.Strong, withoutAllow.Match("knobs")?.Tier);
+        Assert.True(withoutAllow.Match("k***s")?.Masked);
+        Assert.NotNull(withoutAllow.Match("knobs-up"));
+    }
+
+    [Fact]
+    public void A_nan_word_probability_gives_zero_confidence_not_nan()
+    {
+        var t = TranscriptFixtures.Of(new DateTimeOffset(2026, 10, 16, 19, 0, 0, TimeSpan.Zero), "oh shit");
+        var seg = t.Segments[0];
+        t = t with { Segments = [seg with { Words = seg.Words.Select(w => w with { Probability = double.NaN }).ToList() }] };
+
+        var hit = Assert.Single(SwearDetector.Detect(t, List));
+
+        Assert.Equal(0, hit.Confidence);
+    }
+
     [Fact]
     public void Hits_carry_tier_time_confidence_and_context_and_suppressed_segments_are_ignored()
     {
@@ -2858,6 +2993,92 @@ public class SwearDetectorTests
         Assert.Equal(0.9, hit.Confidence, 3);
         Assert.Equal("Well that was shit, honestly it was", hit.Context);
     }
+
+    [Fact]
+    public void A_masked_word_spanning_tiers_is_scored_by_its_lowest_candidate_tier()
+    {
+        var m = List.Match("s***");
+        Assert.NotNull(m);
+        Assert.Equal(SwearTiers.Strong, m.Tier);
+        Assert.Equal(SwearTiers.Mild, m.SeverityTier);
+        Assert.Equal(new[] { SwearTiers.Mild, SwearTiers.Strong }, m.CandidateTiers);
+        Assert.Equal(Severities.Low, SwearDetector.Severity(m.SeverityTier, false));
+        Assert.Equal(Severities.Medium, SwearDetector.Severity(m.SeverityTier, true));
+
+        var f = List.Match("f***");
+        Assert.NotNull(f);
+        Assert.Equal(SwearTiers.Severe, f.SeverityTier);
+        Assert.Equal(new[] { SwearTiers.Severe }, f.CandidateTiers);
+
+        var plain = List.Match("shit");
+        Assert.NotNull(plain);
+        Assert.Equal(SwearTiers.Strong, plain.SeverityTier);
+
+        var t = TranscriptFixtures.Of(new DateTimeOffset(2026, 10, 16, 19, 0, 0, TimeSpan.Zero), "well s*** happens");
+        var hit = Assert.Single(SwearDetector.Detect(t, List));
+        Assert.Equal(SwearTiers.Mild, hit.SeverityTier);
+        Assert.Equal(new[] { SwearTiers.Mild, SwearTiers.Strong }, hit.CandidateTiers);
+        Assert.Equal(0.27, hit.Confidence, 3);
+    }
+
+    [Fact]
+    public void Suppressed_swearing_is_reported_once_per_run_at_low_confidence_and_not_counted_normally()
+    {
+        var start = new DateTimeOffset(2026, 10, 16, 19, 0, 0, TimeSpan.Zero);
+        var t = TranscriptFixtures.OfSegments(start,
+            ("well that was shit honestly", null),
+            ("fuck fuck fuck fuck", "repetition"),
+            ("fuck fuck", "repetition"),
+            ("a clean line", null),
+            ("bugger bugger bugger", "repetition"),
+            ("nothing rude here", "repetition"));
+
+        var normal = Assert.Single(SwearDetector.Detect(t, List));
+        Assert.Equal("shit", normal.Form);
+        Assert.Null(normal.SuppressedReason);
+        Assert.Equal(1, normal.RunLength);
+
+        var runs = SwearDetector.DetectSuppressed(t, List);
+
+        Assert.Equal(2, runs.Count);
+        var first = runs[0];
+        Assert.Equal("repetition", first.SuppressedReason);
+        Assert.Equal("fuck", first.Form);
+        Assert.Equal(SwearTiers.Severe, first.Tier);
+        Assert.Equal(6, first.RunLength);
+        Assert.Equal(1, first.Segment);
+        Assert.Equal(0, first.Word);
+        Assert.Equal("fuck", first.Text);
+        Assert.Equal(10.0, first.Start);
+        Assert.Equal(20.9, first.End, 6);
+        Assert.Equal(0.3, first.Confidence);
+        Assert.False(first.Masked);
+
+        var second = runs[1];
+        Assert.Equal("bugger", second.Form);
+        Assert.Equal(SwearTiers.Mild, second.Tier);
+        Assert.Equal(3, second.RunLength);
+        Assert.Equal(4, second.Segment);
+        Assert.Equal(40.0, second.Start);
+        Assert.Equal(41.4, second.End, 6);
+        Assert.Equal(0.3, second.Confidence);
+    }
+
+    [Fact]
+    public void Suppressed_runs_with_different_reasons_are_separate_and_the_highest_tier_names_the_run()
+    {
+        var t = TranscriptFixtures.OfSegments(new DateTimeOffset(2026, 10, 16, 19, 0, 0, TimeSpan.Zero),
+            ("bugger shit bugger", "repetition"),
+            ("fuck", "hallucination"));
+
+        var runs = SwearDetector.DetectSuppressed(t, List);
+
+        Assert.Equal(2, runs.Count);
+        Assert.Equal("shit", runs[0].Form);
+        Assert.Equal(3, runs[0].RunLength);
+        Assert.Equal("hallucination", runs[1].SuppressedReason);
+    }
+
 
     [Theory]
     [InlineData("2026-10-24T19:59:00Z", true)]   // 20:59 BST
@@ -2945,21 +3166,45 @@ public static class WordNormaliser
 ```csharp
 namespace WebAudioArchive.Analysis.Detectors;
 
-/// <summary>A matched form, its tier, whether the word was masked with asterisks, and how sure the match is (1, or less when masked).</summary>
-public sealed record SwearMatch(string Form, string Tier, bool Masked, double Certainty);
+/// <summary>
+/// A matched form, its top tier, whether the word was masked with asterisks, and how sure the match is (1, or less when masked).
+/// SeverityTier is the tier to score with: the lowest candidate tier when a masked word could be forms from several tiers
+/// (so "s***" is not scored as strong when it may be "sod"), otherwise the tier itself. CandidateTiers lists the distinct
+/// tiers the masked word could be, lowest first, for the event detail.
+/// </summary>
+public sealed record SwearMatch(string Form, string Tier, bool Masked, double Certainty, string SeverityTier, IReadOnlyList<string> CandidateTiers);
 
 public sealed partial class SwearList
 {
+    static readonly char[] Hyphens = ['-', '‐', '‑', '‒', '–'];
+
     /// <summary>
-    /// Whole-word match after normalising. A masked word ("f***", "f*ck", "s***ing") matches forms with the same first
-    /// letters, the same ending and a length within 2; the highest tier wins, at certainty 0.5 when every candidate is
-    /// in that tier and 0.3 otherwise. A word with no letter before the first '*' never matches.
+    /// Whole-word match after normalising. A hyphenated word ("shit-hot", "fucking-hell") matches as the joined word or as
+    /// any one of its parts, the highest tier winning, and is reported once; a joined form on the allow list never
+    /// matches. A masked word ("f***", "f*ck", "s***ing") matches forms with the same first letters, the same ending and
+    /// a length within 2; the highest tier wins, at certainty 0.5 when every candidate is in that tier and 0.3 otherwise
+    /// (scored by the lowest candidate tier). A word with no letter before the first '*' never matches.
     /// </summary>
     public SwearMatch? Match(string rawWord)
     {
-        var w = WordNormaliser.Normalise(rawWord);
+        var joined = WordNormaliser.Normalise(rawWord);
+        if (rawWord.IndexOfAny(Hyphens) < 0) return MatchWord(joined);
+
+        if (joined.Length == 0 || Allow.Contains(joined)) return null;
+        var best = MatchWord(joined);
+        foreach (var part in rawWord.Split(Hyphens, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var m = MatchWord(WordNormaliser.Normalise(part));
+            if (m is not null && (best is null || SwearTiers.Rank(m.Tier) > SwearTiers.Rank(best.Tier))) best = m;
+        }
+
+        return best;
+    }
+
+    SwearMatch? MatchWord(string w)
+    {
         if (w.Length == 0 || Allow.Contains(w)) return null;
-        if (!w.Contains('*')) return Forms.TryGetValue(w, out var tier) ? new SwearMatch(w, tier, false, 1.0) : null;
+        if (!w.Contains('*')) return Forms.TryGetValue(w, out var tier) ? new SwearMatch(w, tier, false, 1.0, tier, [tier]) : null;
 
         var first = w.IndexOf('*');
         var last = w.LastIndexOf('*');
@@ -2974,8 +3219,9 @@ public sealed partial class SwearList
             .ToList();
         if (candidates.Count == 0) return null;
         var best = candidates.MaxBy(c => SwearTiers.Rank(c.Value));
-        var certainty = candidates.All(c => c.Value == best.Value) ? 0.5 : 0.3;
-        return new SwearMatch(w, best.Value, true, certainty);
+        var tiers = candidates.Select(c => c.Value).Distinct().OrderBy(SwearTiers.Rank).ToList();
+        var certainty = tiers.Count == 1 ? 0.5 : 0.3;
+        return new SwearMatch(w, best.Value, true, certainty, tiers[0], tiers);
     }
 }
 ```
@@ -3021,8 +3267,27 @@ using WebAudioArchive.Core.Analysis;
 
 namespace WebAudioArchive.Analysis.Detectors;
 
-/// <summary>A matched word: its segment and word index, the word as transcribed, the matched form, tier, times (seconds into the audio) and the words around it.</summary>
-public sealed record SwearHit(int Segment, int Word, string Text, string Form, string Tier, bool Masked, double Confidence, double Start, double End, string Context);
+/// <summary>
+/// A matched word: its segment and word index, the word as transcribed, the matched form, tier, times (seconds into the audio) and the words around it.
+/// SeverityTier and CandidateTiers come from the match (see SwearMatch). SuppressedReason is null for a normal hit; for the
+/// one event per suppressed run it names why the run was suppressed (for example "repetition"), RunLength is how many
+/// swear words the run held, Segment, Word, Text and Form are the run's highest-tier word (the first of them) and Start and End span the whole run.
+/// </summary>
+public sealed record SwearHit(
+    int Segment,
+    int Word,
+    string Text,
+    string Form,
+    string Tier,
+    bool Masked,
+    double Confidence,
+    double Start,
+    double End,
+    string Context,
+    string SeverityTier,
+    IReadOnlyList<string> CandidateTiers,
+    string? SuppressedReason = null,
+    int RunLength = 1);
 
 /// <summary>
 /// Spec 3.6: whisper words against the tiered list, whole words and listed inflections. Speech to text can mis-hear or
@@ -3035,6 +3300,10 @@ public static class SwearDetector
     public const string Version = "1";
     const int ContextWords = 5;
 
+    /// <summary>The most confidence a suppressed run can carry: it is probably repeated or invented text, so it is for review, not for counting.</summary>
+    public const double SuppressedConfidenceCap = 0.3;
+
+    /// <summary>Normal hits: swear words in segments that are not suppressed. Suppressed segments are reported by <see cref="DetectSuppressed"/>.</summary>
     public static IReadOnlyList<SwearHit> Detect(TranscriptDocument t, SwearList list)
     {
         var hits = new List<SwearHit>();
@@ -3044,21 +3313,89 @@ public static class SwearDetector
             if (s.Suppressed is not null) continue;
             for (var j = 0; j < s.Words.Count; j++)
             {
-                var w = s.Words[j];
-                var m = list.Match(w.Text);
-                if (m is null) continue;
-                var from = Math.Max(0, j - ContextWords);
-                var to = Math.Min(s.Words.Count, j + ContextWords + 1);
-                var context = string.Join(' ', s.Words.Skip(from).Take(to - from).Select(x => x.Text));
-                var confidence = Math.Round(Math.Clamp(w.Probability, 0, 1) * m.Certainty, 3);
-                hits.Add(new SwearHit(i, j, w.Text, m.Form, m.Tier, m.Masked, confidence, w.Start, Math.Max(w.Start, w.End), context));
+                var m = list.Match(s.Words[j].Text);
+                if (m is not null) hits.Add(Hit(i, j, s, m));
             }
         }
 
         return hits;
     }
 
-    /// <summary>mild is low, strong medium, severe high; before the watershed each is one step more serious.</summary>
+    /// <summary>
+    /// One hit per run of consecutive suppressed segments (same reason) that holds swear words: the run's highest-tier word
+    /// (the first of them), the number of swear words in the run, its time span, confidence capped at
+    /// <see cref="SuppressedConfidenceCap"/>. Kept out of the normal count and score so repetition or hallucination cannot
+    /// inflate them, but never dropped silently: a repeated swear can be a chant, a lyric or an angry speaker.
+    /// </summary>
+    public static IReadOnlyList<SwearHit> DetectSuppressed(TranscriptDocument t, SwearList list)
+    {
+        var runs = new List<SwearHit>();
+        SwearHit? best = null;
+        var count = 0;
+        double start = 0, end = 0;
+        var lastSegment = -2;
+        string? reason = null;
+
+        void Flush()
+        {
+            if (best is not null)
+            {
+                runs.Add(best with
+                {
+                    Start = start,
+                    End = end,
+                    RunLength = count,
+                    Confidence = Math.Min(SuppressedConfidenceCap, best.Confidence),
+                    SuppressedReason = reason,
+                });
+            }
+
+            best = null;
+            count = 0;
+        }
+
+        for (var i = 0; i < t.Segments.Count; i++)
+        {
+            var s = t.Segments[i];
+            if (s.Suppressed is null) continue;
+            var found = false;
+            for (var j = 0; j < s.Words.Count; j++)
+            {
+                var m = list.Match(s.Words[j].Text);
+                if (m is null) continue;
+                if (!found && best is not null && (i != lastSegment + 1 || s.Suppressed != reason)) Flush();
+                var hit = Hit(i, j, s, m);
+                if (best is null)
+                {
+                    start = hit.Start;
+                    reason = s.Suppressed;
+                }
+
+                found = true;
+                end = hit.End;
+                count++;
+                if (best is null || SwearTiers.Rank(hit.Tier) > SwearTiers.Rank(best.Tier)) best = hit;
+            }
+
+            if (found) lastSegment = i;
+        }
+
+        Flush();
+        return runs;
+    }
+
+    static SwearHit Hit(int segment, int word, TranscriptSegment s, SwearMatch m)
+    {
+        var w = s.Words[word];
+        var from = Math.Max(0, word - ContextWords);
+        var to = Math.Min(s.Words.Count, word + ContextWords + 1);
+        var context = string.Join(' ', s.Words.Skip(from).Take(to - from).Select(x => x.Text));
+        var probability = double.IsNaN(w.Probability) ? 0 : Math.Clamp(w.Probability, 0, 1);
+        var confidence = Math.Round(probability * m.Certainty, 3);
+        return new SwearHit(segment, word, w.Text, m.Form, m.Tier, m.Masked, confidence, w.Start, Math.Max(w.Start, w.End), context, m.SeverityTier, m.CandidateTiers);
+    }
+
+    /// <summary>mild is low, strong medium, severe high; before the watershed each is one step more serious. Pass the hit's SeverityTier.</summary>
     public static string Severity(string tier, bool beforeWatershed) =>
         (SwearTiers.Rank(tier) + (beforeWatershed ? 1 : 0)) switch
         {
@@ -3072,7 +3409,7 @@ public static class SwearDetector
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~SwearDetectorTests`
-Expected: PASS, 47 tests (11 + 12 + 1 + 12 + 1 + 6 + 4). If `s***` resolves to a different tier than strong, look at the candidates it found (`sod` is mild, `shit` and `shite` strong): the highest tier wins.
+Expected: PASS, 73 tests. `s***` is reported as strong (the highest candidate tier) at certainty 0.3 and scored by its lowest candidate tier, mild (`sod` is mild, `shit` and `shite` strong).
 
 - [ ] **Step 6: Commit**
 
@@ -3162,6 +3499,41 @@ public class FillerDetectorTests
     }
 
     [Fact]
+    public void You_know_after_a_comma_spans_both_words_and_takes_the_lower_probability()
+    {
+        var r = FillerDetector.Detect(TranscriptFixtures.Of(Start, "well, you know what"), Defaults with { CountYouKnow = true });
+
+        var hit = Assert.Single(r.Hits);
+        Assert.Equal("you know", hit.Canonical);
+        Assert.Equal("you know", hit.Text);
+        Assert.Equal(0.5, hit.Start);
+        Assert.Equal(1.4, hit.End, 6);
+        Assert.Equal(0.72, hit.Confidence, 3);
+    }
+
+    [Theory]
+    [InlineData("do you know, the way", false)]
+    [InlineData("did you know, the way", false)]
+    [InlineData("it was, you know, brilliant", true)]
+    [InlineData("You know, I think so", true)]
+    [InlineData("it was brilliant, you know.", true)]
+    public void You_know_counts_only_as_an_aside(string line, bool counted)
+    {
+        var r = FillerDetector.Detect(TranscriptFixtures.Of(Start, line), Defaults with { CountYouKnow = true });
+        Assert.Equal(counted ? 1 : 0, r.Hits.Count);
+    }
+
+    [Fact]
+    public void A_nan_word_probability_gives_zero_confidence_not_nan()
+    {
+        var t = TranscriptFixtures.Of(Start, "so um yes");
+        var seg = t.Segments[0];
+        t = t with { Segments = [seg with { Words = seg.Words.Select(w => w with { Probability = double.NaN }).ToList() }] };
+
+        Assert.Equal(0, Assert.Single(FillerDetector.Detect(t, Defaults).Hits).Confidence);
+    }
+
+    [Fact]
     public void Only_configured_words_count()
     {
         var r = FillerDetector.Detect(TranscriptFixtures.Of(Start, "um ah hmm"), Defaults with { Words = ["um"] });
@@ -3244,17 +3616,17 @@ public static partial class FillerDetector
         return new FillerResult(hits, speech);
     }
 
-    /// <summary>"you know" set off as an aside: "know" ends in a comma, or "you" follows a word ending in a comma.</summary>
+    /// <summary>"you know" set off as an aside: "you" follows a word ending in a comma, or opens the segment and "know" ends in a comma. "Do you know, the way" is a question, not a filler.</summary>
     static bool IsYouKnow(IReadOnlyList<TranscriptWord> words, int j)
     {
         if (WordNormaliser.Normalise(words[j].Text) != "you" || WordNormaliser.Normalise(words[j + 1].Text) != "know") return false;
         var knowEndsWithComma = words[j + 1].Text.TrimEnd().EndsWith(',');
         var afterComma = j > 0 && words[j - 1].Text.TrimEnd().EndsWith(',');
-        return knowEndsWithComma || afterComma;
+        return afterComma || (j == 0 && knowEndsWithComma);
     }
 
     static FillerHit Hit(int segment, int word, string text, string canonical, double start, double end, double probability) =>
-        new(segment, word, text, canonical, start, Math.Max(start, end), Math.Round(Math.Clamp(probability, 0, 1) * EstimateFactor, 3));
+        new(segment, word, text, canonical, start, Math.Max(start, end), Math.Round((double.IsNaN(probability) ? 0 : Math.Clamp(probability, 0, 1)) * EstimateFactor, 3));
 
     [GeneratedRegex("^u+m+$")]
     private static partial Regex Um();
@@ -3279,7 +3651,7 @@ public static partial class FillerDetector
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~FillerDetectorTests`
-Expected: PASS, 14 tests.
+Expected: PASS, 21 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -5680,19 +6052,23 @@ public static class DetectorRunner
         }
 
         var swears = SwearDetector.Detect(t, config.Swears);
+        var suppressedSwears = SwearDetector.DetectSuppressed(t, config.Swears); // one low-confidence event per suppressed run, never counted below
         var beforeCount = 0;
-        foreach (var h in swears)
+        foreach (var h in swears.Concat(suppressedSwears))
         {
             var at = Utc(h.Start);
             var before = watershed.IsBeforeWatershed(at);
-            if (before) beforeCount++;
+            if (before && h.SuppressedReason is null) beforeCount++;
             events.Add(new AnalysisEvent(
                 AnalysisEvent.MakeId(EventTypes.Swear, t.JobId, h.Start, $"{h.Segment}:{h.Word}"), EventTypes.Swear, at, Utc(h.End),
-                SwearDetector.Severity(h.Tier, before), h.Confidence, SwearDetector.Name, v, EventSources.Transcript, t.Recorder, t.JobId,
-                R(h.Start), R(h.End - h.Start), $"{h.Tier}: {h.Text}",
+                SwearDetector.Severity(h.SeverityTier, before), h.Confidence, SwearDetector.Name, v, EventSources.Transcript, t.Recorder, t.JobId,
+                R(h.Start), R(h.End - h.Start), h.SuppressedReason is null ? $"{h.Tier}: {h.Text}" : $"suppressed ({h.SuppressedReason}): {h.Text} x{h.RunLength}",
                 new Dictionary<string, string>
                 {
                     ["tier"] = h.Tier,
+                    ["candidateTiers"] = string.Join(',', h.CandidateTiers),
+                    ["suppressed"] = h.SuppressedReason ?? "no",
+                    ["runLength"] = h.RunLength.ToString(CultureInfo.InvariantCulture),
                     ["word"] = h.Text,
                     ["form"] = h.Form,
                     ["masked"] = h.Masked ? "true" : "false",

@@ -76,7 +76,10 @@ public class ClippingDetectorTests
             Assert.Equal(Shape(whole), Shape(other));
         }
 
-        Assert.Equal(2, ClippingDetector.Detect(whole, Defaults).Events[0].Channels.Count);
+        var wholeEvent = Assert.Single(ClippingDetector.Detect(whole, Defaults).Events);
+        Assert.Equal(2, wholeEvent.Channels.Count);
+        Assert.Equal(2, wholeEvent.Runs);
+        Assert.Equal(100, wholeEvent.ClippedSamples);
     }
 
     [Fact]
@@ -130,6 +133,22 @@ public class ClippingDetectorTests
         Assert.Equal(-3.0, f.WindowDbfs(5), 0);
         Assert.Equal(-120, f.WindowDbfs(30));
         Assert.Equal(2.0, f.Seconds, 6);
+    }
+
+    [Fact]
+    public void Window_timing_uses_the_real_window_length_at_rates_that_do_not_divide_by_twenty()
+    {
+        const int rate = 11025; // 0.05 s is 551.25 frames, so a window is 551 frames
+        var s = Signals.Concat(Signals.Sine(600, rate: rate), Signals.Silence(6, rate), Signals.Sine(2, rate: rate));
+        var fx = new FeatureExtractor(rate, 1);
+        fx.Push(s);
+        var f = fx.Complete();
+
+        Assert.Equal(551.0 / rate, f.WindowSeconds, 12);
+
+        var e = Assert.Single(DeadAirDetector.Detect(f, new DeadAirOptions()));
+        Assert.Equal(600.0, e.StartSeconds, 0.1);
+        Assert.Equal(606.0, e.EndSeconds, 0.1);
     }
 
     [Fact]

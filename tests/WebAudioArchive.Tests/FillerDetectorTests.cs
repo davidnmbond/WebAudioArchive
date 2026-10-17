@@ -75,6 +75,28 @@ public class FillerDetectorTests
         Assert.Equal(0.72, hit.Confidence, 3);
     }
 
+    [Theory]
+    [InlineData("do you know, the way", false)]
+    [InlineData("did you know, the way", false)]
+    [InlineData("it was, you know, brilliant", true)]
+    [InlineData("You know, I think so", true)]
+    [InlineData("it was brilliant, you know.", true)]
+    public void You_know_counts_only_as_an_aside(string line, bool counted)
+    {
+        var r = FillerDetector.Detect(TranscriptFixtures.Of(Start, line), Defaults with { CountYouKnow = true });
+        Assert.Equal(counted ? 1 : 0, r.Hits.Count);
+    }
+
+    [Fact]
+    public void A_nan_word_probability_gives_zero_confidence_not_nan()
+    {
+        var t = TranscriptFixtures.Of(Start, "so um yes");
+        var seg = t.Segments[0];
+        t = t with { Segments = [seg with { Words = seg.Words.Select(w => w with { Probability = double.NaN }).ToList() }] };
+
+        Assert.Equal(0, Assert.Single(FillerDetector.Detect(t, Defaults).Hits).Confidence);
+    }
+
     [Fact]
     public void Only_configured_words_count()
     {
