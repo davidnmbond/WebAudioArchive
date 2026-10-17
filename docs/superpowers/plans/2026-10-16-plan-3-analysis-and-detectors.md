@@ -6341,6 +6341,8 @@ git commit -m "Analysis: resumable, idempotent segment pipeline writing transcri
 ### Task 13: Schedule types to Core, the day timeline and per-show analysis
 > Deviation (implemented): the builder excludes swear events whose Evidence["suppressed"] is not "no" (review-only) from the tier and watershed counts and reports them in `ShowCounts.SuppressedSwearRuns` (last field) and a note; test `Suppressed_swear_runs_are_review_only_and_never_counted`. Task 14's test helper is named `MakeEnricher` because `Enricher` the type is also used (`Enricher.MaxInvalidAttempts`).
 
+> Fix round 1 (implemented; the code blocks below are superseded where they differ): clipping and dead air count when they overlap the show proper and only the overlapping part is measured; `ShowProcessor` emits one `ShowSource` per coverage piece (so a dropout inside a recording is not analysed time); `ScheduleProvider` remembers the file's write time only after a successful read (an IO error is retried, a parse error waits for the file to change). New tests: A and B through the processor, clock-change days, partial coverage, dropout, retry, and `ScheduleFileContractTests` (ScheduleService.Save then ScheduleProvider read).
+
 **Files:**
 - Move: `src/WebAudioArchive.Web/Schedule/WeeklySchedule.cs` to `src/WebAudioArchive.Core/Schedule/WeeklySchedule.cs`; `src/WebAudioArchive.Web/Schedule/ScheduleExpander.cs` to `src/WebAudioArchive.Core/Schedule/ScheduleExpander.cs` (namespace line only)
 - Create: `src/WebAudioArchive.Core/Schedule/SavedScheduleFile.cs`, `src/WebAudioArchive.Core/Analysis/ShowAnalysis.cs`
@@ -6953,6 +6955,8 @@ git commit -m "Analysis: merged UTC day timelines and per-show analysis mapped f
 
 ### Task 14: The Ollama enricher with evidence quotes and pending retry
 
+
+> Fix round 1 (implemented; the code blocks below are superseded where they differ): `IsLocalOrPrivate` refuses unlisted and dotless hosts, trailing dots, user info and IPv4-mapped IPv6, accepts loopback, localhost, host.docker.internal, 10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7 and link-local, plus hosts in the new `WAA_OLLAMA_ALLOWED_HOSTS`. `ShowEnrichment` gains `Basis` (transcript fingerprint, prompt version, model): the invalid-attempt count counts only against the same basis and resets on success; a pending or failed show is due at once when the basis changed. Free text (summary, detail, topic and call-to-action values) is dropped or blanked when it contains a capitalised word, not opening a sentence, that is in neither the transcript nor the show title or station; summary 600, detail 200 and value 120 characters at most (`EnrichmentValidator.Validate(..., knownText)`). `OllamaClient` matches `name` to `name:latest`, ignores entries without a string name, sends `num_predict` (`EnrichmentOptions.MaxOutputTokens`, default 8192; `LlmRequest.NumPredict`), reads at most `MaxReplyBytes` (4 MiB) and notes that the caller's HttpClient must set AllowAutoRedirect false and a long timeout (Task 15).
 **Files:**
 - Create: `config/analysis/prompts/enrich-v1.system.md`, `config/analysis/prompts/enrich-v1.user.md`, `config/analysis/prompts/enrich-v1.schema.json`
 - Create: `src/WebAudioArchive.Core/Analysis/ShowEnrichment.cs`
@@ -10123,7 +10127,7 @@ The player markers and segments are built from these in plan 4.
 `WAA_SCRATCH_MAX_MB` (2048), `WAA_MIN_FREE_GB` (20), `WAA_WHISPER_MODEL_PATH` (the ggml model file; its name is recorded
 in transcripts), `WAA_WHISPER_DEVICE` (`auto`, `cpu` or `cuda`), `WAA_WHISPER_THREADS` (4), `WAA_WHISPER_DTW` (`off`;
 turn on only with `chunkSeconds` 30, D18), `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` (`qwen3.6:latest`; cloud
-models are refused), `WAA_OLLAMA_ALLOW_REMOTE`, `WAA_ENRICHMENT` (on or off), `WAA_ANALYSIS_CONFIG`,
+models are refused), `WAA_OLLAMA_ALLOWED_HOSTS` (comma separated extra private-network host names; any other non-local, non-private host is refused, dotless names included), `WAA_OLLAMA_ALLOW_REMOTE`, `WAA_ENRICHMENT` (on or off), `WAA_ANALYSIS_CONFIG`,
 `WAA_STATIONS_CONFIG`, `WAA_SCHEDULE_FILE`, `WAA_ANALYSIS_SINCE` (UTC), `WAA_LAG_ALARM_HOURS` (6), `WAA_PORT`. Thresholds, word lists and prompts are in `config/analysis/` (versioned; a change rebuilds events or
 re-enriches shows as needed).
 

@@ -10,33 +10,59 @@ namespace WebAudioArchive.Analysis.Enrichment;
 /// </summary>
 public sealed class OllamaClient(HttpClient http, Uri baseUrl) : ILlmClient
 {
+    public const int MaxReplyBytes = 4 * 1024 * 1024;
+
+    // The HttpClient is built by the caller (Task 15): it must set AllowAutoRedirect = false and a long Timeout (minutes), because a
+    // show enrichment can take several minutes and a redirect could send the transcript to another host.
+
+    HttpRequestMessage Post(string path, object body) => new(HttpMethod.Post, new Uri(baseUrl, path)) { Content = JsonContent.Create(body) };
+
+    /// <summary>An untagged name matches its :latest model (Ollama does the same).</summary>
+    static bool NameMatches(string? name, string model) =>
+        name == model || (!model.Contains(':') && name == model + ":latest");
+
+    static async Task<string> ReadLimitedAsync(HttpContent content, CancellationToken ct)
+    {
+        if (content.Headers.ContentLength > MaxReplyBytes) throw new EnrichmentInvalidException($"Ollama's reply is larger than {MaxReplyBytes} bytes");
+        await using var stream = await content.ReadAsStreamAsync(ct);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[16 * 1024];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            buffer.Write(chunk, 0, read);
+            if (buffer.Length > MaxReplyBytes) throw new EnrichmentInvalidException($"Ollama's reply is larger than {MaxReplyBytes} bytes");
+        }
+
+        return System.Text.Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+    }
     public async Task<LlmModel?> DescribeAsync(string model, CancellationToken ct)
     {
         try
         {
-            using var tags = await http.GetAsync(new Uri(baseUrl, "api/tags"), ct);
+            using var tags = await http.GetAsync(new Uri(baseUrl, "api/tags"), HttpCompletionOption.ResponseHeadersRead, ct);
             if (!tags.IsSuccessStatusCode) throw new LlmUnavailableException($"Ollama at {baseUrl} answered {(int)tags.StatusCode} to /api/tags");
-            using var tagsDoc = JsonDocument.Parse(await tags.Content.ReadAsStringAsync(ct));
+            using var tagsDoc = JsonDocument.Parse(await ReadLimitedAsync(tags.Content, ct));
             string? digest = null;
             var found = false;
             if (tagsDoc.RootElement.TryGetProperty("models", out var models) && models.ValueKind == JsonValueKind.Array)
             {
                 foreach (var m in models.EnumerateArray())
                 {
-                    if (m.TryGetProperty("name", out var name) && name.GetString() == model)
+                    if (m.ValueKind == JsonValueKind.Object && m.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String && NameMatches(name.GetString(), model))
                     {
                         found = true;
-                        digest = m.TryGetProperty("digest", out var d) ? d.GetString() : null;
+                        digest = m.TryGetProperty("digest", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() : null;
                     }
                 }
             }
 
             if (!found) return null;
             var thinking = false;
-            using var show = await http.PostAsJsonAsync(new Uri(baseUrl, "api/show"), new { model }, ct);
+            using var show = await http.SendAsync(Post("api/show", new { model }), HttpCompletionOption.ResponseHeadersRead, ct);
             if (show.IsSuccessStatusCode)
             {
-                using var showDoc = JsonDocument.Parse(await show.Content.ReadAsStringAsync(ct));
+                using var showDoc = JsonDocument.Parse(await ReadLimitedAsync(show.Content, ct));
                 if (showDoc.RootElement.TryGetProperty("capabilities", out var caps) && caps.ValueKind == JsonValueKind.Array)
                     thinking = caps.EnumerateArray().Any(c => c.GetString() == "thinking");
             }
@@ -65,7 +91,7 @@ public sealed class OllamaClient(HttpClient http, Uri baseUrl) : ILlmClient
             ["stream"] = false,
             ["format"] = r.Schema,
             ["keep_alive"] = "10m",
-            ["options"] = new Dictionary<string, object> { ["temperature"] = r.Temperature, ["seed"] = r.Seed, ["num_ctx"] = r.NumCtx },
+            ["options"] = new Dictionary<string, object> { ["temperature"] = r.Temperature, ["seed"] = r.Seed, ["num_ctx"] = r.NumCtx, ["num_predict"] = r.NumPredict },
             ["messages"] = new object[] { new { role = "system", content = r.System }, new { role = "user", content = r.User } },
         };
         if (r.DisableThinking) body["think"] = false;
@@ -73,7 +99,7 @@ public sealed class OllamaClient(HttpClient http, Uri baseUrl) : ILlmClient
         HttpResponseMessage response;
         try
         {
-            response = await http.PostAsJsonAsync(new Uri(baseUrl, "api/chat"), body, ct);
+            response = await http.SendAsync(Post("api/chat", body), HttpCompletionOption.ResponseHeadersRead, ct);
         }
         catch (HttpRequestException ex)
         {
@@ -86,7 +112,7 @@ public sealed class OllamaClient(HttpClient http, Uri baseUrl) : ILlmClient
 
         using (response)
         {
-            var text = await response.Content.ReadAsStringAsync(ct);
+            var text = await ReadLimitedAsync(response.Content, ct);
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 throw new LlmUnavailableException($"Ollama has no model '{r.Model}' ({text.Trim()}); on the host run: ollama pull {r.Model}");
             if ((int)response.StatusCode >= 500)

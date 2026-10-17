@@ -15,8 +15,9 @@ public static class ShowAnalysisBuilder
         static bool IsSuppressed(AnalysisEvent e) => e.Evidence?.GetValueOrDefault("suppressed") is { } s && s != "no";
         var swears = allSwears.Where(e => !IsSuppressed(e)).ToList();
         int Tier(string tier) => swears.Count(e => e.Evidence?.GetValueOrDefault("tier") == tier);
-        var clipping = inShow.Where(e => e.Type == EventTypes.Clipping).ToList();
-        var deadAir = inShow.Where(e => e.Type == EventTypes.DeadAir).ToList();
+        // Clipping and dead air have a duration: they count when they overlap the show proper, and only the part inside it is measured.
+        var clipping = events.Where(e => e.Type == EventTypes.Clipping && Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc) > 0).ToList();
+        var deadAir = events.Where(e => e.Type == EventTypes.DeadAir && Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc) > 0).ToList();
         var fillers = inShow.Count(e => e.Type == EventTypes.Filler);
         var speechMinutes = lines.Sum(l => Overlap(l.StartUtc, l.EndUtc, show.StartUtc, show.EndUtc)) / 60;
         var analysed = Union(sources.Select(s => (s.FromUtc, s.ToUtc)), show.StartUtc, show.EndUtc);
@@ -31,8 +32,8 @@ public static class ShowAnalysisBuilder
         var counts = new ShowCounts(
             Tier(SwearTiers.Mild), Tier(SwearTiers.Strong), Tier(SwearTiers.Severe),
             swears.Count(e => e.Evidence?.GetValueOrDefault("beforeWatershed") == "true"),
-            clipping.Count, Math.Round(clipping.Sum(e => (e.EndUtc - e.StartUtc).TotalMilliseconds), 3),
-            deadAir.Count, Math.Round(deadAir.Sum(e => (e.EndUtc - e.StartUtc).TotalSeconds), 3),
+            clipping.Count, Math.Round(clipping.Sum(e => Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc) * 1000), 3),
+            deadAir.Count, Math.Round(deadAir.Sum(e => Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc)), 3),
             fillers, Math.Round(speechMinutes, 6), speechMinutes >= 1 ? Math.Round(fillers / speechMinutes, 6) : null,
             Math.Round(analysed, 3), allSwears.Count(IsSuppressed));
 

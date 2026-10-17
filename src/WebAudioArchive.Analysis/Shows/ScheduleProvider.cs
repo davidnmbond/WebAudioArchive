@@ -50,8 +50,9 @@ public sealed class ScheduleProvider
         {
             var info = new FileInfo(_file);
             if (!info.Exists || info.LastWriteTimeUtc == _loadedWrite) return;
-            _loadedWrite = info.LastWriteTimeUtc;
             var saved = SavedScheduleFile.Read(_file);
+            // Remembered only after the file was read, so a transient IO error is retried on the next call.
+            _loadedWrite = info.LastWriteTimeUtc;
             var schedule = saved?.ToSchedule();
             if (saved is null || schedule is null || saved.Station != _station)
             {
@@ -64,6 +65,8 @@ public sealed class ScheduleProvider
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
         {
+            // A file that parses badly will parse badly again: wait for it to change. An IO error is transient and is retried.
+            if (ex is JsonException or NotSupportedException && _file is not null && File.Exists(_file)) _loadedWrite = new FileInfo(_file).LastWriteTimeUtc;
             _log.LogWarning("Could not read the saved schedule {Path}: {Error}", _file, ex.Message);
         }
     }

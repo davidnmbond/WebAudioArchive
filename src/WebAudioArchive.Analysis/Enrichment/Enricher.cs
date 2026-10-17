@@ -29,7 +29,9 @@ public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentProm
         var fingerprint = Fingerprint(lines);
         var current = existing.Derived is { } d && d.TranscriptFingerprint == fingerprint && d.PromptVersion == prompt.Version && d.Model == model;
         if (existing.Status == EnrichmentStatus.Done) return !current;
-        if (existing.Status == EnrichmentStatus.Failed && existing.Attempts >= MaxInvalidAttempts && existing.LastError?.EndsWith($"(transcript {fingerprint})", StringComparison.Ordinal) == true) return false;
+        // Pending or failed for other input (transcript, prompt or model changed): try again now with a fresh attempt count.
+        if (existing.Basis != Basis(fingerprint)) return true;
+        if (existing.Status == EnrichmentStatus.Failed && existing.Attempts >= MaxInvalidAttempts) return false;
         return existing.NextAttemptUtc is null || existing.NextAttemptUtc <= clock.UtcNow;
     }
 
@@ -41,6 +43,9 @@ public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentProm
         var now = clock.UtcNow;
         var lines = Lines(show);
         var fingerprint = Fingerprint(lines);
+        var basis = Basis(fingerprint);
+        // Invalid-answer attempts count only against the same input and reset on success or any change of input.
+        var priorAttempts = existing is not null && existing.Status != EnrichmentStatus.Done && existing.Basis == basis ? existing.Attempts : 0;
         ShowEnrichment result;
         string? raw = null;
         try
@@ -52,31 +57,31 @@ public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentProm
             for (var i = 0; i < parts.Count; i++)
             {
                 var user = prompt.User(show.Station, show.Title, show.StartUtc, show.EndUtc, i + 1, parts.Count, parts[i]);
-                var reply = await llm.ChatAsync(new LlmRequest(model, prompt.System, user, prompt.Schema, options.Temperature, options.Seed, options.NumCtx, info.Thinking), ct);
+                var reply = await llm.ChatAsync(new LlmRequest(model, prompt.System, user, prompt.Schema, options.Temperature, options.Seed, options.NumCtx, info.Thinking, options.MaxOutputTokens), ct);
                 raw = reply.Content;
-                merged.Add(EnrichmentValidator.Validate(reply.Content, parts[i], options.MaxItems));
+                merged.Add(EnrichmentValidator.Validate(reply.Content, parts[i], options.MaxItems, [show.Title, show.Station]));
                 log.LogInformation("Enriched {Show} part {Part}/{Parts} in {Seconds:0.0} s ({Prompt} prompt and {Output} output tokens)",
                     show.ShowId, i + 1, parts.Count, reply.Seconds, reply.PromptTokens, reply.OutputTokens);
             }
 
-            result = new ShowEnrichment(ShowEnrichment.CurrentSchema, show.ShowId, EnrichmentStatus.Done, (existing?.Attempts ?? 0) + 1, existing?.Unavailable ?? 0,
-                null, null, now, Merge(merged, info, fingerprint, now));
+            result = new ShowEnrichment(ShowEnrichment.CurrentSchema, show.ShowId, EnrichmentStatus.Done, 0, 0,
+                null, null, now, Merge(merged, info, fingerprint, now), basis);
         }
         catch (LlmUnavailableException ex)
         {
             var unavailable = (existing?.Unavailable ?? 0) + 1;
             var wait = TimeSpan.FromMinutes(Math.Min(120, 5 * Math.Pow(2, unavailable - 1)));
-            result = new ShowEnrichment(ShowEnrichment.CurrentSchema, show.ShowId, EnrichmentStatus.Pending, existing?.Attempts ?? 0, unavailable,
-                now + wait, ex.Message, now, existing?.Derived);
+            result = new ShowEnrichment(ShowEnrichment.CurrentSchema, show.ShowId, EnrichmentStatus.Pending, priorAttempts, unavailable,
+                now + wait, ex.Message, now, existing?.Derived, basis);
             log.LogInformation("Enrichment of {Show} pending: {Error}", show.ShowId, ex.Message);
         }
         catch (EnrichmentInvalidException ex)
         {
-            var attempts = (existing?.Attempts ?? 0) + 1;
+            var attempts = priorAttempts + 1;
             var failed = attempts >= MaxInvalidAttempts;
             result = new ShowEnrichment(ShowEnrichment.CurrentSchema, show.ShowId, failed ? EnrichmentStatus.Failed : EnrichmentStatus.Pending, attempts,
                 existing?.Unavailable ?? 0, failed ? null : now + TimeSpan.FromMinutes(5 * Math.Pow(2, attempts - 1)),
-                $"{ex.Message} (transcript {fingerprint})", now, existing?.Derived);
+                ex.Message, now, existing?.Derived, basis);
             if (raw is not null)
             {
                 var dir = paths.ShowDir(show.ShowId, show.StartUtc);
@@ -104,6 +109,8 @@ public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentProm
             .ToList();
         return TranscriptSlicer.Slice(docs, show.WindowFromUtc, show.WindowToUtc, preference);
     }
+
+    string Basis(string fingerprint) => fingerprint + "|" + prompt.Version + "|" + model;
 
     static string Fingerprint(IReadOnlyList<TimedLine> lines)
     {

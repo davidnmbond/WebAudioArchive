@@ -114,8 +114,9 @@ public sealed partial record AnalysisSettings(
         };
         var ollama = HttpUrl("WAA_OLLAMA_URL", Text("WAA_OLLAMA_URL", "http://host.docker.internal:11434"));
         var allowRemote = string.Equals(Optional("WAA_OLLAMA_ALLOW_REMOTE"), "true", StringComparison.OrdinalIgnoreCase);
-        if (!allowRemote && !IsLocalOrPrivate(ollama))
-            throw new AnalysisSettingsException($"WAA_OLLAMA_URL: '{ollama}' is not on this machine or a private network, so transcripts would leave it. Use a local Ollama, or set WAA_OLLAMA_ALLOW_REMOTE=true if that host is yours.");
+        var allowedHosts = (Optional("WAA_OLLAMA_ALLOWED_HOSTS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(h => h.ToLowerInvariant()).ToHashSet();
+        if (!allowRemote && !IsLocalOrPrivate(ollama, allowedHosts))
+            throw new AnalysisSettingsException($"WAA_OLLAMA_URL: '{ollama}' is not on this machine or a private network, so transcripts would leave it. Use a local Ollama, list the host in WAA_OLLAMA_ALLOWED_HOSTS (comma separated) if it is yours on a private network, or set WAA_OLLAMA_ALLOW_REMOTE=true.");
 
         var model = Text("WAA_OLLAMA_MODEL", "qwen3.6:latest");
         if (model.EndsWith(":cloud", StringComparison.OrdinalIgnoreCase) || model.EndsWith("-cloud", StringComparison.OrdinalIgnoreCase))
@@ -165,17 +166,24 @@ public sealed partial record AnalysisSettings(
             ? u
             : throw new AnalysisSettingsException($"{name}: '{value}' is not an absolute http(s) URL.");
 
-    /// <summary>Loopback, Docker's host alias, a single-label name (a compose service) or a private address.</summary>
-    static bool IsLocalOrPrivate(Uri u)
+    /// <summary>
+    /// Transcripts must not leave the machine: loopback, localhost, Docker's host alias, private and link-local addresses,
+    /// or a host the owner lists in WAA_OLLAMA_ALLOWED_HOSTS. Any other name (including a dotless one that is never
+    /// resolved here), a trailing dot, user info or an IPv4-mapped IPv6 address is refused.
+    /// </summary>
+    static bool IsLocalOrPrivate(Uri u, IReadOnlySet<string> allowed)
     {
+        if (u.UserInfo.Length > 0) return false;
         var host = u.Host.Trim('[', ']').ToLowerInvariant();
+        if (host.Length == 0 || host.EndsWith('.')) return false;
         if (host is "localhost" or "host.docker.internal") return true;
-        if (!IPAddress.TryParse(host, out var ip)) return !host.Contains('.');
+        if (!IPAddress.TryParse(host, out var ip)) return allowed.Contains(host);
+        if (ip.IsIPv4MappedToIPv6) return false;
         if (IPAddress.IsLoopback(ip)) return true;
         if (ip.AddressFamily == AddressFamily.InterNetwork)
         {
             var b = ip.GetAddressBytes();
-            return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168);
+            return b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254);
         }
 
         return ip.AddressFamily == AddressFamily.InterNetworkV6 && (ip.IsIPv6UniqueLocal || ip.IsIPv6LinkLocal);

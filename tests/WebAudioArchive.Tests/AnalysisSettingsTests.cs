@@ -80,7 +80,6 @@ public sealed class AnalysisSettingsTests : IDisposable
 
     [Theory]
     [InlineData("http://127.0.0.1:11434")]
-    [InlineData("http://ollama:11434")]
     [InlineData("http://192.168.1.20:11434")]
     [InlineData("http://10.0.0.5:11434")]
     [InlineData("http://172.20.0.3:11434")]
@@ -91,6 +90,44 @@ public sealed class AnalysisSettingsTests : IDisposable
         Assert.Equal(new Uri(url), s.OllamaUrl);
     }
 
+
+    [Theory]
+    [InlineData("http://localhost:11434")]
+    [InlineData("http://host.docker.internal:11434")]
+    [InlineData("http://169.254.10.1:11434")]
+    [InlineData("http://[fe80::1]:11434")]
+    [InlineData("http://[fd12:3456::1]:11434")]
+    public void More_local_and_private_forms_are_accepted(string url)
+    {
+        Assert.Equal(new Uri(url), AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_OLLAMA_URL", url))).OllamaUrl);
+    }
+
+    [Theory]
+    [InlineData("http://ai:11434")]
+    [InlineData("http://ollama:11434")]
+    [InlineData("http://localhost.:11434")]
+    [InlineData("http://127.0.0.1.:11434")]
+    [InlineData("http://user@localhost:11434")]
+    [InlineData("http://localhost:x@evil.example.com:11434")]
+    [InlineData("http://[::ffff:8.8.8.8]:11434")]
+    [InlineData("http://[::ffff:127.0.0.1]:11434")]
+    [InlineData("http://8.8.8.8:11434")]
+    [InlineData("http://172.32.0.1:11434")]
+    [InlineData("http://[2001:db8::1]:11434")]
+    public void Unlisted_dotless_and_tricky_hosts_are_refused(string url)
+    {
+        var ex = Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_OLLAMA_URL", url))));
+        Assert.Contains("WAA_OLLAMA_URL", ex.Message);
+    }
+
+    [Fact]
+    public void A_host_in_the_allow_list_is_accepted_and_others_still_are_not()
+    {
+        var env = (string url) => Env(("WAA_RECORDERS", Recorders), ("WAA_OLLAMA_URL", url), ("WAA_OLLAMA_ALLOWED_HOSTS", "ollama, Gpu-Box"));
+        Assert.Equal("ollama", AnalysisSettings.Load(env("http://ollama:11434")).OllamaUrl.Host);
+        Assert.Equal("gpu-box", AnalysisSettings.Load(env("http://gpu-box:11434")).OllamaUrl.Host);
+        Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(env("http://ai:11434")));
+    }
     [Fact]
     public void A_remote_ollama_needs_an_explicit_opt_in()
     {

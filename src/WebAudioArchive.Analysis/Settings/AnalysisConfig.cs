@@ -72,6 +72,7 @@ public sealed record EnrichmentOptions
     public int Seed { get; init; } = 42;
     public double Temperature { get; init; } = 0.1;
     public int MaxItems { get; init; } = 40;
+    public int MaxOutputTokens { get; init; } = 8192;
 }
 
 public sealed record AnalysisConfig

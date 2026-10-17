@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace WebAudioArchive.Analysis.Enrichment;
 
-public sealed record LlmRequest(string Model, string System, string User, JsonElement Schema, double Temperature, int Seed, int NumCtx, bool DisableThinking);
+public sealed record LlmRequest(string Model, string System, string User, JsonElement Schema, double Temperature, int Seed, int NumCtx, bool DisableThinking, int NumPredict = 8192);
 
 public sealed record LlmReply(string Content, int PromptTokens, int OutputTokens, double Seconds);
 

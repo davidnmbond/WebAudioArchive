@@ -28,8 +28,10 @@ public sealed record EnrichmentParts(
 public static partial class EnrichmentValidator
 {
     public const int MaxSummaryChars = 600;
+    public const int MaxDetailChars = 200;
+    public const int MaxValueChars = 120;
 
-    public static EnrichmentParts Validate(string content, IReadOnlyList<TimedLine> lines, int maxItems)
+    public static EnrichmentParts Validate(string content, IReadOnlyList<TimedLine> lines, int maxItems, IReadOnlyList<string>? knownText = null)
     {
         JsonDocument doc;
         try
@@ -48,6 +50,10 @@ public static partial class EnrichmentValidator
             var normalisedLines = lines.Select(l => (Line: l, Text: Normalise(l.Text))).ToList();
             var whole = " " + string.Join(' ', normalisedLines.Select(l => l.Text)) + " ";
             var reasons = new List<string>();
+            var vocabulary = Words(whole + " " + string.Join(' ', (knownText ?? []).Select(Normalise))).ToHashSet(StringComparer.Ordinal);
+
+            // A capitalised word (not opening a sentence) that no transcript line or known title contains: free text may not introduce names.
+            string? Unknown(string text) => UnknownName(text, vocabulary);
 
             // Where the quote was said: the line holding all of it, or (for a quote running over two lines) the line holding its first three words.
             DateTimeOffset? Where(string quote)
@@ -62,13 +68,17 @@ public static partial class EnrichmentValidator
                 var result = new Dictionary<string, DerivedClaim>(StringComparer.Ordinal);
                 foreach (var item in Items(root, name))
                 {
-                    var value = Text(item, "value").Trim();
+                    var value = Cap(Text(item, "value").Trim(), MaxValueChars);
                     var quote = Text(item, "quote").Trim();
                     var q = Normalise(quote);
                     if (value.Length == 0) { reasons.Add($"{name}: an entry with no value"); continue; }
+                    if (!nameInQuote && Unknown(value) is { } badValue) { reasons.Add($"{name} '{value}': dropped, it names '{badValue}' who is not in the transcript"); continue; }
                     if (q.Length < 3 || !whole.Contains(" " + q + " ", StringComparison.Ordinal)) { reasons.Add($"{name} '{value}': the quote is not in the transcript"); continue; }
                     if (nameInQuote && !(" " + q + " ").Contains(" " + Normalise(value) + " ", StringComparison.Ordinal)) { reasons.Add($"{name} '{value}': the quote does not contain the name"); continue; }
-                    var claim = new DerivedClaim(value, NullIfEmpty(Text(item, "detail")), Confidence(item), quote, Where(q));
+                    var detail = NullIfEmpty(Text(item, "detail"));
+                    if (detail is not null) detail = Cap(detail, MaxDetailChars);
+                    if (detail is not null && Unknown(detail) is { } badDetail) { reasons.Add($"{name} '{value}': detail dropped, it names '{badDetail}' who is not in the transcript"); detail = null; }
+                    var claim = new DerivedClaim(value, detail, Confidence(item), quote, Where(q));
                     var key = Normalise(value);
                     if (!result.TryGetValue(key, out var existing) || existing.Confidence < claim.Confidence) result[key] = claim;
                 }
@@ -104,7 +114,8 @@ public static partial class EnrichmentValidator
             var locations = Claims("locations", true);
             var calls = Claims("callsToAction", false);
             var summary = NullIfEmpty(Text(root, "summary"));
-            if (summary is not null && summary.Length > MaxSummaryChars) summary = summary[..MaxSummaryChars];
+            if (summary is not null) summary = Cap(summary, MaxSummaryChars);
+            if (summary is not null && Unknown(summary) is { } badSummary) { reasons.Add($"summary: dropped, it names '{badSummary}' who is not in the transcript"); summary = null; }
             var language = NullIfEmpty(Text(root, "language"));
             if (language is not null && language.Length > 8) language = null;
 
@@ -130,6 +141,25 @@ public static partial class EnrichmentValidator
         }
 
         return t;
+    }
+
+    static string Cap(string s, int max) => s.Length <= max ? s : s[..max].TrimEnd();
+
+    static IEnumerable<string> Words(string normalised) => normalised.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+    static string? UnknownName(string text, HashSet<string> vocabulary)
+    {
+        var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            var raw = tokens[i].Trim('"', '(', ')', ',', ';', ':', '.', '!', '?');
+            if (raw.Length < 2 || !char.IsUpper(raw[0])) continue;
+            var startsSentence = i == 0 || tokens[i - 1].EndsWith('.') || tokens[i - 1].EndsWith('!') || tokens[i - 1].EndsWith('?') || tokens[i - 1].EndsWith(':');
+            if (startsSentence) continue;
+            if (Words(Normalise(raw)).Any(w => w.Length > 1 && !vocabulary.Contains(w))) return raw;
+        }
+
+        return null;
     }
 
     static IEnumerable<JsonElement> Items(JsonElement root, string name)

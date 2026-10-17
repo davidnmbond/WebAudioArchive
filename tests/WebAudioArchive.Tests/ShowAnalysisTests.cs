@@ -180,4 +180,115 @@ public sealed class ShowAnalysisTests : IDisposable
         Assert.Equal(1, doc.Counts.SwearsBeforeWatershed);
         Assert.Equal(3, doc.Counts.SuppressedSwearRuns);
     }
+
+    [Fact]
+    public void Dead_air_and_clipping_are_clipped_to_the_show_proper_before_their_duration_is_counted()
+    {
+        var occurrence = new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance).Occurrences(Show, Show.AddMinutes(1))[0];
+        AnalysisEvent[] events =
+        [
+            Event(EventTypes.DeadAir, Show.AddMinutes(58), seconds: 600),
+            Event(EventTypes.DeadAir, Show.AddMinutes(-1), seconds: 90),
+            Event(EventTypes.Clipping, Show.AddMinutes(-2), seconds: 10),
+        ];
+
+        var doc = ShowAnalysisBuilder.Build(occurrence, TimeSpan.FromMinutes(5), events, [], [], complete: true, _clock.UtcNow);
+
+        Assert.Equal(2, doc.Counts.DeadAirEvents);
+        Assert.Equal(120 + 30, doc.Counts.DeadAirSeconds, 3);
+        Assert.Equal(0, doc.Counts.ClippingEvents);
+    }
+
+    [Fact]
+    public void Partial_coverage_reports_only_the_analysed_minutes()
+    {
+        var occurrence = new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance).Occurrences(Show, Show.AddMinutes(1))[0];
+
+        var doc = ShowAnalysisBuilder.Build(occurrence, TimeSpan.FromMinutes(5), [], [], [new ShowSource("a", "a/job", Show.AddMinutes(-30), Show.AddMinutes(20))],
+            complete: true, _clock.UtcNow);
+
+        Assert.Equal(1200, doc.Counts.AnalysedSeconds, 3);
+        Assert.Contains(doc.Notes, n => n.Contains("Only 20 of 60 minutes"));
+    }
+
+    const string SundaySchedule = """
+        { "station": "burst", "timezone": "Europe/London", "fetchedUtc": "2026-10-15T12:00:00+00:00",
+          "slots": [ { "day": "Sunday", "localStart": "00:00", "minutes": 180, "title": "Night Owls" },
+                     { "day": "Sunday", "localStart": "20:00", "minutes": 60, "title": "Sunday Session" } ] }
+        """;
+
+    [Theory]
+    [InlineData(2026, 10, 25, "2026-10-24T23:00:00+00:00", "2026-10-25T20:00:00+00:00")]
+    [InlineData(2027, 3, 28, "2027-03-28T00:00:00+00:00", "2027-03-28T19:00:00+00:00")]
+    public void Show_analysis_on_the_clock_change_days_uses_real_utc_durations(int year, int month, int day, string nightStart, string sessionStart)
+    {
+        var file = Path.Combine(_root, "sunday.json");
+        File.WriteAllText(file, SundaySchedule);
+        var provider = new ScheduleProvider(file, null, "burst", NullLogger.Instance);
+        var from = new DateTimeOffset(year, month, day, 0, 0, 0, TimeSpan.Zero).AddHours(-2);
+        var shows = provider.Occurrences(from, from.AddHours(30));
+        var night = Assert.Single(shows, s => s.Title == "Night Owls");
+        var session = Assert.Single(shows, s => s.Title == "Sunday Session");
+        Assert.Equal(DateTimeOffset.Parse(nightStart), night.StartUtc);
+        Assert.Equal(DateTimeOffset.Parse(sessionStart), session.StartUtc);
+
+        var inRepeatedHour = Event(EventTypes.Filler, night.StartUtc.AddMinutes(100));
+        var doc = ShowAnalysisBuilder.Build(night, TimeSpan.FromMinutes(5), [inRepeatedHour], [], [new ShowSource("a", "a/job", night.StartUtc, night.EndUtc)], true, night.EndUtc.AddHours(1));
+
+        Assert.Equal(night.Duration.TotalSeconds, doc.Counts.AnalysedSeconds, 3);
+        Assert.Equal(night.EndUtc, doc.EndUtc);
+        Assert.Equal(1, doc.Counts.Fillers);
+        Assert.DoesNotContain(doc.Notes, n => n.StartsWith("Only", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_and_b_events_for_the_same_time_count_once_and_b_fills_a_hole_through_the_processor()
+    {
+        var jobA = "a/2026/10-15/190000";
+        var jobB = "b/2026/10-15/190000";
+        var segA = Segment("a", Show, Show.AddMinutes(20), Event(EventTypes.Filler, Show.AddMinutes(10))) with { Scope = "segment:" + jobA };
+        var segB = Segment("b", Show, Show.AddHours(1),
+            Event(EventTypes.Filler, Show.AddMinutes(10).AddSeconds(0.3), "b"),
+            Event(EventTypes.Filler, Show.AddMinutes(40), "b")) with { Scope = "segment:" + jobB };
+        AnalysisJson.Write(Path.Combine(Paths.SegmentDir(jobA), AnalysisPaths.EventsFile), segA);
+        AnalysisJson.Write(Path.Combine(Paths.SegmentDir(jobB), AnalysisPaths.EventsFile), segB);
+        var processor = new ShowProcessor(Paths, new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance), ["a", "b"], TimeSpan.FromMinutes(5), _clock, NullLogger.Instance);
+
+        var doc = Assert.Single(processor.Update(Show, Show.AddHours(3), []), d => d.Title == "Backseat Aux");
+
+        Assert.Equal(2, doc.Counts.Fillers);
+        Assert.Equal(3600, doc.Counts.AnalysedSeconds, 3);
+        Assert.Equal(2, doc.Sources.Count);
+    }
+
+    [Fact]
+    public void A_dropout_inside_one_recording_is_not_counted_as_analysed()
+    {
+        var job = "a/2026/10-15/190000";
+        var segment = Segment("a", Show, Show.AddHours(1)) with
+        {
+            Scope = "segment:" + job,
+            Coverage = [new SourceSpan("a", Show, Show.AddMinutes(20)), new SourceSpan("a", Show.AddMinutes(30), Show.AddHours(1))],
+        };
+        AnalysisJson.Write(Path.Combine(Paths.SegmentDir(job), AnalysisPaths.EventsFile), segment);
+        var processor = new ShowProcessor(Paths, new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance), ["a", "b"], TimeSpan.FromMinutes(5), _clock, NullLogger.Instance);
+
+        var doc = Assert.Single(processor.Update(Show, Show.AddHours(3), []), d => d.Title == "Backseat Aux");
+
+        Assert.Equal(2, doc.Sources.Count);
+        Assert.Equal(3000, doc.Counts.AnalysedSeconds, 3);
+        Assert.Contains(doc.Notes, n => n.Contains("Only 50 of 60 minutes"));
+    }
+
+    [Fact]
+    public void A_schedule_file_that_cannot_be_read_yet_is_retried_on_the_next_call()
+    {
+        var file = WriteSchedule();
+        var provider = new ScheduleProvider(file, null, "burst", NullLogger.Instance);
+
+        using (new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.None))
+            Assert.Empty(provider.Occurrences(Show.AddHours(-1), Show.AddHours(3)));
+
+        Assert.Equal(2, provider.Occurrences(Show.AddHours(-1), Show.AddHours(3)).Count);
+    }
 }

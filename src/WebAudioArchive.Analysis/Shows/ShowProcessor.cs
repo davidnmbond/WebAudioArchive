@@ -33,8 +33,9 @@ public sealed class ShowProcessor(AnalysisPaths paths, ScheduleProvider schedule
                 .OfType<TranscriptDocument>()
                 .ToList();
             var lines = TranscriptSlicer.Slice(transcripts, windowFrom, windowTo, preference);
+            // One source per stretch of audio actually analysed (the coverage splits a recording at timeline gaps), not per segment.
             var sources = segments
-                .Select(s => new ShowSource(s.Coverage.FirstOrDefault()?.Recorder ?? "", s.Scope["segment:".Length..], s.FromUtc, s.ToUtc))
+                .SelectMany(s => s.Coverage.Select(c => new ShowSource(c.Recorder, s.Scope.StartsWith("segment:", StringComparison.Ordinal) ? s.Scope["segment:".Length..] : s.Scope, c.FromUtc, c.ToUtc)))
                 .OrderBy(s => s.FromUtc)
                 .ToList();
             var complete = !pending.Any(p => p.FromUtc < windowTo && p.ToUtc > windowFrom);

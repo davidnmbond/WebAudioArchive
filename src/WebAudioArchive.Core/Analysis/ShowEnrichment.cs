@@ -45,7 +45,8 @@ public sealed record ShowEnrichment(
     DateTimeOffset? NextAttemptUtc,
     string? LastError,
     DateTimeOffset UpdatedUtc,
-    EnrichmentDerived? Derived)
+    EnrichmentDerived? Derived,
+    string? Basis = null)
 {
     public const int CurrentSchema = 1;
 }
