@@ -517,11 +517,16 @@ matches the other at one of those two offsets. Sidecar wall times are only estim
   eligible, but re-analysis of an older hour must also look in `data/merged` (same `master/<yyyy>/<MM-dd>/`
   layout and sidecar schema, recorder id `merged`). Consolidation waits for an hour's analysis to finish, so an
   hour is never moved out from under a running job. `data/merged` is separate from `data/analysis`.
+  **Handshake (agreed with the plan 3 work, 2026-10-17):** a source segment may move only when its analysis
+  `state.json` (located with `AnalysisPaths` in Core:
+  `data/analysis/<station>/segments/<recorder>/<yyyy>/<MM-dd>/<stem>/state.json`) exists with status `done`
+  (or `failed`, parked) per the `JobStatus` constants, and none for that segment is `waiting` or `running`. A missing
+  `state.json` means not yet analysed: not safe. Analysis scans only `master/**`, so it never reads `held/`.
 - **Reporting:** Status gains a consolidation card (eligible backlog, last merged hour, failures, hours awaiting
   confirmation, disk freed); Recordings shows merged segments as their own lane.
-- **Deployment safety (#102):** the recorders move to their own compose project so that building or restarting
-  any other service can never recreate them; the consolidator lives in the main project. (Proposed; needs the
-  owner's approval at planning.)
+- **Deployment safety (#102, approved 2026-10-17):** the recorders move to their own compose project
+  (`docker/docker-compose.recorders.yml`) so that building or restarting any other service can never recreate
+  them; the consolidator lives in the main project.
 - **Tests:** synthetic MP3 frame streams for A and B with chosen offsets, gaps on one side, gaps on both,
   reconnect replays, repeated silence frames and hour cut differences; property: the merged stream equals the
   de-duplicated union in order; a corrupted source or a lost frame makes verification fail and moves nothing.
