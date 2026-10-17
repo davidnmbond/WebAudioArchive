@@ -6,6 +6,8 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <!-- Decision D18: managed LAME port (LGPL-3.0), tests only, makes synthetic MP3s; never shipped in an image. -->
+    <PackageReference Include="GroovyMp3" Version="0.1.3" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.0" />
   </ItemGroup>
@@ -17,8 +19,12 @@
     <!-- Aliased because the Web and Worker projects each have a public top-level Program class. -->
     <ProjectReference Include="..\..\src\WebAudioArchive.Web\WebAudioArchive.Web.csproj" Aliases="web" />
     <ProjectReference Include="..\..\src\WebAudioArchive.Worker\WebAudioArchive.Worker.csproj" />
+    <ProjectReference Include="..\..\src\WebAudioArchive.Analysis\WebAudioArchive.Analysis.csproj" />
+    <!-- Aliased because the Worker project has a public top-level Program class. -->
+    <ProjectReference Include="..\..\src\WebAudioArchive.Analysis.Service\WebAudioArchive.Analysis.Service.csproj" Aliases="analysissvc" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\fixtures\**\*" Link="fixtures\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\config\analysis\**\*" Link="config\analysis\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

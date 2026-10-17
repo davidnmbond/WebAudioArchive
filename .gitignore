@@ -6,3 +6,5 @@ obj/
 /temp/
 .superpowers/
 .env
+
+/models/

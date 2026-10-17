@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Decision D18: managed MP3 frame decoder, resampler and whisper.cpp bindings. No native runtime here (see the service). -->
+    <PackageReference Include="NLayer" Version="3.0.0" />
+    <PackageReference Include="NAudio.Core" Version="3.1.0" />
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="WebAudioArchive.Tests" />
+  </ItemGroup>
+</Project>

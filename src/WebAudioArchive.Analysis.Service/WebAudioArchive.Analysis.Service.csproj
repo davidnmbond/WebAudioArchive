@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime.Cuda.Linux" Version="1.9.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />
+    <ProjectReference Include="..\WebAudioArchive.Analysis\WebAudioArchive.Analysis.csproj" />
+  </ItemGroup>
+</Project>

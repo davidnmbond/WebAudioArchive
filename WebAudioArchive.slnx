@@ -1,5 +1,7 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/WebAudioArchive.Analysis.Service/WebAudioArchive.Analysis.Service.csproj" />
+    <Project Path="src/WebAudioArchive.Analysis/WebAudioArchive.Analysis.csproj" />
     <Project Path="src/WebAudioArchive.Core/WebAudioArchive.Core.csproj" />
     <Project Path="src/WebAudioArchive.Web/WebAudioArchive.Web.csproj" />
     <Project Path="src/WebAudioArchive.Worker/WebAudioArchive.Worker.csproj" />

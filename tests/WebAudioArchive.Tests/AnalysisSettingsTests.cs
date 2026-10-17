@@ -1,0 +1,110 @@
+using WebAudioArchive.Analysis.Settings;
+
+namespace WebAudioArchive.Tests;
+
+public sealed class AnalysisSettingsTests : IDisposable
+{
+    readonly string _root = Path.Combine(Path.GetTempPath(), "waa-aset-" + Guid.NewGuid().ToString("N"));
+
+    public AnalysisSettingsTests()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "a"));
+        Directory.CreateDirectory(Path.Combine(_root, "b"));
+    }
+
+    public void Dispose() => Directory.Delete(_root, recursive: true);
+
+    static Func<string, string?> Env(params (string Name, string Value)[] pairs)
+    {
+        var d = pairs.ToDictionary(p => p.Name, p => p.Value);
+        return n => d.GetValueOrDefault(n);
+    }
+
+    string Recorders => $"a={_root}/a,b={_root}/b";
+
+    [Fact]
+    public void Defaults_are_the_compose_values()
+    {
+        var s = AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders)));
+
+        Assert.Equal("burst", s.Station);
+        Assert.Equal(new[] { "a", "b" }, s.Preference);
+        Assert.Equal("/analysis", s.OutputDir);
+        Assert.Equal("/scratch", s.ScratchDir);
+        Assert.Equal(2048L * 1024 * 1024, s.ScratchMaxBytes);
+        Assert.Equal(20L * 1024 * 1024 * 1024, s.MinFreeBytes);
+        Assert.Equal("/models/ggml-large-v3-turbo-q8_0.bin", s.WhisperModelPath);
+        Assert.Equal("ggml-large-v3-turbo-q8_0", s.WhisperModel);
+        Assert.Equal(WhisperDevice.Auto, s.WhisperDevice);
+        Assert.Equal(4, s.WhisperThreads);
+        Assert.False(s.WhisperDtw);
+        Assert.Equal(new Uri("http://host.docker.internal:11434"), s.OllamaUrl);
+        Assert.Equal("qwen3.6:latest", s.OllamaModel);
+        Assert.True(s.EnrichmentEnabled);
+        Assert.Equal("/config/analysis/analysis.json", s.ConfigPath);
+        Assert.Equal(TimeSpan.FromHours(6), s.LagAlarm);
+        Assert.Equal(8080, s.Port);
+        Assert.Null(s.Since);
+    }
+
+    [Fact]
+    public void Preference_puts_listed_recorders_first_and_appends_the_rest()
+    {
+        var s = AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_ANALYSIS_PREFERENCE", "b")));
+        Assert.Equal(new[] { "b", "a" }, s.Preference);
+    }
+
+    [Fact]
+    public void Since_must_be_utc()
+    {
+        var ok = AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_ANALYSIS_SINCE", "2026-10-15T00:00:00Z")));
+        Assert.Equal(new DateTimeOffset(2026, 10, 15, 0, 0, 0, TimeSpan.Zero), ok.Since);
+
+        Assert.Contains("WAA_ANALYSIS_SINCE", Assert.Throws<AnalysisSettingsException>(() =>
+            AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_ANALYSIS_SINCE", "2026-10-15T01:00:00+01:00")))).Message);
+    }
+
+    [Theory]
+    [InlineData("WAA_OLLAMA_MODEL", "kimi-k2.6:cloud", "cloud model")]
+    [InlineData("WAA_OLLAMA_URL", "https://ollama.example.com", "leave")]
+    [InlineData("WAA_WHISPER_DEVICE", "gpu", "auto, cpu or cuda")]
+    [InlineData("WAA_SCRATCH_MAX_MB", "10", "WAA_SCRATCH_MAX_MB")]
+    [InlineData("WAA_ENRICHMENT", "maybe", "on or off")]
+    [InlineData("WAA_ANALYSIS_PREFERENCE", "c", "recorder 'c'")]
+    [InlineData("WAA_STATION", "../etc", "WAA_STATION")]
+    public void Bad_values_are_refused_by_name(string name, string value, string expected)
+    {
+        var ex = Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), (name, value))));
+        Assert.Contains(expected, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:11434")]
+    [InlineData("http://ollama:11434")]
+    [InlineData("http://192.168.1.20:11434")]
+    [InlineData("http://10.0.0.5:11434")]
+    [InlineData("http://172.20.0.3:11434")]
+    [InlineData("http://[::1]:11434")]
+    public void Local_and_private_ollama_hosts_are_accepted(string url)
+    {
+        var s = AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_OLLAMA_URL", url)));
+        Assert.Equal(new Uri(url), s.OllamaUrl);
+    }
+
+    [Fact]
+    public void A_remote_ollama_needs_an_explicit_opt_in()
+    {
+        var s = AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_OLLAMA_URL", "https://ollama.example.com"), ("WAA_OLLAMA_ALLOW_REMOTE", "true")));
+        Assert.Equal("ollama.example.com", s.OllamaUrl.Host);
+    }
+
+    [Fact]
+    public void Missing_recorders_or_roots_name_the_setting()
+    {
+        Assert.Contains("WAA_RECORDERS is not set", Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(Env())).Message);
+        Assert.Contains("does not exist", Assert.Throws<AnalysisSettingsException>(() =>
+            AnalysisSettings.Load(Env(("WAA_RECORDERS", $"a={_root}/missing")))).Message);
+        Assert.Contains("listed twice", Assert.Throws<AnalysisSettingsException>(() =>
+            AnalysisSettings.Load(Env(("WAA_RECORDERS", $"a={_root}/a,a={_root}/b")))).Message);
+    }
+}
