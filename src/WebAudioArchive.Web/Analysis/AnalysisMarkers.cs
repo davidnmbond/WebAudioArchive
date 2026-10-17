@@ -39,7 +39,13 @@ public static class AnalysisMarkers
         [Talk] = "var(--bs-info)",
     };
 
-    public static IReadOnlyList<PDMediaMarker> Markers(IEnumerable<AnalysisEvent> events, ClipClock clock) => events
+    /// <summary>The UTC span of the clip's audio, or null when the clock has no timeline. Anything outside it is dropped: the clock would clamp it to the clip's edges and draw it there.</summary>
+    static (DateTimeOffset From, DateTimeOffset To)? Window(ClipClock clock) =>
+        clock.ToUtc(TimeSpan.Zero) is { } from && clock.ToUtc(TimeSpan.FromSeconds(clock.Seconds)) is { } to ? (from, to) : null;
+
+    public static IReadOnlyList<PDMediaMarker> Markers(IEnumerable<AnalysisEvent> events, ClipClock clock) =>
+        Window(clock) is not { } w ? [] : events
+        .Where(e => e.StartUtc >= w.From && e.StartUtc <= w.To)
         .Select(e => new PDMediaMarker
         {
             Id = "event-" + e.Id,
@@ -53,8 +59,9 @@ public static class AnalysisMarkers
 
     public static IReadOnlyList<PDMediaSegment> Segments(IEnumerable<AnalysisEvent> events, IEnumerable<TimedLine> lines, ClipClock clock)
     {
+        if (Window(clock) is not { } w) return [];
         var list = events
-            .Where(e => e.Type == EventTypes.DeadAir)
+            .Where(e => e.Type == EventTypes.DeadAir && e.EndUtc > w.From && e.StartUtc < w.To)
             .Select(e => new PDMediaSegment
             {
                 Id = "dead-" + e.Id,
@@ -66,7 +73,7 @@ public static class AnalysisMarkers
             })
             .ToList();
         var i = 0;
-        foreach (var l in lines)
+        foreach (var l in lines.Where(l => l.EndUtc > w.From && l.StartUtc < w.To))
         {
             list.Add(new PDMediaSegment
             {

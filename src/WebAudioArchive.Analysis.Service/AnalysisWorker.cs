@@ -11,7 +11,7 @@ public sealed class AnalysisEntryPoint;
 /// take it, so the job in hand is abandoned within seconds and left waiting (no attempt used). Run the container with a
 /// stop grace period of at least 60 s (docker compose stop_grace_period), otherwise Docker kills it and the attempt counts.
 /// </summary>
-public sealed class AnalysisWorker(AnalysisRuntime runtime, TimeProvider time, ILogger<AnalysisWorker> log) : BackgroundService
+public sealed class AnalysisWorker(AnalysisRuntime runtime, ServiceLock serviceLock, ILogger<AnalysisWorker> log) : BackgroundService
 {
     public static readonly TimeSpan PassInterval = TimeSpan.FromSeconds(60);
 
@@ -21,6 +21,8 @@ public sealed class AnalysisWorker(AnalysisRuntime runtime, TimeProvider time, I
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Yield();
+        // The lock file shows the maintenance commands that the service is running; refreshed during a long pass too.
+        using var heartbeat = new Timer(_ => serviceLock.Refresh(), null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
         try
         {
             var swept = runtime.Scratch.SweepStale();
@@ -44,7 +46,7 @@ public sealed class AnalysisWorker(AnalysisRuntime runtime, TimeProvider time, I
             catch (Exception ex)
             {
                 log.LogError(ex, "Analysis pass failed; trying again in {Seconds} s", PassInterval.TotalSeconds);
-                runtime.Metrics.PassFailed($"{ex.GetType().Name}: {ex.Message}", time.GetUtcNow());
+                runtime.Metrics.PassFailed($"{ex.GetType().Name}: {ex.Message}");
             }
 
             try

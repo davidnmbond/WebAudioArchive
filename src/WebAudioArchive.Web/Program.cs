@@ -120,8 +120,9 @@ if (settings.AnalysisDir is not null)
 app.MapGet("/api/analysis/events", (HttpRequest req, AnalysisReader a) => AnalysisReader.Respond(() =>
 {
     var (from, to) = AnalysisReader.Range(req.Query["from"], req.Query["to"], AnalysisReader.MaxEventsRange);
-    var events = a.Events(from, to, req.Query["types"], string.Equals(req.Query["includeReview"], "true", StringComparison.OrdinalIgnoreCase));
-    return new { from, to, count = events.Count, events };
+    var includeReview = string.Equals(req.Query["includeReview"], "true", StringComparison.OrdinalIgnoreCase);
+    var events = a.Events(from, to, req.Query["types"], includeReview);
+    return new { from, to, includeReview, count = events.Count, events = events.Select(AnalysisReader.EventView).ToList() };
 }));
 app.MapGet("/api/analysis/transcript", (HttpRequest req, AnalysisReader a) => AnalysisReader.Respond(() =>
 {

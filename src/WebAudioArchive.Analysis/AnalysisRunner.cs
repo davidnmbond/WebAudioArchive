@@ -35,6 +35,7 @@ public sealed class AnalysisRunner(
     public const int MaxEnrichmentsPerPass = 2;
     public static readonly TimeSpan CatchUp = TimeSpan.FromDays(7);
     readonly Dictionary<string, ShowAnalysis> _shows = new(StringComparer.Ordinal);
+    readonly HashSet<string> _reportedBad = new(StringComparer.Ordinal);
     bool _caughtUp;
 
     public async Task PassAsync(CancellationToken ct)
@@ -48,28 +49,37 @@ public sealed class AnalysisRunner(
             metrics.SetCurrent(null, clock.UtcNow);
             log.LogInformation("Analysis stopped: the work in hand is left to resume");
         }
+        catch (Exception ex)
+        {
+            // A whole pass failed (a folder cannot be listed, the disk check threw): recorded, shown in /healthz (503 once no pass has finished for 15 minutes), retried next time.
+            log.LogError(ex, "Analysis pass failed; trying again next time");
+            metrics.ClearCurrent();
+            metrics.PassFailed($"{ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     async Task RunPassAsync(CancellationToken ct)
     {
         var now = clock.UtcNow;
         metrics.SetDisk(disk.FreeBytes(), scratch.UsedBytes(), scratch.MaxBytes, disk.MinFreeBytes);
+        var ready = await ReadyAsync(ct);
+        var plan = Decide();
         if (disk.IsLow())
         {
+            // Nothing is analysed, but the backlog and its lag are still measured (they only read files), so a long low-disk pause raises the alarm.
+            PublishBacklog(plan);
             metrics.SetPaused(LowDisk());
             log.LogWarning("Analysis paused: {Reason}", LowDisk());
             metrics.PassCompleted(now);
             return;
         }
 
-        var ready = await ReadyAsync(ct);
-        var plan = Decide();
         metrics.SetPaused(!ready && plan.Any(p => p.Decision.Action == JobAction.Run) ? "whisper is not ready (starting, loading the model, or not running)" : null);
 
         var touched = new List<(DateTimeOffset From, DateTimeOffset To)>();
         foreach (var (job, decision) in plan)
         {
-            var parkable = decision.Action == JobAction.Skip && NeedsParking(job);
+            var parkable = decision.Parkable;
             if (decision.Action is JobAction.Skip && !parkable) continue;
             if (decision.Action == JobAction.Wait) continue;
             if (decision.Action == JobAction.Run && !ready) continue;
@@ -103,17 +113,21 @@ public sealed class AnalysisRunner(
                 break;
             }
 
-            if (outcome.Status == JobStatus.Done) touched.Add((job.Source.Meta.StartUtc, job.Source.Meta.EndUtc));
+            // A job that finished or failed for good changes which shows are complete (a failed job no longer counts as pending).
+            if (outcome.Status is JobStatus.Done or JobStatus.Failed) touched.Add((job.Source.Meta.StartUtc, job.Source.Meta.EndUtc));
             if (outcome.Status == JobStatus.Waiting) ready = await ReadyAsync(ct);
         }
 
         metrics.SetCurrent(null, clock.UtcNow);
         var after = Decide();
-        var pending = Pending(after);
-        metrics.SetBacklog(pending.Count, pending.Count == 0 ? null : pending.Min(p => p.ToUtc),
-            after.Count(p => p.Decision.Action == JobAction.Skip && p.Decision.Reason.StartsWith("failed", StringComparison.Ordinal)));
+        var pending = PublishBacklog(after);
 
-        if (!_caughtUp)
+        // A show left incomplete is re-checked every pass once nothing overlapping it is pending any more.
+        foreach (var open in _shows.Values.Where(s => !s.Complete && !pending.Any(p => p.FromUtc < s.WindowToUtc && p.ToUtc > s.WindowFromUtc)))
+            touched.Add((open.WindowFromUtc, open.WindowToUtc));
+
+        // The 7 day catch-up waits for whisper: with the model missing every finished segment looks pending, and shows would be rewritten as incomplete.
+        if (!_caughtUp && ready)
         {
             touched.Add((now - CatchUp, now));
             _caughtUp = true;
@@ -224,16 +238,12 @@ public sealed class AnalysisRunner(
         return ready;
     }
 
-    bool NeedsParking(SegmentJob job)
+    List<SourceSpan> PublishBacklog(List<(SegmentJob Job, JobDecision Decision)> decided)
     {
-        try
-        {
-            return pipeline.NeedsParking(job);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return false;
-        }
+        var pending = Pending(decided);
+        metrics.SetBacklog(pending.Count, pending.Count == 0 ? null : pending.Min(p => p.ToUtc),
+            decided.Count(p => p.Decision.Action == JobAction.Skip && p.Decision.Reason.StartsWith("failed", StringComparison.Ordinal)));
+        return pending;
     }
 
     /// <summary>A segment whose decision cannot be worked out (for example a file name that is not a safe job id) is skipped as failed, so it cannot stop the rest of the plan.</summary>
@@ -248,8 +258,14 @@ public sealed class AnalysisRunner(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            log.LogWarning("Segment {Job} cannot be analysed: {Error}", job.Source.JobId, ex.Message);
-            return new JobDecision(JobAction.Skip, $"failed: cannot be analysed ({ex.GetType().Name}: {ex.Message})");
+            var reason = $"cannot be analysed ({ex.GetType().Name}: {ex.Message})";
+            if (_reportedBad.Add(job.Source.JobId))
+            {
+                log.LogWarning("Segment {Job} {Reason}", job.Source.JobId, reason);
+                metrics.RecordFailure(job.Source.Recorder, job.Source.JobId, reason, clock.UtcNow);
+            }
+
+            return new JobDecision(JobAction.Skip, "failed: " + reason);
         }
     }
 

@@ -10,8 +10,8 @@ public sealed record SegmentClassStatus(int Done, int Failed, DateTimeOffset? La
 
 /// <summary>
 /// What /healthz reports. OldestPendingEndUtc is the end of the oldest closed segment not yet analysed: lag is now
-/// minus that. Backlog is the queue length. LastActivityUtc is the last sign of life inside a long pass (a job started or
-/// finished); CurrentJobStartedUtc is when CurrentJob began.
+/// minus that. Backlog is the queue length. LastActivityUtc is the last sign of life inside a long pass (a job, show update or enrichment started or
+/// finished); while CurrentJob is set it is when that job started. A failed pass is not a sign of life.
 /// </summary>
 public sealed record MetricsSnapshot(
     DateTimeOffset StartedUtc,
@@ -62,6 +62,9 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
     public void SetPaused(string? reason) => Set(s => s with { Paused = reason });
 
     /// <summary>The job in progress (null when idle). Starting one counts as activity, so a long backlog pass is not mistaken for a stall.</summary>
+    /// <summary>Clears the current job without counting as activity (used when a pass fails).</summary>
+    public void ClearCurrent() => Set(s => s with { CurrentJob = null });
+
     public void SetCurrent(string? job, DateTimeOffset now) =>
         Set(s => s with { CurrentJob = job, LastActivityUtc = now });
 
@@ -74,7 +77,7 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
     public void PassCompleted(DateTimeOffset now) => Set(s => s with { LastPassUtc = now, LastActivityUtc = now, LastPassError = null });
 
     /// <summary>A whole pass failed (for example the folder could not be listed): it is retried, and healthz says why.</summary>
-    public void PassFailed(string error, DateTimeOffset now) => Set(s => s with { LastPassError = error, LastActivityUtc = now });
+    public void PassFailed(string error) => Set(s => s with { LastPassError = error });
 
     /// <summary>A failure outside a segment job (enrichment, a show update): kept under its own class beside the segment classes.</summary>
     public void RecordFailure(string segmentClass, string? job, string error, DateTimeOffset now) =>

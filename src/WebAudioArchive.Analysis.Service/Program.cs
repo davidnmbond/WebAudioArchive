@@ -108,6 +108,13 @@ if (benchmark >= 0)
     return await Benchmark.RunAsync(args[benchmark + 1], seconds, runtime.Decoder, runtime.Scratch, runtime.Transcriber, config.Config.Transcription, Console.Out, CancellationToken.None);
 }
 
+// The maintenance commands write the same files as the service: refuse while it is running.
+if ((args.Contains("--rebuild") || args.Contains("--unpark")) && ServiceLock.RunningMessage(settings.OutputDir, DateTimeOffset.UtcNow) is { } running)
+{
+    Console.Error.WriteLine(running);
+    return 3;
+}
+
 if (args.Contains("--rebuild"))
 {
     Console.WriteLine($"rebuilt events for {runtime.Runner.RebuildAll()} segments");
@@ -123,13 +130,22 @@ if (args.Contains("--unpark"))
 if (builder.Configuration["urls"] is null && Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is null)
     builder.WebHost.UseUrls($"http://+:{settings.Port}");
 
+var serviceLock = new ServiceLock(settings.OutputDir);
+if (!serviceLock.TryAcquire(DateTimeOffset.UtcNow, out var lockProblem))
+{
+    Console.Error.WriteLine("config error: " + lockProblem);
+    return 2;
+}
+
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = AnalysisWorker.ShutdownTimeout);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(settings);
 builder.Services.AddSingleton(runtime);
+builder.Services.AddSingleton(serviceLock);
 builder.Services.AddHostedService<AnalysisWorker>();
 
 var app = builder.Build();
+app.Lifetime.ApplicationStopped.Register(serviceLock.Release);
 app.Logger.LogInformation(
     "Analysing {Station} from recorders {Recorders} (preference {Preference}) into {Out}; whisper {Model} on {Device} (DTW {Dtw}); enrichment {Enrichment}",
     settings.Station, string.Join(", ", settings.Recorders.Select(r => $"{r.Id}={r.Root}")), string.Join(",", settings.Preference), settings.OutputDir,
@@ -137,9 +153,17 @@ app.Logger.LogInformation(
 
 app.MapGet("/healthz", (AnalysisRuntime rt, AnalysisSettings s) =>
 {
-    var h = AnalysisHealth.Build(rt.Metrics.Snapshot(), s.LagAlarm, DateTimeOffset.UtcNow);
+    var h = AnalysisHealth.Build(rt.Metrics.Snapshot(), s.LagAlarm, DateTimeOffset.UtcNow, s.JobStallAfter);
     return Results.Json(h.Body, statusCode: h.StatusCode);
 });
 
-app.Run();
+try
+{
+    app.Run();
+}
+finally
+{
+    serviceLock.Release();
+}
+
 return 0;

@@ -48,6 +48,9 @@ public sealed partial record AnalysisSettings(
     /// <summary>How long one Ollama request may take (WAA_OLLAMA_TIMEOUT_MINUTES, 10 to 240, default 20): an enrichment of a long show takes minutes.</summary>
     public TimeSpan OllamaTimeout { get; init; } = TimeSpan.FromMinutes(20);
 
+    /// <summary>How long one job may run before /healthz calls the worker stalled: 3 hours, or the Ollama timeout plus 5 minutes if that is longer (one enrichment request can legitimately take the whole timeout).</summary>
+    public TimeSpan JobStallAfter => TimeSpan.FromTicks(Math.Max(AnalysisHealth.JobStallAfter.Ticks, (OllamaTimeout + TimeSpan.FromMinutes(5)).Ticks));
+
     /// <summary>The model label recorded in transcripts: the model file name without its extension.</summary>
     public string WhisperModel => Path.GetFileNameWithoutExtension(WhisperModelPath);
 

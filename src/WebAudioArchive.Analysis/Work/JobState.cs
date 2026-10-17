@@ -42,7 +42,8 @@ public enum JobAction
     Redetect,
 }
 
-public sealed record JobDecision(JobAction Action, string Reason);
+/// <summary>What to do with a job. Parkable is true for a job left running or waiting with all its attempts used: it must be processed once so it is marked failed.</summary>
+public sealed record JobDecision(JobAction Action, string Reason, bool Parkable = false);
 
 public static class JobRules
 {
@@ -62,7 +63,7 @@ public static class JobRules
         {
             return new(JobAction.Skip, state.Status == JobStatus.Failed
                 ? $"failed {state.Attempts} times: {state.LastError}"
-                : $"interrupted or retried {state.Attempts} times without finishing (last state {state.Status}): parked");
+                : $"interrupted or retried {state.Attempts} times without finishing (last state {state.Status}): parked", Parkable: state.Status != JobStatus.Failed);
         }
         if (state.NextAttemptUtc is { } next && next > now) return new(JobAction.Wait, $"retry at {next:u}");
         return new(JobAction.Run, state.Status == JobStatus.Running ? "resume after an interruption" : "retry");

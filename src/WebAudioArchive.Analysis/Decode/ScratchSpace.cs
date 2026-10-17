@@ -24,7 +24,9 @@ public sealed partial class ScratchSpace
         {
             var protectedFull = Path.GetFullPath(p);
             if (IsSameOrInside(protectedFull, Root))
-                throw new ArgumentException($"the scratch root {Root} equals or contains {protectedFull}; scratch is swept and deleted, so it must be a folder of its own (WAA_SCRATCH_PATH)", nameof(root));
+                throw new ArgumentException($"the scratch root {Root} equals or contains {protectedFull}; scratch is swept and deleted, so it must be a folder of its own (WAA_SCRATCH)", nameof(root));
+            if (IsSameOrInside(Root, protectedFull))
+                throw new ArgumentException($"the scratch root {Root} is inside {protectedFull}; scratch must be a folder of its own outside the recordings and the analysis output (WAA_SCRATCH)", nameof(root));
         }
 
         MaxBytes = maxBytes;
@@ -77,10 +79,11 @@ public sealed partial class ScratchSpace
         return n;
     }
 
-    static bool IsSameOrInside(string inner, string outer)
+    /// <summary>True when <paramref name="inner"/> is <paramref name="outer"/> or a folder under it (a child named "..x" is inside; only ".." itself and "../" lead out).</summary>
+    public static bool IsSameOrInside(string inner, string outer)
     {
         var rel = Path.GetRelativePath(outer, inner);
-        return rel == "." || (!rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel));
+        return rel == "." || (rel != ".." && !rel.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) && !rel.StartsWith("../", StringComparison.Ordinal) && !Path.IsPathRooted(rel));
     }
 
     static bool IsJobName(string name) => JobFolder().IsMatch(name);

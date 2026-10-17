@@ -7975,13 +7975,22 @@ git commit -m "Analysis: Ollama enricher with evidence quotes, validation, pendi
 - **Suppressed swear events** (`evidence.suppressed` other than `no`) are review only. The service aggregates nothing from events itself (show counts are built in `ShowAnalysisBuilder`, which already excludes them); the web API in Task 17 excludes them by default.
 - **Benchmark** checks readiness first (exit 1) and refuses `.part` files (exit 2).
 
+**Fix round 1 (reviewer, binding):**
+- A pass that throws is caught in `AnalysisRunner.PassAsync`, recorded (`LastPassError`) and is **not** a sign of life; `/healthz` is 503 `failing` when a pass error is set and no pass has finished for 15 minutes (and `stalled` as before). `AnalysisHealth.Build` takes the job stall limit; `AnalysisSettings.JobStallAfter` is the larger of 3 hours and the Ollama timeout plus 5 minutes.
+- Low disk no longer hides lag: the plan and the backlog are computed before the low-disk early return, so lag grows and health goes 503 after the alarm.
+- Show completeness: a job that fails or is parked touches its range like a finished one; the 7 day catch-up waits until whisper is ready; any show left incomplete is re-checked every pass once nothing overlapping it is pending.
+- `JobDecision.Parkable` replaces the second state.json read (`NeedsParking` is gone). A segment that cannot be planned (unsafe file name) is logged and counted once, under its recorder class.
+- `ScratchSpace` also refuses a scratch root inside a protected root, handles a child named `..x` correctly (`IsSameOrInside` is public and shared), and names `WAA_SCRATCH` in its message.
+- `ServiceLock` (`.analysis-service.lock` in the output folder, refreshed every 30 s): the service refuses to start beside a live one (exit 2); `--rebuild` and `--unpark` refuse while the service runs (exit 3). Stop the service first (`docker compose stop analysis`), run the command, start it again.
+
+
 **Interfaces:**
 - Consumes: everything from Tasks 1 to 14.
 - Produces: see the code below (`MetricsSnapshot` keeps the plan's positional fields and appends optional ones; `AnalysisMetrics.JobFinished(outcome, now, segmentClass)`, `SetCurrent(job, now)`, `SetWhisper(ready, device)`, `SetDisk(free, scratch, scratchMax, minFree)`; `AnalysisHealth.StallAfter`, `JobStallAfter`; `AnalysisRunner.PassAsync`, `RebuildAll`, `UnparkAll`; `AnalysisComposition.Build`; `Benchmark.RunAsync`; `AnalysisEntryPoint`, `AnalysisWorker`). Command line: `--healthcheck`, `--benchmark <file.mp3> [seconds]`, `--rebuild`, `--unpark`; exit code 2 (config). A missing whisper model is not an exit: whisper reports not ready, the backlog and lag grow and `/healthz` says so (D18).
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/WebAudioArchive.Tests/AnalysisServiceTests.cs` (the committed file is the source of truth; 26 tests: runner, health, benchmark, composition guards, the Ollama transport and the host):
+`tests/WebAudioArchive.Tests/AnalysisServiceTests.cs` (the committed file is the source of truth; 42 tests with the fix round file: runner, health, benchmark, composition guards, the Ollama transport and the host):
 
 ```csharp
 extern alias analysissvc;
@@ -8012,7 +8021,7 @@ using analysissvc::WebAudioArchive.Analysis.Service;
 
 namespace WebAudioArchive.Tests;
 
-public sealed class AnalysisServiceTests : IAsyncLifetime
+public sealed partial class AnalysisServiceTests : IAsyncLifetime
 {
     static readonly DateTimeOffset Show = new(2026, 10, 15, 19, 0, 0, TimeSpan.Zero);
     static readonly string ConfigPath = Path.Combine(AppContext.BaseDirectory, "config", "analysis", "analysis.json");
@@ -8021,6 +8030,7 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
     readonly FakeTranscriber _whisper = new();
     readonly FakeLlm _llm = new();
     long _free = long.MaxValue;
+    bool _diskBroken;
 
     string A => Path.Combine(_root, "a");
     AnalysisPaths Paths => new(Path.Combine(_root, "analysis"), "burst");
@@ -8046,7 +8056,7 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         var whisper = transcriber ?? _whisper;
         var config = AnalysisConfigLoader.Load(ConfigPath);
         var scratch = new ScratchSpace(Path.Combine(_root, "scratch"), 512L * 1024 * 1024);
-        var disk = new DiskGuard(Paths.Root, 1L << 30, _ => _free);
+        var disk = new DiskGuard(Paths.Root, 1L << 30, _ => _diskBroken ? throw new IOException("disk gone") : _free);
         var schedule = new ScheduleProvider(Path.Combine(_root, "schedule.json"), null, "burst", NullLogger.Instance);
         var pipeline = new SegmentPipeline(Paths, config, scratch, new SegmentDecoder(), whisper, disk,
             Watershed.From(config.Config.Swearing, schedule.Zone), schedule.TitleAt, _clock, NullLogger.Instance);
@@ -8373,7 +8383,7 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
     [Fact]
     public void Composition_refuses_a_scratch_root_that_holds_recordings_or_output()
     {
-        foreach (var scratch in new[] { A, _root, Path.Combine(_root, "comp-out") })
+        foreach (var scratch in new[] { A, _root, Path.Combine(_root, "comp-out"), Path.Combine(A, "scratch"), Path.Combine(_root, "comp-out", "scratch") })
         {
             var settings = AnalysisSettings.Load(Env(("WAA_SCRATCH", scratch)));
             var ex = Assert.Throws<AnalysisSettingsException>(() =>
@@ -8539,6 +8549,288 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
 }
 ```
 
+`tests/WebAudioArchive.Tests/AnalysisServiceFixTests.cs` (same class, fix round 1):
+
+```csharp
+extern alias analysissvc;
+
+using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
+using WebAudioArchive.Analysis;
+using WebAudioArchive.Analysis.Decode;
+using WebAudioArchive.Analysis.Settings;
+using WebAudioArchive.Analysis.Work;
+using WebAudioArchive.Core.Analysis;
+using WebAudioArchive.Core.Recording;
+using WebAudioArchive.Tests.Support;
+
+namespace WebAudioArchive.Tests;
+
+// Fix round 1 (reviewer findings): health under failing passes, low disk lag, show completeness, boundaries, service lock.
+public sealed partial class AnalysisServiceTests
+{
+    string ShowFile => Path.Combine(Paths.ShowDir("burst-20261015T1900Z", Show), AnalysisPaths.ShowAnalysisFile);
+
+    [Fact]
+    public async Task A_pass_that_throws_is_recorded_not_counted_as_life_and_turns_health_unhealthy()
+    {
+        _diskBroken = true;
+        var (runner, metrics) = Runner();
+
+        await runner.PassAsync(CancellationToken.None);
+
+        var first = metrics.Snapshot();
+        Assert.Contains("disk gone", first.LastPassError);
+        Assert.Null(first.LastPassUtc);
+        _clock.Advance(TimeSpan.FromMinutes(10));
+        await runner.PassAsync(CancellationToken.None);
+        Assert.Equal(first.LastActivityUtc, metrics.Snapshot().LastActivityUtc);
+        Assert.Equal(200, AnalysisHealth.Build(metrics.Snapshot(), TimeSpan.FromHours(6), _clock.UtcNow).StatusCode);
+
+        _clock.Advance(TimeSpan.FromMinutes(6));
+        await runner.PassAsync(CancellationToken.None);
+        var health = AnalysisHealth.Build(metrics.Snapshot(), TimeSpan.FromHours(6), _clock.UtcNow);
+        Assert.Equal(503, health.StatusCode);
+        Assert.Contains("disk gone", JsonSerializer.Serialize(health.Body));
+    }
+
+    [Fact]
+    public void Failing_passes_are_unhealthy_even_when_jobs_keep_showing_activity()
+    {
+        var now = Show.AddHours(10);
+        var m = new MetricsSnapshot(now.AddHours(-5), now.AddMinutes(-30), 0, 0, null, 0, 0, null, null, 0, null, null, true, 0, 0, 0, 0, 0,
+            LastActivityUtc: now.AddMinutes(-1), LastPassError: "IOException: disk gone");
+
+        var h = AnalysisHealth.Build(m, TimeSpan.FromHours(6), now);
+
+        Assert.Equal(503, h.StatusCode);
+        Assert.Contains("\"status\":\"failing\"", JsonSerializer.Serialize(h.Body));
+        Assert.Equal(200, AnalysisHealth.Build(m with { LastPassError = null }, TimeSpan.FromHours(6), now).StatusCode);
+    }
+
+    [Fact]
+    public async Task Low_disk_still_measures_the_backlog_so_lag_grows_and_health_goes_503()
+    {
+        var (runner, metrics) = Runner();
+        await runner.PassAsync(CancellationToken.None);
+        Assert.Equal(0, metrics.Snapshot().Backlog);
+
+        _free = 1;
+        var next = Show.AddHours(1);
+        await AnalysisFixtures.WriteDecodableSegmentAsync(A, "burst", next, Signals.SpeechLike(10, 6));
+        _clock.Set(next.AddHours(8));
+        await runner.PassAsync(CancellationToken.None);
+
+        var m = metrics.Snapshot();
+        Assert.Equal(1, _whisper.Calls);
+        Assert.Equal(1, m.Backlog);
+        Assert.Equal(next.AddSeconds(10), m.OldestPendingEndUtc);
+        Assert.Contains("free disk", m.Paused);
+        var health = AnalysisHealth.Build(m, TimeSpan.FromHours(6), _clock.UtcNow);
+        Assert.Equal(503, health.StatusCode);
+        Assert.Contains("\"status\":\"lagging\"", JsonSerializer.Serialize(health.Body));
+    }
+
+    JobState WaitingState(SourceSegment segment, int attempts, DateTimeOffset next)
+    {
+        var config = AnalysisConfigLoader.Load(ConfigPath);
+        return new JobState(JobState.CurrentSchema, segment.JobId, segment.Fingerprint, $"{_whisper.Identity}|{config.Config.Transcription.TranscriptKey()}",
+            config.DetectorVersion, JobStatus.Waiting, attempts, next, "retry later", [], 0, _clock.UtcNow, 35, 0, 0);
+    }
+
+    [Fact]
+    public async Task A_job_that_fails_for_good_completes_its_show_without_a_restart()
+    {
+        var dir = Paths.SegmentDir("a/2026/10-15/190000");
+        var segment = new SegmentDiscovery([new RecorderRoot("a", A)], "burst", NullLogger.Instance).Scan().Single();
+        JobStore.Write(dir, WaitingState(segment, JobRules.MaxAttempts - 1, _clock.UtcNow + TimeSpan.FromMinutes(10)));
+        var (runner, _) = Runner();
+        await runner.PassAsync(CancellationToken.None);
+        Assert.False(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
+
+        _clock.Advance(TimeSpan.FromMinutes(11));
+        _whisper.Respond = (_, _) => throw new InvalidOperationException("boom");
+        await runner.PassAsync(CancellationToken.None);
+
+        Assert.Equal(JobStatus.Failed, JobStore.Read(dir)!.Status);
+        Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
+    }
+
+    [Fact]
+    public async Task Starting_with_whisper_missing_does_not_write_incomplete_shows_and_they_complete_when_it_returns()
+    {
+        var (first, _) = Runner();
+        await first.PassAsync(CancellationToken.None);
+        Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
+
+        // A restart with the model missing: every finished segment looks new to the planner (the model identity changed).
+        _whisper.Model = "missing-model";
+        _whisper.Ready = false;
+        var (second, metrics) = Runner();
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await second.PassAsync(CancellationToken.None);
+        Assert.Equal(1, metrics.Snapshot().Backlog);
+        Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
+
+        _whisper.Model = "fake-model";
+        _whisper.Ready = true;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await second.PassAsync(CancellationToken.None);
+
+        Assert.Equal(0, metrics.Snapshot().Backlog);
+        Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
+        Assert.Equal(1, _whisper.Calls);
+    }
+
+    [Fact]
+    public async Task A_show_left_incomplete_is_rechecked_every_pass_and_completes_when_nothing_is_pending()
+    {
+        var dir = Paths.SegmentDir("a/2026/10-15/190000");
+        var segment = new SegmentDiscovery([new RecorderRoot("a", A)], "burst", NullLogger.Instance).Scan().Single();
+        JobStore.Write(dir, WaitingState(segment, 1, _clock.UtcNow + TimeSpan.FromMinutes(10)));
+        var (runner, _) = Runner();
+        await runner.PassAsync(CancellationToken.None);
+        Assert.False(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
+
+        // The state file is removed behind the runner's back and the segment is analysed elsewhere: nothing is pending, nothing touched.
+        _clock.Advance(TimeSpan.FromMinutes(11));
+        JobStore.Write(dir, WaitingState(segment, 1, _clock.UtcNow) with { Status = JobStatus.Done, Attempts = 0, DetectorVersion = AnalysisConfigLoader.Load(ConfigPath).DetectorVersion });
+        await runner.PassAsync(CancellationToken.None);
+
+        Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
+    }
+
+    [Fact]
+    public async Task A_bad_sidecar_is_reported_once_per_class_not_on_every_pass()
+    {
+        var odd = Path.Combine(A, "burst", "master", "2026", "10-15", "19 00 00.mp3");
+        File.Copy(Path.Combine(A, "burst", "master", "2026", "10-15", "190000.mp3"), odd);
+        File.Copy(Path.Combine(A, "burst", "master", "2026", "10-15", "190000.json"), Path.ChangeExtension(odd, ".json"));
+        SegmentMetaStore.Write(Path.ChangeExtension(odd, ".json"), SegmentMetaStore.Read(Path.ChangeExtension(odd, ".json"))! with { File = "19 00 00.mp3" });
+        var (runner, metrics) = Runner();
+
+        await runner.PassAsync(CancellationToken.None);
+        await runner.PassAsync(CancellationToken.None);
+        await runner.PassAsync(CancellationToken.None);
+
+        var status = metrics.Snapshot().Classes!["a"];
+        Assert.Equal(1, status.Failed);
+        Assert.Contains("19 00 00", status.LastErrorJob);
+        Assert.Contains("cannot be analysed", status.LastError);
+    }
+
+    public static TheoryData<int, int, int, int> BoundaryCases => new()
+    {
+        // lag seconds over the 6 h alarm, seconds since the last pass over 15 min, seconds a job has run over 3 h, expected code
+        { 0, 0, 0, 200 },
+        { 1, 0, 0, 503 },
+        { 0, 1, 0, 503 },
+        { 0, 0, 1, 503 },
+    };
+
+    [Theory]
+    [MemberData(nameof(BoundaryCases))]
+    public void Health_boundaries_are_exact(int lagOver, int passOver, int jobOver, int code)
+    {
+        var now = Show.AddHours(30);
+        var alarm = TimeSpan.FromHours(6);
+        MetricsSnapshot Idle(int over) => new(now.AddDays(-1), now - AnalysisHealth.StallAfter - TimeSpan.FromSeconds(over), 1, 0,
+            now - alarm - TimeSpan.FromSeconds(lagOver), 0, 0, null, null, 0, null, null, true, 0, 0, 0, 0, 0);
+        MetricsSnapshot Running(int over) => new(now.AddDays(-1), now.AddMinutes(-1), 1, 0, now - alarm - TimeSpan.FromSeconds(lagOver), 0, 0, null, null, 0, "a/2026/10-15/190000", null,
+            true, 0, 0, 0, 0, 0, LastActivityUtc: now - AnalysisHealth.JobStallAfter - TimeSpan.FromSeconds(over));
+
+        Assert.Equal(passOver > 0 || lagOver > 0 ? 503 : 200, AnalysisHealth.Build(Idle(passOver), alarm, now).StatusCode);
+        Assert.Equal(jobOver > 0 || lagOver > 0 ? 503 : 200, AnalysisHealth.Build(Running(jobOver), alarm, now).StatusCode);
+        Assert.Equal(code, new[] { lagOver > 0, passOver > 0, jobOver > 0 }.Any(b => b) ? 503 : 200);
+    }
+
+    [Fact]
+    public void The_job_stall_limit_is_at_least_the_ollama_timeout()
+    {
+        Assert.Equal(AnalysisHealth.JobStallAfter, AnalysisSettings.Load(Env()).JobStallAfter);
+        Assert.Equal(TimeSpan.FromMinutes(240) + TimeSpan.FromMinutes(5), AnalysisSettings.Load(Env(("WAA_OLLAMA_TIMEOUT_MINUTES", "240"))).JobStallAfter);
+
+        var now = Show.AddHours(30);
+        var m = new MetricsSnapshot(now.AddDays(-1), now.AddMinutes(-1), 0, 0, null, 0, 0, null, null, 0, "enrich:x", null, true, 0, 0, 0, 0, 0,
+            LastActivityUtc: now.AddHours(-4));
+        Assert.Equal(503, AnalysisHealth.Build(m, TimeSpan.FromHours(6), now).StatusCode);
+        Assert.Equal(200, AnalysisHealth.Build(m, TimeSpan.FromHours(6), now, TimeSpan.FromHours(5)).StatusCode);
+    }
+
+    [Fact]
+    public void A_scratch_folder_named_like_a_parent_step_is_still_inside_the_protected_root()
+    {
+        var protectedRoot = Directory.CreateDirectory(Path.Combine(_root, "prot")).FullName;
+        Assert.Throws<ArgumentException>(() => new ScratchSpace(Path.Combine(protectedRoot, "..x"), 1 << 20, [protectedRoot]));
+        Assert.Throws<ArgumentException>(() => new ScratchSpace(Path.Combine(protectedRoot, "scratch"), 1 << 20, [protectedRoot]));
+        Assert.Throws<ArgumentException>(() => new ScratchSpace(_root, 1 << 20, [protectedRoot]));
+        var ok = new ScratchSpace(Path.Combine(_root, "prot2"), 1 << 20, [protectedRoot]);
+        Assert.Equal(Path.Combine(_root, "prot2"), ok.Root);
+    }
+
+    [Fact]
+    public void The_service_lock_blocks_a_second_holder_and_the_maintenance_commands_until_released()
+    {
+        var dir = Path.Combine(_root, "lockdir");
+        var now = DateTimeOffset.UtcNow;
+        var first = new ServiceLock(dir);
+        Assert.True(first.TryAcquire(now, out _));
+
+        Assert.Contains("Stop the service first", ServiceLock.RunningMessage(dir, now));
+        var second = new ServiceLock(dir);
+        Assert.False(second.TryAcquire(now, out var why));
+        Assert.Contains("already running", why);
+
+        first.Release();
+        Assert.Null(ServiceLock.RunningMessage(dir, now));
+        Assert.True(second.TryAcquire(now, out _));
+        second.Release();
+        Assert.False(File.Exists(Path.Combine(dir, ServiceLock.FileName)));
+    }
+
+    [Fact]
+    public void A_stale_service_lock_is_ignored_and_taken_over()
+    {
+        var dir = Path.Combine(_root, "lockdir2");
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, ServiceLock.FileName);
+        var now = DateTimeOffset.UtcNow;
+
+        File.WriteAllText(file, $$"""{ "pid": {{Environment.ProcessId}}, "startedUtc": "2026-01-01T00:00:00Z" }""");
+        File.SetLastWriteTimeUtc(file, now.UtcDateTime - ServiceLock.StaleAfter - TimeSpan.FromMinutes(1));
+        Assert.Null(ServiceLock.RunningMessage(dir, now));
+
+        File.WriteAllText(file, """{ "pid": 2147480000, "startedUtc": "2026-01-01T00:00:00Z" }""");
+        Assert.Null(ServiceLock.RunningMessage(dir, now));
+
+        File.WriteAllText(file, "not json");
+        Assert.Null(ServiceLock.RunningMessage(dir, now));
+
+        File.WriteAllText(file, $$"""{ "pid": {{Environment.ProcessId}}, "startedUtc": "2026-01-01T00:00:00Z" }""");
+        Assert.NotNull(ServiceLock.RunningMessage(dir, now));
+        Assert.True(new ServiceLock(dir).TryAcquire(now.AddMinutes(30), out _));
+    }
+
+    [Fact]
+    public async Task The_host_holds_the_lock_while_it_runs_and_refuses_to_start_beside_a_live_one()
+    {
+        await using (var factory = Host())
+        {
+            factory.CreateClient();
+            Assert.True(File.Exists(Path.Combine(_root, "host-out", ServiceLock.FileName)));
+        }
+
+        Assert.False(File.Exists(Path.Combine(_root, "host-out", ServiceLock.FileName)));
+
+        Directory.CreateDirectory(Path.Combine(_root, "host-out"));
+        File.WriteAllText(Path.Combine(_root, "host-out", ServiceLock.FileName), $$"""{ "pid": {{Environment.ProcessId}}, "startedUtc": "2026-01-01T00:00:00Z" }""");
+        using var second = Host();
+        Assert.ThrowsAny<Exception>(() => second.CreateClient());
+    }
+}
+```
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisServiceTests`
@@ -8560,8 +8852,8 @@ public sealed record SegmentClassStatus(int Done, int Failed, DateTimeOffset? La
 
 /// <summary>
 /// What /healthz reports. OldestPendingEndUtc is the end of the oldest closed segment not yet analysed: lag is now
-/// minus that. Backlog is the queue length. LastActivityUtc is the last sign of life inside a long pass (a job started or
-/// finished); CurrentJobStartedUtc is when CurrentJob began.
+/// minus that. Backlog is the queue length. LastActivityUtc is the last sign of life inside a long pass (a job, show update or enrichment started or
+/// finished); while CurrentJob is set it is when that job started. A failed pass is not a sign of life.
 /// </summary>
 public sealed record MetricsSnapshot(
     DateTimeOffset StartedUtc,
@@ -8612,6 +8904,9 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
     public void SetPaused(string? reason) => Set(s => s with { Paused = reason });
 
     /// <summary>The job in progress (null when idle). Starting one counts as activity, so a long backlog pass is not mistaken for a stall.</summary>
+    /// <summary>Clears the current job without counting as activity (used when a pass fails).</summary>
+    public void ClearCurrent() => Set(s => s with { CurrentJob = null });
+
     public void SetCurrent(string? job, DateTimeOffset now) =>
         Set(s => s with { CurrentJob = job, LastActivityUtc = now });
 
@@ -8624,7 +8919,7 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
     public void PassCompleted(DateTimeOffset now) => Set(s => s with { LastPassUtc = now, LastActivityUtc = now, LastPassError = null });
 
     /// <summary>A whole pass failed (for example the folder could not be listed): it is retried, and healthz says why.</summary>
-    public void PassFailed(string error, DateTimeOffset now) => Set(s => s with { LastPassError = error, LastActivityUtc = now });
+    public void PassFailed(string error) => Set(s => s with { LastPassError = error });
 
     /// <summary>A failure outside a segment job (enrichment, a show update): kept under its own class beside the segment classes.</summary>
     public void RecordFailure(string segmentClass, string? job, string error, DateTimeOffset now) =>
@@ -8686,7 +8981,7 @@ public sealed record HealthResult(int StatusCode, object Body);
 /// <summary>
 /// /healthz for the analysis service (spec 5, D16): 503 when the lag passes the alarm or the worker shows no sign of life
 /// for 15 minutes, so `docker ps` shows unhealthy. A pause (low disk, whisper not ready) is reported but is 200 until the
-/// lag it causes reaches the alarm. A job in progress counts as alive for up to <see cref="JobStallAfter"/> since the last
+/// lag it causes reaches the alarm. Passes that keep throwing (last pass error set, no pass finished for 15 minutes) are 503 "failing". A job in progress counts as alive for up to <see cref="JobStallAfter"/> since the last
 /// sign of life (a one hour segment on a CPU can take longer than 15 minutes). All times UTC.
 /// </summary>
 public static class AnalysisHealth
@@ -8696,14 +8991,16 @@ public static class AnalysisHealth
     /// <summary>How long one job may run without finishing before the worker is called stalled.</summary>
     public static readonly TimeSpan JobStallAfter = TimeSpan.FromHours(3);
 
-    public static HealthResult Build(MetricsSnapshot m, TimeSpan lagAlarm, DateTimeOffset now)
+    public static HealthResult Build(MetricsSnapshot m, TimeSpan lagAlarm, DateTimeOffset now, TimeSpan? jobStallAfter = null)
     {
         var lag = m.OldestPendingEndUtc is { } oldest && now > oldest ? now - oldest : TimeSpan.Zero;
         // Between jobs the last sign of life is the latest of the pass end and any activity; while a job runs it is when that job started.
         var lastSign = m.CurrentJob is not null && m.LastActivityUtc is { } started ? started : new[] { m.LastPassUtc, m.LastActivityUtc, m.StartedUtc }.Max()!.Value;
-        var stalled = now - lastSign > (m.CurrentJob is null ? StallAfter : JobStallAfter);
+        var stalled = now - lastSign > (m.CurrentJob is null ? StallAfter : jobStallAfter ?? JobStallAfter);
+        // Passes that keep failing (the folder cannot be listed, the disk check throws) never refresh LastPassUtc, whatever else shows activity.
+        var failing = m.CurrentJob is null && m.LastPassError is not null && now - (m.LastPassUtc ?? m.StartedUtc) > StallAfter;
         var lagging = lag > lagAlarm;
-        var status = stalled ? "stalled" : lagging ? "lagging" : m.Paused is not null ? "paused" : "ok";
+        var status = stalled ? "stalled" : failing ? "failing" : lagging ? "lagging" : m.Paused is not null ? "paused" : "ok";
         var classes = (m.Classes ?? new Dictionary<string, SegmentClassStatus>())
             .OrderBy(c => c.Key, StringComparer.Ordinal)
             .ToDictionary(c => c.Key, c => (object)new
@@ -8743,7 +9040,7 @@ public static class AnalysisHealth
             lastPassUtc = m.LastPassUtc,
             uptimeSeconds = Math.Round((now - m.StartedUtc).TotalSeconds),
         };
-        return new HealthResult(stalled || lagging ? 503 : 200, body);
+        return new HealthResult(stalled || failing || lagging ? 503 : 200, body);
     }
 }
 ```
@@ -8787,6 +9084,7 @@ public sealed class AnalysisRunner(
     public const int MaxEnrichmentsPerPass = 2;
     public static readonly TimeSpan CatchUp = TimeSpan.FromDays(7);
     readonly Dictionary<string, ShowAnalysis> _shows = new(StringComparer.Ordinal);
+    readonly HashSet<string> _reportedBad = new(StringComparer.Ordinal);
     bool _caughtUp;
 
     public async Task PassAsync(CancellationToken ct)
@@ -8800,28 +9098,37 @@ public sealed class AnalysisRunner(
             metrics.SetCurrent(null, clock.UtcNow);
             log.LogInformation("Analysis stopped: the work in hand is left to resume");
         }
+        catch (Exception ex)
+        {
+            // A whole pass failed (a folder cannot be listed, the disk check threw): recorded, shown in /healthz (503 once no pass has finished for 15 minutes), retried next time.
+            log.LogError(ex, "Analysis pass failed; trying again next time");
+            metrics.ClearCurrent();
+            metrics.PassFailed($"{ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     async Task RunPassAsync(CancellationToken ct)
     {
         var now = clock.UtcNow;
         metrics.SetDisk(disk.FreeBytes(), scratch.UsedBytes(), scratch.MaxBytes, disk.MinFreeBytes);
+        var ready = await ReadyAsync(ct);
+        var plan = Decide();
         if (disk.IsLow())
         {
+            // Nothing is analysed, but the backlog and its lag are still measured (they only read files), so a long low-disk pause raises the alarm.
+            PublishBacklog(plan);
             metrics.SetPaused(LowDisk());
             log.LogWarning("Analysis paused: {Reason}", LowDisk());
             metrics.PassCompleted(now);
             return;
         }
 
-        var ready = await ReadyAsync(ct);
-        var plan = Decide();
         metrics.SetPaused(!ready && plan.Any(p => p.Decision.Action == JobAction.Run) ? "whisper is not ready (starting, loading the model, or not running)" : null);
 
         var touched = new List<(DateTimeOffset From, DateTimeOffset To)>();
         foreach (var (job, decision) in plan)
         {
-            var parkable = decision.Action == JobAction.Skip && NeedsParking(job);
+            var parkable = decision.Parkable;
             if (decision.Action is JobAction.Skip && !parkable) continue;
             if (decision.Action == JobAction.Wait) continue;
             if (decision.Action == JobAction.Run && !ready) continue;
@@ -8855,17 +9162,21 @@ public sealed class AnalysisRunner(
                 break;
             }
 
-            if (outcome.Status == JobStatus.Done) touched.Add((job.Source.Meta.StartUtc, job.Source.Meta.EndUtc));
+            // A job that finished or failed for good changes which shows are complete (a failed job no longer counts as pending).
+            if (outcome.Status is JobStatus.Done or JobStatus.Failed) touched.Add((job.Source.Meta.StartUtc, job.Source.Meta.EndUtc));
             if (outcome.Status == JobStatus.Waiting) ready = await ReadyAsync(ct);
         }
 
         metrics.SetCurrent(null, clock.UtcNow);
         var after = Decide();
-        var pending = Pending(after);
-        metrics.SetBacklog(pending.Count, pending.Count == 0 ? null : pending.Min(p => p.ToUtc),
-            after.Count(p => p.Decision.Action == JobAction.Skip && p.Decision.Reason.StartsWith("failed", StringComparison.Ordinal)));
+        var pending = PublishBacklog(after);
 
-        if (!_caughtUp)
+        // A show left incomplete is re-checked every pass once nothing overlapping it is pending any more.
+        foreach (var open in _shows.Values.Where(s => !s.Complete && !pending.Any(p => p.FromUtc < s.WindowToUtc && p.ToUtc > s.WindowFromUtc)))
+            touched.Add((open.WindowFromUtc, open.WindowToUtc));
+
+        // The 7 day catch-up waits for whisper: with the model missing every finished segment looks pending, and shows would be rewritten as incomplete.
+        if (!_caughtUp && ready)
         {
             touched.Add((now - CatchUp, now));
             _caughtUp = true;
@@ -8976,16 +9287,12 @@ public sealed class AnalysisRunner(
         return ready;
     }
 
-    bool NeedsParking(SegmentJob job)
+    List<SourceSpan> PublishBacklog(List<(SegmentJob Job, JobDecision Decision)> decided)
     {
-        try
-        {
-            return pipeline.NeedsParking(job);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return false;
-        }
+        var pending = Pending(decided);
+        metrics.SetBacklog(pending.Count, pending.Count == 0 ? null : pending.Min(p => p.ToUtc),
+            decided.Count(p => p.Decision.Action == JobAction.Skip && p.Decision.Reason.StartsWith("failed", StringComparison.Ordinal)));
+        return pending;
     }
 
     /// <summary>A segment whose decision cannot be worked out (for example a file name that is not a safe job id) is skipped as failed, so it cannot stop the rest of the plan.</summary>
@@ -9000,8 +9307,14 @@ public sealed class AnalysisRunner(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            log.LogWarning("Segment {Job} cannot be analysed: {Error}", job.Source.JobId, ex.Message);
-            return new JobDecision(JobAction.Skip, $"failed: cannot be analysed ({ex.GetType().Name}: {ex.Message})");
+            var reason = $"cannot be analysed ({ex.GetType().Name}: {ex.Message})";
+            if (_reportedBad.Add(job.Source.JobId))
+            {
+                log.LogWarning("Segment {Job} {Reason}", job.Source.JobId, reason);
+                metrics.RecordFailure(job.Source.Recorder, job.Source.JobId, reason, clock.UtcNow);
+            }
+
+            return new JobDecision(JobAction.Skip, "failed: " + reason);
         }
     }
 
@@ -9065,7 +9378,7 @@ public static class AnalysisComposition
         var log = loggers.CreateLogger("WebAudioArchive.Analysis");
         foreach (var r in s.Recorders)
         {
-            if (IsSameOrInside(Path.GetFullPath(s.OutputDir), Path.GetFullPath(r.Root)))
+            if (ScratchSpace.IsSameOrInside(Path.GetFullPath(s.OutputDir), Path.GetFullPath(r.Root)))
                 throw new AnalysisSettingsException($"WAA_ANALYSIS_OUT: '{s.OutputDir}' is inside the data of recorder '{r.Id}' ({r.Root}); analysis output must never be written into a recorder's folder.");
         }
 
@@ -9095,12 +9408,6 @@ public static class AnalysisComposition
         var runner = new AnalysisRunner(new SegmentDiscovery(s.Recorders, s.Station, log), pipeline, shows, enricher, transcriber, disk, scratch,
             metrics, s.Preference, s.Since, clock, log);
         return new AnalysisRuntime(runner, metrics, scratch, decoder, transcriber);
-    }
-
-    static bool IsSameOrInside(string inner, string outer)
-    {
-        var rel = Path.GetRelativePath(outer, inner);
-        return rel == "." || (!rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel));
     }
 }
 ```
@@ -9175,6 +9482,110 @@ public static class Benchmark
 }
 ```
 
+`src/WebAudioArchive.Analysis/ServiceLock.cs` (fix round 1):
+
+```csharp
+using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json;
+
+namespace WebAudioArchive.Analysis;
+
+/// <summary>
+/// A lock file in the analysis output folder that shows the service is running. The service writes its process id and
+/// start time, and refreshes the file's write time every pass. The maintenance commands (--rebuild, --unpark) refuse to run
+/// while it is live, because they write the same files as the service: stop the service first. A lock is stale, and ignored,
+/// when its process no longer exists or it has not been refreshed for <see cref="StaleAfter"/> (a killed container leaves one).
+/// </summary>
+public sealed class ServiceLock(string dir)
+{
+    public const string FileName = ".analysis-service.lock";
+
+    /// <summary>The service refreshes the lock each pass (every 60 s); five minutes without a refresh means it is gone.</summary>
+    public static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(5);
+
+    string PathOfLock => Path.Combine(dir, FileName);
+
+    bool _held;
+
+    /// <summary>Takes the lock unless a live service holds it; <paramref name="problem"/> says who does.</summary>
+    public bool TryAcquire(DateTimeOffset now, out string? problem)
+    {
+        problem = Describe(dir, now);
+        if (problem is not null) return false;
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(PathOfLock, JsonSerializer.Serialize(new { pid = Environment.ProcessId, startedUtc = now.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) }));
+        _held = true;
+        return true;
+    }
+
+    /// <summary>Marks the service as alive; call each pass.</summary>
+    public void Refresh()
+    {
+        if (!_held) return;
+        try
+        {
+            File.SetLastWriteTimeUtc(PathOfLock, DateTime.UtcNow);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // A lock that cannot be refreshed only makes the commands think the service is gone; the service keeps working.
+        }
+    }
+
+    public void Release()
+    {
+        if (!_held) return;
+        _held = false;
+        try
+        {
+            File.Delete(PathOfLock);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    /// <summary>Null when no live service holds the lock in <paramref name="dir"/>; otherwise a message for the operator.</summary>
+    public static string? RunningMessage(string dir, DateTimeOffset now)
+    {
+        var holder = Describe(dir, now);
+        return holder is null ? null : holder + " Stop the service first (docker compose stop analysis), run the command, then start it again.";
+    }
+
+    static string? Describe(string dir, DateTimeOffset now)
+    {
+        var file = Path.Combine(dir, FileName);
+        if (!File.Exists(file)) return null;
+        try
+        {
+            if (now.UtcDateTime - File.GetLastWriteTimeUtc(file) > StaleAfter) return null;
+            using var doc = JsonDocument.Parse(File.ReadAllText(file));
+            var pid = doc.RootElement.GetProperty("pid").GetInt32();
+            if (!IsAlive(pid)) return null;
+            return $"An analysis service is already running on {dir} (process {pid}).";
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    static bool IsAlive(int pid)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+}
+```
+
 The small changes to existing files (see the diff of the Task 15 commit): `SegmentPipeline.NeedsParking(job)` and `Unpark(job)` plus a shared `IsParkable` rule; `ITranscriber.Device` (default `"unknown"`); `OllamaClient.MinTimeout` and `CreateHttpClient(timeout)`; `AnalysisSettings.OllamaTimeout`.
 
 - [ ] **Step 4: Replace the service host**
@@ -9194,7 +9605,7 @@ public sealed class AnalysisEntryPoint;
 /// take it, so the job in hand is abandoned within seconds and left waiting (no attempt used). Run the container with a
 /// stop grace period of at least 60 s (docker compose stop_grace_period), otherwise Docker kills it and the attempt counts.
 /// </summary>
-public sealed class AnalysisWorker(AnalysisRuntime runtime, TimeProvider time, ILogger<AnalysisWorker> log) : BackgroundService
+public sealed class AnalysisWorker(AnalysisRuntime runtime, ServiceLock serviceLock, ILogger<AnalysisWorker> log) : BackgroundService
 {
     public static readonly TimeSpan PassInterval = TimeSpan.FromSeconds(60);
 
@@ -9204,6 +9615,8 @@ public sealed class AnalysisWorker(AnalysisRuntime runtime, TimeProvider time, I
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Yield();
+        // The lock file shows the maintenance commands that the service is running; refreshed during a long pass too.
+        using var heartbeat = new Timer(_ => serviceLock.Refresh(), null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
         try
         {
             var swept = runtime.Scratch.SweepStale();
@@ -9227,7 +9640,7 @@ public sealed class AnalysisWorker(AnalysisRuntime runtime, TimeProvider time, I
             catch (Exception ex)
             {
                 log.LogError(ex, "Analysis pass failed; trying again in {Seconds} s", PassInterval.TotalSeconds);
-                runtime.Metrics.PassFailed($"{ex.GetType().Name}: {ex.Message}", time.GetUtcNow());
+                runtime.Metrics.PassFailed($"{ex.GetType().Name}: {ex.Message}");
             }
 
             try
@@ -9327,6 +9740,13 @@ if (benchmark >= 0)
     return await Benchmark.RunAsync(args[benchmark + 1], seconds, runtime.Decoder, runtime.Scratch, runtime.Transcriber, config.Config.Transcription, Console.Out, CancellationToken.None);
 }
 
+// The maintenance commands write the same files as the service: refuse while it is running.
+if ((args.Contains("--rebuild") || args.Contains("--unpark")) && ServiceLock.RunningMessage(settings.OutputDir, DateTimeOffset.UtcNow) is { } running)
+{
+    Console.Error.WriteLine(running);
+    return 3;
+}
+
 if (args.Contains("--rebuild"))
 {
     Console.WriteLine($"rebuilt events for {runtime.Runner.RebuildAll()} segments");
@@ -9342,13 +9762,22 @@ if (args.Contains("--unpark"))
 if (builder.Configuration["urls"] is null && Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is null)
     builder.WebHost.UseUrls($"http://+:{settings.Port}");
 
+var serviceLock = new ServiceLock(settings.OutputDir);
+if (!serviceLock.TryAcquire(DateTimeOffset.UtcNow, out var lockProblem))
+{
+    Console.Error.WriteLine("config error: " + lockProblem);
+    return 2;
+}
+
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = AnalysisWorker.ShutdownTimeout);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(settings);
 builder.Services.AddSingleton(runtime);
+builder.Services.AddSingleton(serviceLock);
 builder.Services.AddHostedService<AnalysisWorker>();
 
 var app = builder.Build();
+app.Lifetime.ApplicationStopped.Register(serviceLock.Release);
 app.Logger.LogInformation(
     "Analysing {Station} from recorders {Recorders} (preference {Preference}) into {Out}; whisper {Model} on {Device} (DTW {Dtw}); enrichment {Enrichment}",
     settings.Station, string.Join(", ", settings.Recorders.Select(r => $"{r.Id}={r.Root}")), string.Join(",", settings.Preference), settings.OutputDir,
@@ -9356,18 +9785,26 @@ app.Logger.LogInformation(
 
 app.MapGet("/healthz", (AnalysisRuntime rt, AnalysisSettings s) =>
 {
-    var h = AnalysisHealth.Build(rt.Metrics.Snapshot(), s.LagAlarm, DateTimeOffset.UtcNow);
+    var h = AnalysisHealth.Build(rt.Metrics.Snapshot(), s.LagAlarm, DateTimeOffset.UtcNow, s.JobStallAfter);
     return Results.Json(h.Body, statusCode: h.StatusCode);
 });
 
-app.Run();
+try
+{
+    app.Run();
+}
+finally
+{
+    serviceLock.Release();
+}
+
 return 0;
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisServiceTests`
-Expected: PASS, 26 tests. Then `dotnet test`: all pass.
+Expected: PASS, 42 tests. Then `dotnet test`: all pass.
 
 - [ ] **Step 6: Commit**
 
@@ -9839,6 +10276,14 @@ The web app gets read-only access to the analysis output so plan 4 can draw mark
 - Swear events that detection set aside (`evidence.suppressed` other than `no`, `AnalysisEvent.IsReviewOnly`) are review only: the events endpoint leaves them out unless `includeReview=true`, and `AnalysisMarkers` draws them as the separate kind `swear-review` (grey, "probably invented text, review only"), never as `swear`.
 - Show ids in the 404 message are truncated to 64 characters.
 
+**Fix round 1 (reviewer, binding):**
+- The transcript endpoint opens only job folders whose name (HHmmss in its day folder) can overlap the range (start before `to`, at most 2 hours before `from`), refuses a transcript.json over 32 MB and a response over 20,000 lines with 413, and keeps a 16 entry in-memory cache keyed by path, write time and length (`AnalysisStore.Transcripts(..., read)` is the test seam).
+- Events are returned with a per-event `reviewOnly` flag and a top-level `includeReview`; `count` excludes review-only events unless `includeReview=true`.
+- Dates must be in 2000 to 2100 (400 otherwise, never 500); file errors are a 500 with a generic message (`AnalysisReader.Run`); query errors keep 400, 404, 413.
+- `AnalysisMarkers` drops markers, dead-air segments and talk lines outside the clip instead of clamping them to its edges.
+- The "no Analysis reference" test now reads the Web csproj.
+
+
 **Interfaces:**
 - Consumes: `AnalysisPaths`, `AnalysisJson`, `EventsDocument`, `AnalysisEvent`, `TranscriptDocument`, `TranscriptSlicer`, `TimedLine`, `ShowAnalysis`, `ShowEnrichment`, `ShowOccurrence.TryParseId` (Core); `WebSettings`, `ClipClock`, `ClipMarkers.Time`, `PDMediaMarker`, `PDMediaSegment` (Web).
 - Produces: `AnalysisStore.SegmentDirs/Transcripts/DayEvents/FindShowDir`; `WebSettings.AnalysisDir` (from `WAA_ANALYSIS`, optional); `AnalysisQueryException`; `AnalysisReader` (`MaxEventsRange` 7 days, `MaxTranscriptRange` 6 hours, `Range`, `Events(from, to, types, includeReview = false)`, `Transcript`, `Show`, `Respond`); endpoints (JSON, UTC) `GET /api/analysis/events?from=<UTC>&to=<UTC>[&types=swear,clipping][&includeReview=true]`, `GET /api/analysis/transcript?from=&to=`, `GET /api/analysis/shows/{id}`; 400 `{ error }` for bad input, 404 when analysis is not configured or the show has no analysis; `AnalysisMarkers` (`Talk`, `SwearReview`, `KindLabels`, `KindColors`, `Markers`, `Segments`).
@@ -9866,7 +10311,7 @@ using web::WebAudioArchive.Web.Clips;
 
 namespace WebAudioArchive.Tests;
 
-public sealed class AnalysisWebTests : IDisposable
+public sealed partial class AnalysisWebTests : IDisposable
 {
     static readonly DateTimeOffset T = new(2026, 10, 15, 19, 0, 0, TimeSpan.Zero);
     readonly string _root = Directory.CreateTempSubdirectory("waa-aweb-").FullName;
@@ -10011,14 +10456,6 @@ public sealed class AnalysisWebTests : IDisposable
         Assert.Contains("probably", AnalysisMarkers.KindLabels[AnalysisMarkers.SwearReview]);
     }
 
-    [Fact]
-    public void The_web_project_does_not_reference_the_analysis_project()
-    {
-        var referenced = typeof(AnalysisReader).Assembly.GetReferencedAssemblies().Select(a => a.Name);
-        Assert.DoesNotContain("WebAudioArchive.Analysis", referenced);
-        Assert.Contains("WebAudioArchive.Core", referenced);
-    }
-
     WebApplicationFactory<WebEntryPoint> Host(bool analysis) => new WebApplicationFactory<WebEntryPoint>().WithWebHostBuilder(b =>
     {
         b.UseSetting("WAA_RECORDERS", $"a={Path.Combine(_root, "a")}");
@@ -10073,6 +10510,160 @@ public sealed class AnalysisWebTests : IDisposable
 }
 ```
 
+`tests/WebAudioArchive.Tests/AnalysisWebFixTests.cs` (same class, fix round 1):
+
+```csharp
+extern alias web;
+
+using System.Net;
+using System.Text.Json;
+using WebAudioArchive.Core.Analysis;
+using WebAudioArchive.Tests.Support;
+using web::WebAudioArchive.Web.Analysis;
+using web::WebAudioArchive.Web.Clips;
+
+namespace WebAudioArchive.Tests;
+
+// Fix round 1 (reviewer findings): transcript reads bounded, review-only flag, date bounds, error mapping, markers inside the clip.
+public sealed partial class AnalysisWebTests
+{
+    void WriteHourlyTranscripts(params int[] hours)
+    {
+        foreach (var h in hours)
+        {
+            var start = new DateTimeOffset(2026, 10, 15, h, 0, 0, TimeSpan.Zero);
+            var job = $"a/2026/10-15/{h:00}0000";
+            AnalysisJson.Write(Path.Combine(Paths.SegmentDir(job), AnalysisPaths.TranscriptFile),
+                TranscriptFixtures.Of(start, $"Line from hour {h}.") with { JobId = job });
+        }
+    }
+
+    [Fact]
+    public void A_one_hour_request_opens_only_transcripts_that_can_overlap_it()
+    {
+        WriteHourlyTranscripts(14, 15, 16, 17, 18, 19, 20, 21, 22);
+        var opened = new List<string>();
+
+        var docs = AnalysisStore.Transcripts(Paths, T, T.AddHours(1), p =>
+        {
+            opened.Add(Path.GetFileName(Path.GetDirectoryName(p)!));
+            return AnalysisStore.ReadTranscript(p);
+        });
+
+        Assert.Contains("190000", opened);
+        Assert.DoesNotContain("140000", opened);
+        Assert.DoesNotContain("150000", opened);
+        Assert.DoesNotContain("160000", opened);
+        Assert.DoesNotContain("200000", opened);
+        Assert.DoesNotContain("210000", opened);
+        Assert.DoesNotContain("220000", opened);
+        Assert.True(opened.Count <= 3, string.Join(",", opened));
+        Assert.Single(docs);
+    }
+
+    [Fact]
+    public void An_oversized_transcript_is_refused_with_413_not_loaded()
+    {
+        var file = Path.Combine(Paths.SegmentDir("a/2026/10-15/190000"), AnalysisPaths.TranscriptFile);
+        File.WriteAllBytes(file, new byte[AnalysisStore.MaxTranscriptBytes + 1]);
+
+        Assert.Throws<TranscriptTooLargeException>(() => AnalysisStore.ReadTranscript(file));
+        var ex = Assert.Throws<AnalysisQueryException>(() => Reader().Transcript(T, T.AddMinutes(30)));
+        Assert.Equal(413, ex.StatusCode);
+        Assert.DoesNotContain(Path.GetTempPath(), ex.Message);
+    }
+
+    [Fact]
+    public void Transcript_files_are_cached_by_path_time_and_length()
+    {
+        var r = Reader();
+        Assert.Equal(2, r.Transcript(T, T.AddMinutes(30)).Count);
+        Assert.Equal(2, r.Transcript(T, T.AddMinutes(30)).Count);
+        Assert.Equal(1, r.TranscriptFileReads);
+
+        var file = Path.Combine(Paths.SegmentDir("a/2026/10-15/190000"), AnalysisPaths.TranscriptFile);
+        AnalysisJson.Write(file, TranscriptFixtures.Of(T, "Only one line now, a different length.") with { JobId = "a/2026/10-15/190000" });
+        Assert.Single(r.Transcript(T, T.AddMinutes(30)));
+        Assert.Equal(2, r.TranscriptFileReads);
+    }
+
+    [Fact]
+    public async Task Review_only_events_are_flagged_in_the_json_and_counted_only_when_asked_for()
+    {
+        await using var factory = Host(analysis: true);
+        var client = factory.CreateClient();
+        const string range = "from=2026-10-15T19:00:00Z&to=2026-10-15T20:00:00Z&types=swear";
+
+        var normal = JsonDocument.Parse(await client.GetStringAsync("/api/analysis/events?" + range)).RootElement;
+        Assert.Equal(1, normal.GetProperty("count").GetInt32());
+        Assert.All(normal.GetProperty("events").EnumerateArray(), e => Assert.False(e.GetProperty("reviewOnly").GetBoolean()));
+
+        var all = JsonDocument.Parse(await client.GetStringAsync("/api/analysis/events?" + range + "&includeReview=true")).RootElement;
+        Assert.Equal(2, all.GetProperty("count").GetInt32());
+        Assert.True(all.GetProperty("includeReview").GetBoolean());
+        var flags = all.GetProperty("events").EnumerateArray().Select(e => e.GetProperty("reviewOnly").GetBoolean()).Order().ToArray();
+        Assert.Equal(new[] { false, true }, flags);
+    }
+
+    [Theory]
+    [InlineData("0001-01-01T00:00:00Z", "0001-01-01T06:00:00Z")]
+    [InlineData("9999-12-31T00:00:00Z", "9999-12-31T12:00:00Z")]
+    [InlineData("1999-12-31T23:00:00Z", "2000-01-01T01:00:00Z")]
+    [InlineData("2100-12-31T23:00:00Z", "2101-01-01T01:00:00Z")]
+    public async Task Extreme_dates_are_400_not_500(string from, string to)
+    {
+        Assert.Equal(400, Assert.Throws<AnalysisQueryException>(() => AnalysisReader.Range(from, to, AnalysisReader.MaxEventsRange)).StatusCode);
+
+        await using var factory = Host(analysis: true);
+        var client = factory.CreateClient();
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync($"/api/analysis/events?from={from}&to={to}")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync($"/api/analysis/transcript?from={from}&to={to}")).StatusCode);
+    }
+
+    [Fact]
+    public void Io_errors_are_500_with_a_generic_message_and_query_errors_keep_their_status()
+    {
+        var io = AnalysisReader.Run(() => throw new IOException(@"Could not read C:\secret\data\analysis\x.json"));
+        Assert.Equal(500, io.Status);
+        Assert.DoesNotContain("secret", JsonSerializer.Serialize(io.Body));
+        Assert.Equal(500, AnalysisReader.Run(() => throw new UnauthorizedAccessException("denied")).Status);
+        Assert.Equal(400, AnalysisReader.Run(() => throw new AnalysisQueryException(400, "bad")).Status);
+        Assert.Equal(200, AnalysisReader.Run(() => new { ok = true }).Status);
+    }
+
+    [Fact]
+    public void Markers_and_segments_outside_the_clip_are_dropped_not_clamped_to_its_edges()
+    {
+        var clock = new ClipClock([(0, T)], 600);
+        var inside = Event(EventTypes.Swear, T.AddMinutes(5));
+        var before = Event(EventTypes.Swear, T.AddMinutes(-1));
+        var after = Event(EventTypes.Swear, T.AddMinutes(20));
+        var deadEdge = Event(EventTypes.DeadAir, T.AddSeconds(590), 30);
+        var deadOut = Event(EventTypes.DeadAir, T.AddMinutes(30), 30);
+        TimedLine Line(DateTimeOffset at) => new(at, at.AddSeconds(5), "hello", "a", "a/2026/10-15/190000", []);
+
+        var markers = AnalysisMarkers.Markers([before, inside, after], clock);
+        var segments = AnalysisMarkers.Segments([deadEdge, deadOut], [Line(T.AddMinutes(-10)), Line(T.AddMinutes(2)), Line(T.AddMinutes(40))], clock);
+
+        Assert.Equal(TimeSpan.FromMinutes(5), Assert.Single(markers).Position);
+        Assert.Equal(2, segments.Count);
+        Assert.Contains(segments, s => s.Kind == EventTypes.DeadAir && s.End == TimeSpan.FromSeconds(600));
+        Assert.Single(segments, s => s.Kind == AnalysisMarkers.Talk);
+    }
+
+    [Fact]
+    public void The_web_project_file_has_no_reference_to_the_analysis_project()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "WebAudioArchive.slnx"))) dir = dir.Parent;
+        Assert.NotNull(dir);
+        var csproj = File.ReadAllText(Path.Combine(dir!.FullName, "src", "WebAudioArchive.Web", "WebAudioArchive.Web.csproj"));
+        Assert.DoesNotContain("WebAudioArchive.Analysis", csproj);
+        Assert.Contains("WebAudioArchive.Core.csproj", csproj);
+    }
+}
+```
+
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisWebTests`
@@ -10086,12 +10677,24 @@ using System.Globalization;
 
 namespace WebAudioArchive.Core.Analysis;
 
+/// <summary>A transcript.json is larger than <see cref="AnalysisStore.MaxTranscriptBytes"/>.</summary>
+public sealed class TranscriptTooLargeException(string path) : Exception("A transcript file is larger than the limit and was not loaded.")
+{
+    public string Path { get; } = path;
+}
+
 /// <summary>
 /// Read-only helpers over the analysis folder for readers such as the web app. Damaged files are skipped. Nothing here
 /// takes a path from a caller: folders are found by listing the analysis tree itself.
 /// </summary>
 public static class AnalysisStore
 {
+    /// <summary>The largest transcript.json a reader will load (a one hour segment is about 1 MB); a bigger file is refused, not parsed.</summary>
+    public const long MaxTranscriptBytes = 32L * 1024 * 1024;
+
+    /// <summary>The longest wall span of one segment assumed when choosing which job folders can overlap a range (segments are cut hourly; this is conservative).</summary>
+    public static readonly TimeSpan MaxSegmentSpan = TimeSpan.FromHours(2);
+
     /// <summary>Segment result folders for segments filed from the day before <paramref name="fromUtc"/> to the day of <paramref name="toUtc"/>.</summary>
     public static IEnumerable<string> SegmentDirs(AnalysisPaths paths, DateTimeOffset fromUtc, DateTimeOffset toUtc)
     {
@@ -10109,12 +10712,44 @@ public static class AnalysisStore
         }
     }
 
-    public static IReadOnlyList<TranscriptDocument> Transcripts(AnalysisPaths paths, DateTimeOffset fromUtc, DateTimeOffset toUtc) =>
-        SegmentDirs(paths, fromUtc, toUtc)
-            .Select(d => AnalysisJson.TryRead<TranscriptDocument>(Path.Combine(d, AnalysisPaths.TranscriptFile), out _))
+    /// <summary>Loads one transcript.json, null when it is missing or damaged; throws <see cref="TranscriptTooLargeException"/> above <see cref="MaxTranscriptBytes"/>.</summary>
+    public static TranscriptDocument? ReadTranscript(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) return null;
+        if (info.Length > MaxTranscriptBytes) throw new TranscriptTooLargeException(path);
+        return AnalysisJson.TryRead<TranscriptDocument>(path, out _);
+    }
+
+    /// <summary>
+    /// Transcripts that can overlap [fromUtc, toUtc). A job folder is named for its segment's UTC start (HHmmss, inside its
+    /// day folder), so folders that start after the range or more than <see cref="MaxSegmentSpan"/> before it are not opened at
+    /// all. <paramref name="read"/> loads one file (a seam for caching and tests); the default is <see cref="ReadTranscript"/>.
+    /// </summary>
+    public static IReadOnlyList<TranscriptDocument> Transcripts(AnalysisPaths paths, DateTimeOffset fromUtc, DateTimeOffset toUtc, Func<string, TranscriptDocument?>? read = null)
+    {
+        read ??= ReadTranscript;
+        return SegmentDirs(paths, fromUtc, toUtc)
+            .Where(d => MayOverlap(d, fromUtc, toUtc))
+            .Select(d => read(Path.Combine(d, AnalysisPaths.TranscriptFile)))
             .OfType<TranscriptDocument>()
             .Where(t => t.AudioFromUtc < toUtc && t.AudioToUtc > fromUtc)
             .ToList();
+    }
+
+    /// <summary>False only when the folder name and its day folder prove the segment cannot overlap; a name that does not parse is opened.</summary>
+    static bool MayOverlap(string jobDir, DateTimeOffset fromUtc, DateTimeOffset toUtc)
+    {
+        var name = Path.GetFileName(jobDir);
+        var dayDir = Path.GetDirectoryName(jobDir);
+        var yearDir = dayDir is null ? null : Path.GetDirectoryName(dayDir);
+        if (name.Length < 6 || dayDir is null || yearDir is null
+            || !DateTime.TryParseExact($"{Path.GetFileName(yearDir)}-{Path.GetFileName(dayDir)} {name[..6]}", "yyyy-MM-dd HHmmss", CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var start))
+            return true;
+        var s = new DateTimeOffset(start, TimeSpan.Zero);
+        return s < toUtc && s > fromUtc - MaxSegmentSpan;
+    }
 
     /// <summary>Events starting in [fromUtc, toUtc), from the merged day files (each event is filed in the day it starts).</summary>
     public static IReadOnlyList<AnalysisEvent> DayEvents(AnalysisPaths paths, DateTimeOffset fromUtc, DateTimeOffset toUtc)
@@ -10153,6 +10788,9 @@ In `src/WebAudioArchive.Web/WebSettings.cs`: add `public string? AnalysisDir { g
 
 `src/WebAudioArchive.Web/Analysis/AnalysisReader.cs`:
 ```csharp
+using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Globalization;
 using WebAudioArchive.Core.Analysis;
 
@@ -10182,6 +10820,22 @@ public sealed class AnalysisReader(WebSettings settings)
     public static readonly TimeSpan MaxEventsRange = TimeSpan.FromDays(7);
     public static readonly TimeSpan MaxTranscriptRange = TimeSpan.FromHours(6);
 
+    /// <summary>The most transcript lines one request may return; more is a 413 (ask for a shorter range).</summary>
+    public const int MaxTranscriptLines = 20000;
+
+    /// <summary>Dates outside these years are refused (400): they are never real broadcasts and overflow date arithmetic.</summary>
+    public const int MinYear = 2000;
+
+    public const int MaxYear = 2100;
+
+    const int MaxCachedTranscripts = 16;
+
+    readonly ConcurrentDictionary<string, (long Length, DateTime Written, TranscriptDocument Doc)> _cache = new();
+    int _reads;
+
+    /// <summary>How many transcript files have been parsed (a cache hit does not count); for diagnostics and tests.</summary>
+    public int TranscriptFileReads => Volatile.Read(ref _reads);
+
     AnalysisPaths Paths => settings.AnalysisDir is { } dir && Directory.Exists(dir)
         ? new AnalysisPaths(dir, settings.Station)
         : throw new AnalysisQueryException(404, "Analysis is not set up for this web app (WAA_ANALYSIS is not set or its folder does not exist yet).");
@@ -10194,6 +10848,8 @@ public sealed class AnalysisReader(WebSettings settings)
         var f = Utc(from, "from");
         var t = Utc(to, "to");
         if (t <= f) throw new AnalysisQueryException(400, "to must be after from.");
+        if (f.Year < MinYear || t.Year > MaxYear || t.Year < MinYear || f.Year > MaxYear)
+            throw new AnalysisQueryException(400, string.Create(CultureInfo.InvariantCulture, $"Times must be in the years {MinYear} to {MaxYear}."));
         if (t - f > max) throw new AnalysisQueryException(400, string.Create(CultureInfo.InvariantCulture, $"The range may be at most {max.TotalHours:0} hours."));
         return (f, t);
     }
@@ -10207,8 +10863,41 @@ public sealed class AnalysisReader(WebSettings settings)
             .ToList();
     }
 
-    public IReadOnlyList<TimedLine> Transcript(DateTimeOffset from, DateTimeOffset to) =>
-        TranscriptSlicer.Slice(AnalysisStore.Transcripts(Paths, from, to), from, to, Preference);
+    public IReadOnlyList<TimedLine> Transcript(DateTimeOffset from, DateTimeOffset to)
+    {
+        try
+        {
+            var lines = TranscriptSlicer.Slice(AnalysisStore.Transcripts(Paths, from, to, ReadCached), from, to, Preference);
+            if (lines.Count > MaxTranscriptLines)
+                throw new AnalysisQueryException(413, $"That range has more than {MaxTranscriptLines} transcript lines; ask for a shorter range.");
+            return lines;
+        }
+        catch (TranscriptTooLargeException)
+        {
+            throw new AnalysisQueryException(413, "A transcript in this range is too large to serve.");
+        }
+    }
+
+    TranscriptDocument? ReadCached(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) return null;
+        if (_cache.TryGetValue(path, out var hit) && hit.Length == info.Length && hit.Written == info.LastWriteTimeUtc) return hit.Doc;
+        var doc = AnalysisStore.ReadTranscript(path);
+        Interlocked.Increment(ref _reads);
+        if (doc is null) return null;
+        if (_cache.Count >= MaxCachedTranscripts) _cache.Clear();
+        _cache[path] = (info.Length, info.LastWriteTimeUtc, doc);
+        return doc;
+    }
+
+    /// <summary>An event as the API returns it: the stored fields and link, plus <c>reviewOnly</c> (a swear hit set aside as probable hallucination).</summary>
+    public static JsonNode EventView(AnalysisEvent e)
+    {
+        var node = JsonSerializer.SerializeToNode(e, JsonSerializerOptions.Web)!.AsObject();
+        node["reviewOnly"] = e.IsReviewOnly;
+        return node;
+    }
 
     public (ShowAnalysis? Analysis, ShowEnrichment? Enrichment) Show(string id)
     {
@@ -10221,16 +10910,27 @@ public sealed class AnalysisReader(WebSettings settings)
         return (analysis, AnalysisJson.TryRead<ShowEnrichment>(Path.Combine(dir, AnalysisPaths.EnrichmentFile), out _));
     }
 
-    public static IResult Respond(Func<object> make)
+    /// <summary>Runs a query: 200 with its result, a query error keeps its status (400, 404, 413), and a file error is a 500 with a generic message (never a path).</summary>
+    public static (int Status, object Body) Run(Func<object> make)
     {
         try
         {
-            return Results.Json(make());
+            return (200, make());
         }
         catch (AnalysisQueryException ex)
         {
-            return Results.Json(new { error = ex.Message }, statusCode: ex.StatusCode);
+            return (ex.StatusCode, new { error = ex.Message });
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (500, new { error = "The analysis files could not be read." });
+        }
+    }
+
+    public static IResult Respond(Func<object> make)
+    {
+        var (status, body) = Run(make);
+        return Results.Json(body, statusCode: status);
     }
 
     static DateTimeOffset Utc(string? value, string name)
@@ -10286,7 +10986,13 @@ public static class AnalysisMarkers
         [Talk] = "var(--bs-info)",
     };
 
-    public static IReadOnlyList<PDMediaMarker> Markers(IEnumerable<AnalysisEvent> events, ClipClock clock) => events
+    /// <summary>The UTC span of the clip's audio, or null when the clock has no timeline. Anything outside it is dropped: the clock would clamp it to the clip's edges and draw it there.</summary>
+    static (DateTimeOffset From, DateTimeOffset To)? Window(ClipClock clock) =>
+        clock.ToUtc(TimeSpan.Zero) is { } from && clock.ToUtc(TimeSpan.FromSeconds(clock.Seconds)) is { } to ? (from, to) : null;
+
+    public static IReadOnlyList<PDMediaMarker> Markers(IEnumerable<AnalysisEvent> events, ClipClock clock) =>
+        Window(clock) is not { } w ? [] : events
+        .Where(e => e.StartUtc >= w.From && e.StartUtc <= w.To)
         .Select(e => new PDMediaMarker
         {
             Id = "event-" + e.Id,
@@ -10300,8 +11006,9 @@ public static class AnalysisMarkers
 
     public static IReadOnlyList<PDMediaSegment> Segments(IEnumerable<AnalysisEvent> events, IEnumerable<TimedLine> lines, ClipClock clock)
     {
+        if (Window(clock) is not { } w) return [];
         var list = events
-            .Where(e => e.Type == EventTypes.DeadAir)
+            .Where(e => e.Type == EventTypes.DeadAir && e.EndUtc > w.From && e.StartUtc < w.To)
             .Select(e => new PDMediaSegment
             {
                 Id = "dead-" + e.Id,
@@ -10313,7 +11020,7 @@ public static class AnalysisMarkers
             })
             .ToList();
         var i = 0;
-        foreach (var l in lines)
+        foreach (var l in lines.Where(l => l.EndUtc > w.From && l.StartUtc < w.To))
         {
             list.Add(new PDMediaSegment
             {
@@ -10350,7 +11057,7 @@ app.MapGet("/api/analysis/events", (HttpRequest req, AnalysisReader a) => Analys
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisWebTests`
-Expected: PASS, 23 tests. Then `dotnet test`: all pass, including the existing web tests.
+Expected: PASS, 33 tests. Then `dotnet test`: all pass, including the existing web tests.
 
 - [ ] **Step 6: Commit**
 

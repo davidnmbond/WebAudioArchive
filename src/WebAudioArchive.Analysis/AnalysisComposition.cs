@@ -29,7 +29,7 @@ public static class AnalysisComposition
         var log = loggers.CreateLogger("WebAudioArchive.Analysis");
         foreach (var r in s.Recorders)
         {
-            if (IsSameOrInside(Path.GetFullPath(s.OutputDir), Path.GetFullPath(r.Root)))
+            if (ScratchSpace.IsSameOrInside(Path.GetFullPath(s.OutputDir), Path.GetFullPath(r.Root)))
                 throw new AnalysisSettingsException($"WAA_ANALYSIS_OUT: '{s.OutputDir}' is inside the data of recorder '{r.Id}' ({r.Root}); analysis output must never be written into a recorder's folder.");
         }
 
@@ -59,11 +59,5 @@ public static class AnalysisComposition
         var runner = new AnalysisRunner(new SegmentDiscovery(s.Recorders, s.Station, log), pipeline, shows, enricher, transcriber, disk, scratch,
             metrics, s.Preference, s.Since, clock, log);
         return new AnalysisRuntime(runner, metrics, scratch, decoder, transcriber);
-    }
-
-    static bool IsSameOrInside(string inner, string outer)
-    {
-        var rel = Path.GetRelativePath(outer, inner);
-        return rel == "." || (!rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel));
     }
 }

@@ -12,7 +12,7 @@ using web::WebAudioArchive.Web.Clips;
 
 namespace WebAudioArchive.Tests;
 
-public sealed class AnalysisWebTests : IDisposable
+public sealed partial class AnalysisWebTests : IDisposable
 {
     static readonly DateTimeOffset T = new(2026, 10, 15, 19, 0, 0, TimeSpan.Zero);
     readonly string _root = Directory.CreateTempSubdirectory("waa-aweb-").FullName;
@@ -155,14 +155,6 @@ public sealed class AnalysisWebTests : IDisposable
         var review = Assert.Single(markers, m => m.Kind == AnalysisMarkers.SwearReview);
         Assert.Contains("review only", review.Detail);
         Assert.Contains("probably", AnalysisMarkers.KindLabels[AnalysisMarkers.SwearReview]);
-    }
-
-    [Fact]
-    public void The_web_project_does_not_reference_the_analysis_project()
-    {
-        var referenced = typeof(AnalysisReader).Assembly.GetReferencedAssemblies().Select(a => a.Name);
-        Assert.DoesNotContain("WebAudioArchive.Analysis", referenced);
-        Assert.Contains("WebAudioArchive.Core", referenced);
     }
 
     WebApplicationFactory<WebEntryPoint> Host(bool analysis) => new WebApplicationFactory<WebEntryPoint>().WithWebHostBuilder(b =>

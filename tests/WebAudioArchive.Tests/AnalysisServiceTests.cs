@@ -26,7 +26,7 @@ using analysissvc::WebAudioArchive.Analysis.Service;
 
 namespace WebAudioArchive.Tests;
 
-public sealed class AnalysisServiceTests : IAsyncLifetime
+public sealed partial class AnalysisServiceTests : IAsyncLifetime
 {
     static readonly DateTimeOffset Show = new(2026, 10, 15, 19, 0, 0, TimeSpan.Zero);
     static readonly string ConfigPath = Path.Combine(AppContext.BaseDirectory, "config", "analysis", "analysis.json");
@@ -35,6 +35,7 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
     readonly FakeTranscriber _whisper = new();
     readonly FakeLlm _llm = new();
     long _free = long.MaxValue;
+    bool _diskBroken;
 
     string A => Path.Combine(_root, "a");
     AnalysisPaths Paths => new(Path.Combine(_root, "analysis"), "burst");
@@ -60,7 +61,7 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         var whisper = transcriber ?? _whisper;
         var config = AnalysisConfigLoader.Load(ConfigPath);
         var scratch = new ScratchSpace(Path.Combine(_root, "scratch"), 512L * 1024 * 1024);
-        var disk = new DiskGuard(Paths.Root, 1L << 30, _ => _free);
+        var disk = new DiskGuard(Paths.Root, 1L << 30, _ => _diskBroken ? throw new IOException("disk gone") : _free);
         var schedule = new ScheduleProvider(Path.Combine(_root, "schedule.json"), null, "burst", NullLogger.Instance);
         var pipeline = new SegmentPipeline(Paths, config, scratch, new SegmentDecoder(), whisper, disk,
             Watershed.From(config.Config.Swearing, schedule.Zone), schedule.TitleAt, _clock, NullLogger.Instance);
@@ -387,7 +388,7 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
     [Fact]
     public void Composition_refuses_a_scratch_root_that_holds_recordings_or_output()
     {
-        foreach (var scratch in new[] { A, _root, Path.Combine(_root, "comp-out") })
+        foreach (var scratch in new[] { A, _root, Path.Combine(_root, "comp-out"), Path.Combine(A, "scratch"), Path.Combine(_root, "comp-out", "scratch") })
         {
             var settings = AnalysisSettings.Load(Env(("WAA_SCRATCH", scratch)));
             var ex = Assert.Throws<AnalysisSettingsException>(() =>
