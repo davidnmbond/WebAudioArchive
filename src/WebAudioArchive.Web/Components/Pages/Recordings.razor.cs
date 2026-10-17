@@ -49,7 +49,7 @@ public sealed partial class Recordings
     }
 
     // The same as the table's Play button: the Player, prefilled to that segment (or a minute either side of a gap).
-    void OpenInPlayer(RecordingCalendarItem item) => Nav.NavigateTo(item.PlayerUrl);
+    void OpenShow(RecordingCalendarItem item) => Nav.NavigateTo(item.PlayUrl);
 
     async Task OnFilteringChangedAsync(bool on)
     {

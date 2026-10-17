@@ -174,7 +174,7 @@ public sealed partial class AnalysisWebTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, events.StatusCode);
         var body = await events.Content.ReadAsStringAsync();
         Assert.Contains("\"type\":\"swear\"", body);
-        Assert.Contains("\"link\":\"/player?from=2026-10-15T19:09:55Z", body);
+        Assert.Contains("\"link\":\"/at?utc=2026-10-15T19:10:00Z&recorder=a\"", body);
         Assert.Equal(1, JsonDocument.Parse(body).RootElement.GetProperty("count").GetInt32());
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/analysis/transcript?from=2026-10-15T19:00:00Z&to=2026-10-15T19:30:00Z")).StatusCode);

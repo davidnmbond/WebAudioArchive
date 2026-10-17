@@ -112,7 +112,7 @@ public sealed class AnalysisContractsTests : IDisposable
     }
 
     [Fact]
-    public void Event_ids_are_stable_and_links_open_the_player_with_padding()
+    public void Event_ids_are_stable_and_links_open_the_show_at_the_event()
     {
         var a = AnalysisEvent.MakeId(EventTypes.Swear, "a/2026/10-16/080000", 12.3456, "shit");
         Assert.Equal(a, AnalysisEvent.MakeId(EventTypes.Swear, "a/2026/10-16/080000", 12.3456, "shit"));
@@ -121,7 +121,7 @@ public sealed class AnalysisContractsTests : IDisposable
 
         var e = new AnalysisEvent(a, EventTypes.Swear, T.AddSeconds(10), T.AddSeconds(10.4), Severities.High, 0.9, "swear", "1",
             EventSources.Transcript, "a", "a/2026/10-16/080000", 15, 0.4, "shit", null);
-        Assert.Equal("/player?from=2026-10-16T08:00:05Z&to=2026-10-16T08:00:16Z&recorder=a", e.Link);
+        Assert.Equal("/at?utc=2026-10-16T08:00:10Z&recorder=a", e.Link);
     }
 
     [Fact]

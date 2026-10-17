@@ -52,22 +52,15 @@ public sealed record AnalysisEvent(
     string? Label,
     IReadOnlyDictionary<string, string>? Evidence)
 {
+    /// <summary>How far before an event the show page starts playing it.</summary>
     public const double LinkPaddingSeconds = 5;
 
     /// <summary>A swear hit that detection set aside as probable hallucination (repeated or invented text): for review only, never counted, shown or aggregated as swearing.</summary>
     [JsonIgnore]
     public bool IsReviewOnly => Type == EventTypes.Swear && Evidence?.GetValueOrDefault("suppressed") is { } s && s != "no";
 
-    /// <summary>The web app's Player for this event with 5 s either side (a clip made on request from that recorder).</summary>
-    public string Link
-    {
-        get
-        {
-            var from = StartUtc.AddSeconds(-LinkPaddingSeconds);
-            var to = (EndUtc > StartUtc.AddSeconds(1) ? EndUtc : StartUtc.AddSeconds(1)).AddSeconds(LinkPaddingSeconds);
-            return $"/player?from={Utc(from)}&to={Utc(to)}&recorder={Recorder}";
-        }
-    }
+    /// <summary>The web app's show page for the show on air at this event, from that recorder, with the event selected (/at finds the show).</summary>
+    public string Link => $"/at?utc={Utc(StartUtc)}&recorder={Recorder}";
 
     /// <summary>Stable across rebuilds: the same detection on the same audio always gets the same id.</summary>
     public static string MakeId(string type, string jobId, double audioOffset, string? discriminator = null)

@@ -113,28 +113,10 @@ public sealed class WebSettingsTests : IDisposable
     }
 
     [Fact]
-    public void Player_form_builds_a_utc_request_and_reads_deep_links()
+    public void Play_links_open_the_show_at_a_utc_time()
     {
-        var form = new PlayerForm { Date = new DateOnly(2026, 10, 15), From = "15:15:00", To = "15:16:00", AddMargin = true, MarginMinutes = 5, Recorder = "B" };
-        var r = form.ToRequest();
-        Assert.Equal(new DateTimeOffset(2026, 10, 15, 15, 15, 0, TimeSpan.Zero), r.From);
-        Assert.Equal(new DateTimeOffset(2026, 10, 15, 15, 16, 0, TimeSpan.Zero), r.To);
-        Assert.Equal(TimeSpan.FromMinutes(5), r.MarginBefore);
-        Assert.Equal("b", r.Recorder);
-
-        var midnight = new PlayerForm { Date = new DateOnly(2026, 10, 15), From = "23:30", To = "00:30" }.ToRequest();
-        Assert.Equal(new DateTimeOffset(2026, 10, 16, 0, 30, 0, TimeSpan.Zero), midnight.To);
-        Assert.Equal(TimeSpan.Zero, midnight.MarginBefore);
-
-        Assert.Equal(400, Assert.Throws<ClipException>(() => new PlayerForm { Date = new DateOnly(2026, 10, 15), From = "25:00", To = "1:00" }.ToRequest()).StatusCode);
-
-        var linked = new PlayerForm();
-        Assert.True(linked.TryLoad("2026-10-15T15:15:00Z", "2026-10-15T15:16:00Z", "auto", null));
-        Assert.Equal(new DateOnly(2026, 10, 15), linked.Date);
-        Assert.Equal("15:15:00", linked.From);
-        Assert.Equal("15:16:00", linked.To);
-        Assert.False(new PlayerForm().TryLoad("nonsense", "2026-10-15T15:16:00Z", null, null));
-        Assert.Equal("/player?from=2026-10-15T15:15:00Z&to=2026-10-15T15:16:00Z&recorder=a",
-            PlayerLink.For(new DateTimeOffset(2026, 10, 15, 15, 15, 0, TimeSpan.Zero), new DateTimeOffset(2026, 10, 15, 15, 16, 0, TimeSpan.Zero), "a"));
+        var at = new DateTimeOffset(2026, 10, 15, 15, 15, 0, TimeSpan.Zero);
+        Assert.Equal("/at?utc=2026-10-15T15:15:00Z&recorder=a", PlayLink.For(at, "a"));
+        Assert.Equal("/at?utc=2026-10-15T15:15:00Z&recorder=a%2Bb", PlayLink.For(at, "a+b"));
     }
 }

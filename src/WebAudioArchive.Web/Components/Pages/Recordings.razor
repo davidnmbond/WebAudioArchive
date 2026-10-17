@@ -46,7 +46,7 @@
                 AriaLabel="Recorded segments and gaps (UTC)"
                 CssClass="waa-calendar recordings-calendar"
                 OnVisibleRangeChanged="OnCalendarRangeChanged"
-                OnItemSelected="OpenInPlayer" />
+                OnItemSelected="OpenShow" />
 </section>
 
 <h2 class="h5">Segments</h2>
@@ -73,7 +73,7 @@
     <PDColumn TItem="RecordingRow" Id="gaps" Field="r => r.Gaps" Title="Gaps" />
     <PDColumn TItem="RecordingRow" Id="open" Field="r => r.Open" Title="Open" />
     <PDColumn TItem="RecordingRow" Id="play" Title="Play" Sortable="false">
-        <Template Context="row"><PDLinkButton Url="@row.PlayerUrl" Text="Play" IconCssClass="fas fa-play" CssClass="btn-primary" Size="ButtonSizes.Small" ToolTip="Open this segment in the Player" /></Template>
+        <Template Context="row"><PDLinkButton Url="@row.PlayUrl" Text="Play" IconCssClass="fas fa-play" CssClass="btn-primary" Size="ButtonSizes.Small" ToolTip="Open the show on air at the start of this segment" /></Template>
     </PDColumn>
 </PDTable>
 </div>

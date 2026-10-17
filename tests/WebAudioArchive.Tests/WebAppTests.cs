@@ -233,35 +233,9 @@ public sealed class WebAppTests : IAsyncLifetime
         Assert.Contains("3 segments", html);
     }
 
-    [Fact]
-    public async Task Player_deep_link_prepares_the_clip_on_the_server()
-    {
-        var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/player?from=2026-10-15T15:52:00Z&to=2026-10-15T15:53:00Z&recorder=auto"));
-
-        Assert.Contains("Clip covers", html);
-        Assert.Contains("2026-10-15 15:52:00 UTC", html);
-        Assert.Contains("id=\"clip-player\"", html);
-
-        // PDMediaPlayer: the clip URL, the speeds, skip 15 and 30 s, and a download of the named file.
-        Assert.Contains("pd-media-player", html);
-        Assert.Matches("<audio[^>]*src=\"/media/clip/[0-9a-f]{32}[.]mp3\"", html);
-        foreach (var speed in new[] { "0.75×", "1×", "1.25×", "1.5×", "2×" }) Assert.Contains($">{speed}</option>", html);
-        Assert.DoesNotContain(">1.75×</option>", html);
-        Assert.Contains("Back 15 seconds", html);
-        Assert.Contains("Forward 30 seconds", html);
-        Assert.Matches("href=\"/media/clip/[0-9a-f]{32}[.]mp3[?]download=1\"[^>]*download=\"burst_20261015T155200Z_20261015T155300Z_A.mp3\"", html);
-
-        // The UTC wall time beside the player's own media time, and the requested window as markers.
-        // Position 0 is the first whole frame, at or within a frame before the requested start.
-        Assert.Matches("Wall time <strong id=\"clip-wall\" class=\"utc\">2026-10-15 15:(51:59|52:00)</strong> UTC", html);
-        Assert.Contains("Requested window", html);
-        Assert.DoesNotContain("clipplayer.js", html);
-    }
-
     [Theory]
     [InlineData("/")]
     [InlineData("/recordings")]
-    [InlineData("/player")]
     [InlineData("/shows")]
     public async Task Every_page_sets_the_theme_before_first_paint_and_has_the_theme_toggle(string url)
     {
@@ -319,24 +293,14 @@ public sealed class WebAppTests : IAsyncLifetime
         Assert.Contains("pdtoggleswitch", recordings);
         Assert.Contains("pddatetime", recordings);
 
-        var player = await _client.GetStringAsync("/player?from=2026-10-15T15:52:00Z&to=2026-10-15T15:53:00Z");
-        Assert.Contains("pd-combobox", player);
-        Assert.Contains("pd-busy-overlay", player);
-        Assert.Contains("Joined pieces (1)", player);
     }
 
     [Fact]
-    public async Task Player_page_without_a_link_shows_the_form()
+    public async Task There_is_no_separate_player_page()
     {
-        var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/player"));
-
-        Assert.Contains("Prepare clip", html);
-        Assert.Contains("From (UTC, HH:mm:ss)", html);
-        Assert.Contains("id=\"player-margin\"", html);
-        Assert.Contains("id=\"player-margin-minutes\"", html);
-        Assert.Contains("value=\"5\"", html);
-        Assert.Contains("minutes before and after", html);
-        Assert.DoesNotContain("id=\"clip-player\"", html);
+        // The show page plays everything; /at finds the show (or the off-air hour) for a UTC time.
+        Assert.Equal(HttpStatusCode.NotFound, (await _client.GetAsync("/player")).StatusCode);
+        Assert.DoesNotContain("href=\"player\"", await _client.GetStringAsync("/"));
     }
 
     [Fact]
@@ -370,7 +334,7 @@ public sealed class WebAppTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Recordings_page_has_a_week_calendar_of_segments_and_gaps_that_opens_the_player()
+    public async Task Recordings_page_has_a_week_calendar_of_segments_and_gaps_that_opens_the_show()
     {
         var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/recordings"));
 
@@ -386,9 +350,9 @@ public sealed class WebAppTests : IAsyncLifetime
         var items = new web::WebAudioArchive.Web.RecordingsQuery(_factory.Services.GetRequiredService<web::WebAudioArchive.Web.Clips.SegmentCatalog>(), _time)
             .CalendarItems(T0, T0.AddHours(2));
         var segment = items.First(i => i.Kind == "segment" && i.Recorder == "A");
-        Assert.Equal("/player?from=2026-10-15T15:50:00Z&to=2026-10-15T16:00:00Z&recorder=a", segment.PlayerUrl);
+        Assert.Equal("/at?utc=2026-10-15T15:50:00Z&recorder=a", segment.PlayUrl);
         var g = Assert.Single(items, i => i.Kind == "gap");
-        Assert.Equal("/player?from=2026-10-15T16:01:00Z&to=2026-10-15T16:03:03Z&recorder=b", g.PlayerUrl);
+        Assert.Equal("/at?utc=2026-10-15T16:02:00Z&recorder=b", g.PlayUrl);
     }
 
     [Fact]
@@ -404,7 +368,7 @@ public sealed class WebAppTests : IAsyncLifetime
         Assert.Equal("rec-item rec-missing", m.CssClass);
         Assert.Equal("A+B: missing 1200.0 s", m.Title);
         Assert.Contains("Neither recorder has audio from 2026-10-15 16:10:00 UTC to 2026-10-15 16:30:00 UTC", m.Tooltip);
-        Assert.Equal("/player?from=2026-10-15T16:09:00Z&to=2026-10-15T16:31:00Z&recorder=auto", m.PlayerUrl);
+        Assert.Equal("/at?utc=2026-10-15T16:10:00Z&recorder=auto", m.PlayUrl);
 
         var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/recordings"));
         Assert.Contains("rec-legend rec-missing", html);

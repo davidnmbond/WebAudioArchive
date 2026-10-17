@@ -108,3 +108,45 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 /* The minutes box (margin): PDTextBox does not size its input here, so give it a fixed width and keep the words on one line. */
 .waa-minutes input.form-control { width: 5rem; flex: none; }
 .waa-minutes > span { white-space: nowrap; }
+
+/* Show page: a toolbar, the player, then events beside the transcript in a splitter that fills the rest of the window. */
+.show-toolbar h1 { margin: 0; font-size: 1.25rem; }
+.show-toolbar .waa-minutes input.form-control { width: 4.5rem; }
+.show-details { position: relative; }
+.show-details > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; }
+.show-details > summary::-webkit-details-marker { display: none; }
+.show-details > summary::after { content: "\25BE"; margin-left: 0.3rem; color: var(--bs-secondary-color); }
+.show-details-pop { position: absolute; z-index: 1050; top: calc(100% + 0.25rem); left: 0; width: min(46rem, calc(100vw - 2rem)); }
+/* PDBusyOverlay is inline-block, which would shrink the player and the splitter to their content. */
+.show-body > .pd-busy-overlay { display: block; }
+.show-split { height: max(18rem, calc(100vh - 21rem)); }
+.show-split .pdsplitter { height: 100%; }
+.show-split .gutter { background-color: var(--bs-tertiary-bg); }
+.show-pane { height: 100%; overflow-y: auto; }
+.show-pane-head {
+    position: sticky; top: 0; z-index: 1;
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    background-color: var(--bs-body-bg);
+    border-bottom: 1px solid var(--bs-border-color);
+}
+.show-event-list li + li, #show-transcript li + li { border-top: 1px solid var(--bs-border-color-translucent); }
+.show-event, .show-line > button {
+    display: flex; align-items: baseline; gap: 0.5rem; width: 100%;
+    padding: 0.2rem 0.5rem;
+    border: 0; background: none; color: inherit; text-align: left; font-size: 0.875rem;
+}
+.show-event { border-left: 4px solid var(--waa-kind); }
+.show-event:hover, .show-line > button:hover { background-color: var(--bs-tertiary-bg); }
+.show-event.container { color: var(--bs-secondary-color); }
+.show-event.playing, .show-line.playing > button { background-color: var(--bs-info-bg-subtle); }
+.show-event.selected, .show-line.selected > button { background-color: var(--bs-primary-bg-subtle); color: var(--bs-primary-text-emphasis); }
+.show-event-time, .show-line-time { flex: none; font-family: var(--bs-font-monospace); font-size: 0.8rem; color: var(--bs-secondary-color); }
+.show-event-kind {
+    flex: none; padding: 0 0.35rem; border-radius: var(--bs-border-radius-sm);
+    font-size: 0.75rem; color: var(--bs-body-bg); background-color: var(--waa-kind);
+}
+.show-event-label { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.show-event-utc { flex: none; font-size: 0.75rem; color: var(--bs-secondary-color); }
+.show-song-art { width: 8rem; height: 8rem; object-fit: cover; }
+@media (max-width: 575.98px) { .show-event-utc { display: none; } }

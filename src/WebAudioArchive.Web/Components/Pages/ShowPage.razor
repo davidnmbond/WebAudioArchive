@@ -2,30 +2,123 @@
 
 <PageTitle>@(Show?.Title ?? "Show") - WebAudioArchive</PageTitle>
 
-<p class="mb-2"><a href="shows" id="show-back"><i class="fas fa-arrow-left me-1" aria-hidden="true"></i>All shows</a></p>
-
 @if (Snapshot.Schedule is null)
 {
+    <p class="mb-2"><a href="shows" id="show-back"><i class="fas fa-arrow-left me-1" aria-hidden="true"></i>All shows</a></p>
     <h1 class="h3">Show</h1>
     <ScheduleStatus Snapshot="Snapshot" Source="Schedule.Source" />
 }
 else if (Show is null)
 {
+    <p class="mb-2"><a href="shows" id="show-back"><i class="fas fa-arrow-left me-1" aria-hidden="true"></i>All shows</a></p>
     <h1 class="h3">Show not found</h1>
     <div class="alert alert-warning" id="show-not-found" role="alert">@NotFoundText</div>
 }
 else
 {
-    <h1 class="h3" id="show-title">@Show.Title</h1>
-    <dl class="row mb-3" id="show-facts">
-        <dt class="col-sm-3 col-lg-2">Start</dt><dd class="col-sm-9 col-lg-10 utc" id="show-start">@Utc(Show.StartUtc)</dd>
-        <dt class="col-sm-3 col-lg-2">End</dt><dd class="col-sm-9 col-lg-10 utc" id="show-end">@Utc(Show.EndUtc)</dd>
-        <dt class="col-sm-3 col-lg-2">Recording</dt>
-        <dd class="col-sm-9 col-lg-10" id="show-coverage">
-            <span class="show-legend @Coverage!.CssClass"><i class="@Coverage.Icon me-1" aria-hidden="true"></i>@Coverage.Label</span>
-            <span class="ms-1">@Coverage.Summary</span>
-        </dd>
-    </dl>
+    @* Toolbar: the show's facts on the left, the timeline settings on the right. The coverage table, the clip's extent and
+       its notes fold away under the coverage badge. *@
+    <section class="show-toolbar card mb-2" id="show-toolbar" aria-label="Show">
+        <div class="card-body d-flex flex-wrap align-items-center gap-2 py-2">
+            <a href="shows" id="show-back" class="btn btn-sm btn-outline-secondary" title="All shows"><i class="fas fa-arrow-left" aria-hidden="true"></i><span class="visually-hidden">All shows</span></a>
+            <h1 class="h3" id="show-title">@Show.Title</h1>
+            <span class="small text-body-secondary" id="show-facts">
+                <span class="utc" id="show-start">@Utc(Show.StartUtc)</span> to <span class="utc" id="show-end">@Utc(Show.EndUtc)</span>
+            </span>
+            <details class="show-details" id="show-coverage">
+                <summary class="small" title="Coverage by recorder and clip details">
+                    <span class="show-legend @Coverage!.CssClass"><i class="@Coverage.Icon me-1" aria-hidden="true"></i>@Coverage.Label</span>
+                    <span class="ms-1">@Coverage.Summary</span>
+                </summary>
+                <div class="show-details-pop card shadow">
+                    <div class="card-body p-2 small">
+                        @if (Coverage.State != ShowState.Future)
+                        {
+                            <div class="fw-semibold mb-1">Coverage by recorder (up to <span class="utc">@Utc(Coverage.MeasuredTo)</span>)</div>
+                            <div class="table-responsive">
+                                <table class="table table-sm mb-2" id="show-recorders">
+                                    <thead><tr><th>Recorder</th><th>Covered</th><th>Gaps (UTC)</th></tr></thead>
+                                    <tbody>
+                                        @foreach (var r in Coverage.Recorders)
+                                        {
+                                            <tr data-recorder="@r.Recorder">
+                                                <td>@r.Recorder.ToUpperInvariant()@(r.IncludesOpenSegment ? " (recording now)" : "")</td>
+                                                <td>@Covered(r)</td>
+                                                <td>
+                                                    @if (r.Gaps.Count == 0)
+                                                    {
+                                                        <span>none</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <ul class="list-unstyled mb-0">
+                                                            @foreach (var g in r.Gaps)
+                                                            {
+                                                                <li class="utc">@Utc(g.Start) to @Utc(g.End) (@Seconds(g.Seconds))</li>
+                                                            }
+                                                        </ul>
+                                                    }
+                                                </td>
+                                            </tr>
+                                        }
+                                        <tr data-recorder="combined" class="fw-semibold">
+                                            <td>A and B together</td>
+                                            <td>@Covered(Coverage.Combined)</td>
+                                            <td>
+                                                @if (Coverage.Combined.Missing.Count == 0)
+                                                {
+                                                    <span>none missing from both</span>
+                                                }
+                                                else
+                                                {
+                                                    <ul class="list-unstyled mb-0">
+                                                        @foreach (var g in Coverage.Combined.Missing)
+                                                        {
+                                                            <li class="utc">@Utc(g.Start) to @Utc(g.End) (@Seconds(g.Seconds))</li>
+                                                        }
+                                                    </ul>
+                                                }
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                        @if (Clip is not null && Timeline is not null)
+                        {
+                            <p class="text-body-secondary mb-0" id="show-clip-facts">
+                                The clip runs from <span class="utc">@Utc(Clip.Plan.StartUtc)</span> to <span class="utc">@Utc(Clip.Plan.EndUtc)</span>.
+                                The shaded part of the seek bar is the show proper; the lead-in and tail outside it are the margins.
+                            </p>
+                            <ul class="text-body-secondary mt-1 mb-0" id="show-notes">
+                                @foreach (var n in Timeline.Notes.Concat(Clip.Plan.Notes))
+                                {
+                                    <li>@n</li>
+                                }
+                            </ul>
+                        }
+                    </div>
+                </div>
+            </details>
+
+            @if (Coverage.State != ShowState.Future)
+            {
+                <div class="d-flex flex-wrap align-items-center gap-2 ms-auto" aria-label="Timeline settings" role="group">
+                    <label class="d-flex align-items-center gap-1 mb-0 small waa-minutes" id="show-margin">
+                        <span>Margin</span>
+                        <PDTextBox Type="PDInputType.Number" Value="@MarginText" ValueChanged="OnMarginChanged" Width="4.5rem" ShowClearButton="false" ToolTip="Minutes before and after the show" />
+                        <span>min</span>
+                    </label>
+                    <div class="player-recorder" id="show-recorder" role="group" aria-label="Recorder">
+                        <PDComboBox TItem="RecorderChoice" Items="RecorderChoices" SelectedItem="SelectedRecorder" SelectedItemChanged="OnRecorderChanged"
+                                    ItemToId="c => c.Id" ItemToString="c => c.Text" Filter="RecorderChoice.Matches" />
+                    </div>
+                    <PDButton Id="show-prepare" Text="@(Busy ? "Preparing..." : "Update")" IconCssClass="fas fa-sync-alt" CssClass="btn-primary" Size="ButtonSizes.Small"
+                              ToolTip="Rebuild the timeline with this margin and recorder" IsEnabled="@(!Busy)" Click="_ => PrepareAsync()" />
+                </div>
+            }
+        </div>
+    </section>
 
     @if (Coverage.State == ShowState.Future)
     {
@@ -36,123 +129,125 @@ else
     }
     else
     {
-        <section class="card mb-3" aria-label="Coverage by recorder">
-            <div class="card-header">Coverage by recorder (up to <span class="utc">@Utc(Coverage.MeasuredTo)</span>)</div>
-            <div class="card-body p-0 table-responsive">
-                <table class="table table-sm mb-0" id="show-recorders">
-                    <thead><tr><th>Recorder</th><th>Covered</th><th>Gaps (UTC)</th></tr></thead>
-                    <tbody>
-                        @foreach (var r in Coverage.Recorders)
-                        {
-                            <tr data-recorder="@r.Recorder">
-                                <td>@r.Recorder.ToUpperInvariant()@(r.IncludesOpenSegment ? " (recording now)" : "")</td>
-                                <td>@Covered(r)</td>
-                                <td>
-                                    @if (r.Gaps.Count == 0)
-                                    {
-                                        <span>none</span>
-                                    }
-                                    else
-                                    {
-                                        <ul class="list-unstyled mb-0">
-                                            @foreach (var g in r.Gaps)
-                                            {
-                                                <li class="utc">@Utc(g.Start) to @Utc(g.End) (@Seconds(g.Seconds))</li>
-                                            }
-                                        </ul>
-                                    }
-                                </td>
-                            </tr>
-                        }
-                        <tr data-recorder="combined" class="fw-semibold">
-                            <td>A and B together</td>
-                            <td>@Covered(Coverage.Combined)</td>
-                            <td>
-                                @if (Coverage.Combined.Missing.Count == 0)
-                                {
-                                    <span>none missing from both</span>
-                                }
-                                else
-                                {
-                                    <ul class="list-unstyled mb-0">
-                                        @foreach (var g in Coverage.Combined.Missing)
-                                        {
-                                            <li class="utc">@Utc(g.Start) to @Utc(g.End) (@Seconds(g.Seconds))</li>
-                                        }
-                                    </ul>
-                                }
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <section class="card mb-3" aria-label="Timeline settings">
-            <div class="card-body">
-                <div class="row g-3 align-items-end">
-                    <div class="col-12 col-sm-auto">
-                        <label class="d-flex align-items-center gap-2 mb-0 waa-minutes" id="show-margin">
-                            <span>Margin</span>
-                            <PDTextBox Type="PDInputType.Number" Value="@MarginText" ValueChanged="OnMarginChanged" Width="5rem" ShowClearButton="false" ToolTip="Minutes before and after the show" />
-                            <span>minutes before and after</span>
-                        </label>
-                    </div>
-                    <div class="col-12 col-sm-auto">
-                        <span class="form-label mb-1 small d-block" id="show-recorder-label">Recorder</span>
-                        <div class="player-recorder" id="show-recorder" role="group" aria-labelledby="show-recorder-label">
-                            <PDComboBox TItem="Player.RecorderChoice" Items="RecorderChoices" SelectedItem="SelectedRecorder" SelectedItemChanged="OnRecorderChanged"
-                                        ItemToId="c => c.Id" ItemToString="c => c.Text" Filter="Player.RecorderChoice.Matches" />
-                        </div>
-                    </div>
-                    <div class="col-12 col-sm-auto">
-                        <PDButton Id="show-prepare" Text="@(Busy ? "Preparing..." : "Update timeline")" IconCssClass="fas fa-sync-alt" CssClass="btn-primary"
-                                  IsEnabled="@(!Busy)" Click="_ => PrepareAsync()" />
-                    </div>
-                </div>
-            </div>
-        </section>
-
         @if (Error is not null)
         {
-            <div class="alert alert-danger d-flex gap-2 align-items-start" id="show-error" role="alert">
+            <div class="alert alert-danger d-flex gap-2 align-items-start py-2" id="show-error" role="alert">
                 <PDLabel IconCssClass="fas fa-times-circle" />
                 <div>@Error</div>
             </div>
         }
 
-        <PDBusyOverlay IsBusy="@Busy" OverlayCssClass="fas fa-spinner fa-spin fa-2x">
-            @if (Clip is not null && Timeline is not null)
-            {
-                @if (Warnings.Count > 0)
+        <div class="show-body">
+            <PDBusyOverlay IsBusy="@Busy" OverlayCssClass="fas fa-spinner fa-spin fa-2x">
+                @if (Clip is not null && Timeline is not null)
                 {
-                    <div class="alert alert-warning" id="show-warnings" role="status">
-                        <PDLabel IconCssClass="fas fa-exclamation-triangle" Text="Warnings" TextCssClass="fw-semibold" />
-                        <ul class="mb-0 mt-1">
-                            @foreach (var w in Warnings)
-                            {
-                                <li>@w</li>
-                            }
-                        </ul>
+                    @if (Warnings.Count > 0)
+                    {
+                        <div class="alert alert-warning small py-1 px-2 mb-2" id="show-warnings" role="status">
+                            <i class="fas fa-exclamation-triangle me-1" aria-hidden="true"></i>
+                            @string.Join(" ", Warnings)
+                        </div>
+                    }
+
+                    <ClipPlayer @ref="_player" Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds"
+                                Timeline="@ClipTimeline" Markers="@Markers" Segments="@Timeline.Segments"
+                                RangeStart="@Timeline.RangeStart" RangeEnd="@Timeline.RangeEnd" StartAt="@StartAt" PositionChanged="OnPosition"
+                                Title="@($"{Show.Title}: recorder {Clip.Plan.Recorder.ToUpperInvariant()}, {MarginMinutes} minute margins")" />
+
+                    <div class="show-split mt-2" id="show-split">
+                        <PDSplitter Direction="SplitDirection.Horizontal" GutterSize="8" CssClass="border rounded">
+                            <PDSplitPanel Size="2" MinSize="200">
+                                <div class="show-pane" id="show-events">
+                                    <div class="show-pane-head">
+                                        <span class="fw-semibold">Events</span>
+                                        <span class="badge text-bg-secondary">@Events.Count</span>
+                                    </div>
+                                    <ul class="list-unstyled mb-0 show-event-list">
+                                        @foreach (var e in Events)
+                                        {
+                                            <li>
+                                                <button type="button" class="@EventCss(e)" data-kind="@e.Kind" data-id="@e.Id" style="--waa-kind: @ShowEvents.KindColor(e.Kind)"
+                                                        title="@e.Detail" @onclick="() => SelectAsync(e)">
+                                                    <span class="show-event-time">@Clock(e.Start)</span>
+                                                    <span class="show-event-kind">@ShowEvents.KindLabel(e.Kind)</span>
+                                                    <span class="show-event-label">@e.Label</span>
+                                                    <span class="show-event-utc">@ClipMarkers.Time(e.StartUtc)</span>
+                                                </button>
+                                            </li>
+                                        }
+                                    </ul>
+                                </div>
+                            </PDSplitPanel>
+                            <PDSplitPanel Size="3" MinSize="240">
+                                <div class="show-pane" id="show-detail">
+                                    @if (Selected is { IsSong: true } song)
+                                    {
+                                        <section id="show-song" aria-label="Song">
+                                            <div class="show-pane-head">
+                                                <span class="fw-semibold"><i class="fas fa-music me-1" aria-hidden="true"></i>Song</span>
+                                                <PDButton Text="Transcript" IconCssClass="fas fa-align-left" Size="ButtonSizes.Small" CssClass="btn-outline-secondary ms-auto"
+                                                          ToolTip="Show the transcript" Click="_ => ClearSelection()" />
+                                            </div>
+                                            <div class="p-2">
+                                                @if (Evidence(song, "artworkUrl", "artwork") is { } art && art.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                                                {
+                                                    <img src="@art" alt="Artwork" class="show-song-art rounded mb-2" referrerpolicy="no-referrer" />
+                                                }
+                                                <div class="h5 mb-0" id="show-song-title">@(Evidence(song, "title") ?? song.Label)</div>
+                                                @if (Evidence(song, "artist") is { } artist)
+                                                {
+                                                    <div class="mb-2" id="show-song-artist">@artist</div>
+                                                }
+                                                <dl class="row small mb-0">
+                                                    <dt class="col-4">From</dt><dd class="col-8 utc">@Utc(song.StartUtc)</dd>
+                                                    <dt class="col-4">To</dt><dd class="col-8 utc">@Utc(song.EndUtc)</dd>
+                                                    <dt class="col-4">In the clip</dt><dd class="col-8">@Clock(song.Start) to @Clock(song.End)</dd>
+                                                    @if (song.Source is { } s)
+                                                    {
+                                                        <dt class="col-4">Confidence</dt><dd class="col-8">@s.Confidence.ToString("0.00", CultureInfo.InvariantCulture)</dd>
+                                                        <dt class="col-4">Detector</dt><dd class="col-8">@s.Detector @s.DetectorVersion (@s.Source, recorder @s.Recorder.ToUpperInvariant())</dd>
+                                                        @foreach (var (k, v) in (s.Evidence ?? new Dictionary<string, string>()).Where(kv => kv.Key is not ("title" or "artist" or "artworkUrl" or "artwork")))
+                                                        {
+                                                            <dt class="col-4">@k</dt><dd class="col-8 text-break">@v</dd>
+                                                        }
+                                                    }
+                                                </dl>
+                                                <p class="small text-body-secondary mt-2 mb-0">Song times are approximate.</p>
+                                            </div>
+                                        </section>
+                                    }
+                                    else
+                                    {
+                                        <div class="show-pane-head">
+                                            <span class="fw-semibold">Transcript</span>
+                                            <span class="badge text-bg-secondary">@Lines.Count</span>
+                                            @if (Selected is not null)
+                                            {
+                                                <span class="small text-body-secondary text-truncate">@ShowEvents.KindLabel(Selected.Kind): @Selected.Label</span>
+                                            }
+                                        </div>
+                                        @if (AnalysisNote is not null)
+                                        {
+                                            <p class="small text-body-secondary p-2 mb-0" id="show-analysis-note">@AnalysisNote</p>
+                                        }
+                                        <ol class="list-unstyled mb-0" id="show-transcript">
+                                            @foreach (var l in Lines)
+                                            {
+                                                <li class="@LineCss(l)" data-line="@l.Index">
+                                                    <button type="button" @onclick="() => SeekAsync(l.Start)" title="@ClipMarkers.Time(l.StartUtc)">
+                                                        <span class="show-line-time">@Clock(l.Start)</span>
+                                                        <span class="show-line-text">@l.Text</span>
+                                                    </button>
+                                                </li>
+                                            }
+                                        </ol>
+                                    }
+                                </div>
+                            </PDSplitPanel>
+                        </PDSplitter>
                     </div>
                 }
-
-                <ClipPlayer Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds"
-                            Timeline="@ClipTimeline" Markers="@Timeline.Markers" Segments="@Timeline.Segments"
-                            RangeStart="@Timeline.RangeStart" RangeEnd="@Timeline.RangeEnd" MarkerListExpanded="false"
-                            Title="@($"{Show.Title}: recorder {Clip.Plan.Recorder.ToUpperInvariant()}, {MarginMinutes} minute margins")" />
-
-                <p class="small text-body-secondary mt-2 mb-0" id="show-clip-facts">
-                    The clip runs from <span class="utc">@Utc(Clip.Plan.StartUtc)</span> to <span class="utc">@Utc(Clip.Plan.EndUtc)</span>.
-                    The shaded part of the seek bar is the show proper; the lead-in and tail outside it are the margins.
-                </p>
-                <ul class="small text-body-secondary mt-1 mb-0" id="show-notes">
-                    @foreach (var n in Timeline.Notes.Concat(Clip.Plan.Notes))
-                    {
-                        <li>@n</li>
-                    }
-                </ul>
-            }
-        </PDBusyOverlay>
+            </PDBusyOverlay>
+        </div>
     }
 }

@@ -163,11 +163,32 @@ public sealed class ScheduleService(ScheduleSource source, WebSettings settings,
         return s is null || source.Zone is null ? [] : ScheduleExpander.Expand(s, source.Zone, source.Station, fromUtc, toUtc);
     }
 
-    /// <summary>The occurrence with this id in the current schedule, worked out again from the id (not held in memory).</summary>
+    public const string OffAirTitle = "Off air (unscheduled)";
+
+    /// <summary>
+    /// The occurrence with this id in the current schedule, worked out again from the id (not held in memory), or the
+    /// off-air stretch that starts there (see <see cref="At"/>), so audio recorded outside the schedule has a page too.
+    /// </summary>
     public ShowOccurrence? Find(string? id)
     {
-        if (!ShowOccurrence.TryParseId(id, out var station, out var start) || station != source.Station) return null;
-        return Occurrences(start.AddMinutes(-1), start.AddMinutes(1)).FirstOrDefault(o => o.StartUtc == start);
+        if (Current.Schedule is null || !ShowOccurrence.TryParseId(id, out var station, out var start) || station != source.Station) return null;
+        return Occurrences(start.AddMinutes(-1), start.AddMinutes(1)).FirstOrDefault(o => o.StartUtc == start)
+            ?? (At(start) is { Title: OffAirTitle } off && off.StartUtc == start ? off : null);
+    }
+
+    /// <summary>
+    /// The show on air at a UTC time, or, when nothing is scheduled then, the off-air stretch around it: its UTC hour,
+    /// cut short by any show that ends or starts within that hour. Null when there is no schedule.
+    /// </summary>
+    public ShowOccurrence? At(DateTimeOffset utc)
+    {
+        if (Current.Schedule is null) return null;
+        var hour = new DateTimeOffset(utc.UtcDateTime.Date.AddHours(utc.UtcDateTime.Hour), TimeSpan.Zero);
+        var shows = Occurrences(hour, hour.AddHours(1));
+        if (shows.FirstOrDefault(o => o.StartUtc <= utc && utc < o.EndUtc) is { } on) return on;
+        var from = shows.Where(o => o.EndUtc <= utc).Select(o => o.EndUtc).DefaultIfEmpty(hour).Max();
+        var to = shows.Where(o => o.StartUtc > utc).Select(o => o.StartUtc).DefaultIfEmpty(hour.AddHours(1)).Min();
+        return new ShowOccurrence(source.Station, OffAirTitle, from, to);
     }
 
     void EnsureSavedLoaded()

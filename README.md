@@ -29,17 +29,16 @@ Open `http://127.0.0.1:8090`. Every time on it is UTC and labelled "UTC".
   times UTC), each show marked recorded, partly recorded, not recorded, on air now or in the future. The schedule is
   read from Burst's own page at start-up and every 15 minutes; Burst lists UK local times, which are converted to UTC
   when the page is read (a 20:00 show is 19:00 UTC in British Summer Time and 20:00 UTC in GMT, so the UTC times move
-  by an hour when the clocks change). Selecting a show opens `/shows/<id>` (for example `/shows/burst-20261015T1900Z`):
-  its UTC start and end, coverage by recorder with any gaps, and the show in the player with **5 minutes either side**
-  (adjustable), the show proper shaded on the seek bar, markers at its start and end and at recording gaps and
-  recorder restarts, and a lead-in, show and tail lane. A show that has not started says "not yet broadcast".
-- **Recordings**: a week calendar of each recorder's segments and recording gaps (select one to play it) above the
-  table of every segment from both recorders, newest first, with a UTC date filter and a Play button.
-- **Player**: pick a UTC date, From and To (HH:mm:ss), optionally 5 (or more) minutes either side, and a recorder (Auto,
-  A or B). "Prepare clip" joins the hourly segments into one MP3, lists any warnings (gaps, breaks, partial coverage)
-  and plays it with speeds 0.75x to 2x, back 15 s and forward 30 s, a seek bar with markers (the requested start and
-  end, recording gaps, recorder restarts), the UTC wall time of the current position, and a download button. Links of
-  the form `/player?from=2026-10-15T15:15:00Z&to=2026-10-15T15:16:00Z&recorder=auto` prepare straight away.
+  by an hour when the clocks change). Selecting a show opens `/shows/<id>` (for example `/shows/burst-20261015T1900Z`),
+  the one place audio is played: a toolbar with its UTC times, coverage (open it for the per-recorder detail), margin
+  (**5 minutes** either side by default) and recorder; then the player (speeds 0.75x to 2x, back 15 s, forward 30 s,
+  the show proper shaded on the seek bar, markers at its start and end, gaps, restarts and detected events, the UTC
+  wall time, a download button); then a splitter with every event on the left (margins, the show, gaps, talk,
+  detected events, songs) and the transcript on the right, or the song's details when a song is selected. A show
+  that has not started says "not yet broadcast". Hours with nothing scheduled have an "Off air (unscheduled)" page.
+- **At**: `/at?utc=2026-10-15T19:10:00Z&recorder=a` opens the show on air at that UTC time, at that moment.
+- **Recordings**: a week calendar of each recorder's segments and recording gaps (select one to open the show on air
+  then) above the table of every segment from both recorders, newest first, with a UTC date filter and a Play button.
 - **Clip API**: `GET /api/clip?from=...&to=...&marginBefore=5&marginAfter=5&recorder=auto` returns JSON with the clip's
   URL (`/media/clip/<id>.mp3`, range requests supported, `?download=1` for a named download), and its gaps and
   restarts with their UTC times and where they fall in the clip.

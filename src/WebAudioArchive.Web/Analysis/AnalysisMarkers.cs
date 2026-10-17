@@ -34,7 +34,8 @@ public static class AnalysisMarkers
         [SwearReview] = "var(--bs-gray-500)",
         [EventTypes.Clipping] = "var(--bs-warning)",
         [EventTypes.Filler] = "var(--bs-secondary)",
-        [EventTypes.DeadAir] = "var(--bs-dark)",
+        // The body text colour, so it shows in both themes (black on light, white on dark).
+        [EventTypes.DeadAir] = "var(--bs-emphasis-color)",
         [EventTypes.Song] = "var(--bs-primary)",
         [Talk] = "var(--bs-info)",
     };

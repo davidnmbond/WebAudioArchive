@@ -18,12 +18,12 @@ public sealed class RecordingRow
     public required string EndedBy { get; init; }
     public required int Gaps { get; init; }
     public required string Open { get; init; }
-    public required string PlayerUrl { get; init; }
+    public required string PlayUrl { get; init; }
 }
 
 /// <summary>A segment or a recording gap on the Recordings calendar. Times UTC.</summary>
 public sealed record RecordingCalendarItem(
-    string Key, string Recorder, string Kind, DateTimeOffset StartUtc, DateTimeOffset EndUtc, string Title, string Tooltip, string CssClass, string PlayerUrl);
+    string Key, string Recorder, string Kind, DateTimeOffset StartUtc, DateTimeOffset EndUtc, string Title, string Tooltip, string CssClass, string PlayUrl);
 
 /// <summary>All segments of every recorder, newest first, optionally limited to one UTC date.</summary>
 public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
@@ -62,7 +62,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
                         r.Recorder + "|" + s.AudioPath, label, "segment", s.StartUtc, s.EndUtc, title,
                         $"Recorder {label}, {ClipPlanner.Utc(s.StartUtc)} to {ClipPlanner.Utc(s.EndUtc)}{(s.IsOpen ? " (being recorded)" : $", ended by {s.EndedBy}")}, {s.SpanGaps.Count} gaps",
                         $"rec-item rec-{r.Recorder}{(s.IsOpen ? " rec-open" : "")}",
-                        PlayerLink.For(s.StartUtc, s.EndUtc, r.Recorder)));
+                        PlayLink.For(s.StartUtc, r.Recorder)));
                 }
 
                 foreach (var g in s.SpanGaps.Where(g => g.EndUtc > from && g.StartUtc < to))
@@ -97,8 +97,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
             string.Create(CultureInfo.InvariantCulture, $"{label}: gap {seconds:0.0} s"),
             string.Create(CultureInfo.InvariantCulture, $"Recorder {label} has no audio from {ClipPlanner.Utc(start)} to {ClipPlanner.Utc(end)} ({seconds:0.0} s, {reason})"),
             $"rec-item rec-gap rec-{recorder}",
-            // A minute either side of the gap; for a gap of hours, the minute either side of where it starts (a clip is at most 4 hours).
-            PlayerLink.For(start.AddMinutes(-1), end - start > TimeSpan.FromHours(3) ? start.AddMinutes(1) : end.AddMinutes(1), recorder));
+            PlayLink.For(start, recorder));
     }
 
     static RecordingCalendarItem MissingFromAll(DateTimeOffset start, DateTimeOffset end)
@@ -109,7 +108,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
             string.Create(CultureInfo.InvariantCulture, $"A+B: missing {seconds:0.0} s"),
             string.Create(CultureInfo.InvariantCulture, $"Neither recorder has audio from {ClipPlanner.Utc(start)} to {ClipPlanner.Utc(end)} ({seconds:0.0} s)"),
             "rec-item rec-missing",
-            PlayerLink.For(start.AddMinutes(-1), end - start > TimeSpan.FromHours(3) ? start.AddMinutes(1) : end.AddMinutes(1), "auto"));
+            PlayLink.For(start, "auto"));
     }
 
     static bool Overlaps(CatalogSegment s, DateOnly date)
@@ -130,7 +129,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
         EndedBy = s.EndedBy ?? "(recording)",
         Gaps = s.SpanGaps.Count,
         Open = s.IsOpen ? "yes" : "no",
-        PlayerUrl = PlayerLink.For(s.StartUtc, s.EndUtc, s.Recorder),
+        PlayUrl = PlayLink.For(s.StartUtc, s.Recorder),
     };
 }
 
@@ -165,11 +164,11 @@ public sealed class RecordingsDataProvider : IDataProviderService<RecordingRow>
     static Task<OperationResponse> ReadOnly() => Task.FromResult(new OperationResponse { ErrorMessage = "Recordings are read-only." });
 }
 
-public static class PlayerLink
+/// <summary>A link that opens the show on air at a UTC time (or that off-air hour), from a recorder: /at finds the show.</summary>
+public static class PlayLink
 {
-    public static string For(DateTimeOffset from, DateTimeOffset to, string recorder) =>
-        string.Create(CultureInfo.InvariantCulture,
-            $"/player?from={Iso(from)}&to={Iso(to)}&recorder={Uri.EscapeDataString(recorder)}");
+    public static string For(DateTimeOffset at, string recorder) =>
+        string.Create(CultureInfo.InvariantCulture, $"/at?utc={Iso(at)}&recorder={Uri.EscapeDataString(recorder)}");
 
     public static string Iso(DateTimeOffset t) => t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.AspNetCore.DataProtection;
 using PanoramicData.Blazor.Extensions;
 using WebAudioArchive.Web;
@@ -135,6 +136,22 @@ app.MapGet("/api/analysis/shows/{id}", (string id, AnalysisReader a) => Analysis
     var (analysis, enrichment) = a.Show(id);
     return new { analysis, enrichment };
 }));
+
+// A UTC time (an analysis event, a recording) opens the show on air then, or that off-air stretch, at that moment.
+app.MapGet("/at", async (HttpRequest req, ScheduleService schedule) =>
+{
+    var utc = (string?)req.Query["utc"];
+    if (utc is null || !utc.EndsWith('Z')
+        || !DateTimeOffset.TryParse(utc, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var at)
+        || at.Year is < AnalysisReader.MinYear or > AnalysisReader.MaxYear)
+        return Results.BadRequest(new { error = "utc must be a UTC time ending in Z, such as 2026-10-15T19:00:00Z." });
+    await schedule.WaitForScheduleAsync(TimeSpan.FromSeconds(10));
+    if (schedule.At(at) is not { } show)
+        return Results.Problem("There is no schedule yet, so the show at that time cannot be found. See the Shows page.", statusCode: 503);
+    var recorder = (string?)req.Query["recorder"];
+    var query = "?at=" + PlayLink.Iso(at) + (string.IsNullOrWhiteSpace(recorder) ? "" : "&recorder=" + Uri.EscapeDataString(recorder.Trim().ToLowerInvariant()));
+    return Results.Redirect("/shows/" + show.Id + query);
+});
 
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 

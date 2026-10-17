@@ -76,8 +76,7 @@ the only place it writes is its clip cache (the `web-cache` volume, mounted at `
 so the port is published on `127.0.0.1` only. Do not publish it on another address or put it behind a tunnel until
 Google sign-in (spec 3.8) is built.
 
-**UTC only.** Every time shown, typed or returned by the API is UTC and labelled "UTC". The Player's From and To are
-UTC times of day on the chosen UTC date; a To earlier than From means the next day.
+**UTC only.** Every time shown, typed or returned by the API is UTC and labelled "UTC".
 
 Pages:
 
@@ -96,33 +95,35 @@ Pages:
   recorders), **not recorded**,
   **on air now** (measured up to now, counting the open `.part`) or **in the future**. Above the calendar: where the
   schedule came from and when, or a warning (see "Schedule" below).
-- **Show** (`/shows/<station>-<yyyyMMdd>T<HHmm>Z`, the UTC start, for example `/shows/burst-20261015T1900Z`): title,
-  UTC start and end, coverage per recorder with the uncovered stretches listed in UTC, then a row for A and B together
-  listing what is missing from both; when only the two together have all of the show, a warning says the player uses
-  one recorder and so has that recorder's gaps (joining A and B is issue #12); a margin (default **5 minutes**
-  before and after, 0 to 60) and a recorder (Auto, A, B). The show's clip (made by the same planner and builder as the
-  Player, from the show's start minus the margin to its end plus the margin, or to now while it is on air) plays in
-  `PDMediaPlayer`: the show proper is the shaded range of the seek bar, so the lead-in and tail are visibly outside it;
-  markers at the show's start and end, at each recording gap (kind "gap": sidecar gaps, missing audio between segments
-  or at the edges) and each recorder restart (kind "restart": a segment inside the window that ended other than at the
-  hour boundary); a lane with the lead-in, show and tail ("margin" and "show" segments); the planner's warnings above
-  the player. A show that has not started says "Not yet broadcast"; a partly recorded one plays what exists with a
+- **Show** (`/shows/<station>-<yyyyMMdd>T<HHmm>Z`, the UTC start, for example `/shows/burst-20261015T1900Z`): the one
+  place audio is played. A toolbar along the top has the title, UTC start and end, the coverage badge, a margin
+  (default **5 minutes** before and after, 0 to 60), a recorder (Auto, A, B) and Update. The coverage badge opens the
+  coverage per recorder with the uncovered stretches listed in UTC, a row for A and B together listing what is missing
+  from both, the clip's real start and end and the planner's notes. When only the two recorders together have all of
+  the show, a warning says the player uses one recorder and so has that recorder's gaps (joining A and B is issue #12).
+  Below the toolbar the show's clip (from the show's start minus the margin to its end plus the margin, or to now while
+  it is on air) plays in `PDMediaPlayer` (speeds 0.75x to 2x with pitch kept, back 15 s, forward 30 s, previous and next
+  marker, a download named like `burst_20261015T185500Z_20261015T200500Z_A.mp3`): the show proper is the shaded range
+  of the seek bar; markers at the show's start and end, recording gaps, recorder restarts and detected events; a lane
+  with the lead-in, show and tail. Beside it, the **UTC wall time** of the current position. Below the player, a
+  splitter (`PDSplitter`, needs `lib/splitjs/split.min.js`): on the left every event in time order (lead-in, show,
+  tail, gaps, restarts, talk sections from the transcript, detected swearing, filler, clipping and dead air, and songs;
+  review-only swear hits are never listed); on the right the clip's transcript, with the selected event's lines
+  highlighted, or the song's metadata (title, artist, times, confidence, source) when a song is selected. Selecting an
+  event or a transcript line moves the player there (a detected event 5 s before it); the event and line playing now
+  are marked as it plays. `?at=<UTC time ending in Z>` selects what is playing at that time and starts the player 5 s
+  before it. A show that has not started says "Not yet broadcast"; a partly recorded one plays what exists with a
   warning; one with nothing recorded says so. The id is the station and UTC start, so a link works after a restart or
-  reload as long as the schedule still has a show starting then.
+  reload as long as the schedule still has a show starting then. Hours with nothing scheduled are pages too, titled
+  "Off air (unscheduled)": the UTC hour, cut short by any show that ends or starts within it.
+- **At** (`/at?utc=2026-10-15T19:10:00Z&recorder=a`): redirects to the show on air at that UTC time (or that off-air
+  hour) with `at` set, so analysis event links and the Recordings page open the right moment.
 - **Recordings** (`/recordings`): a week calendar (`PDCalendar`, UTC) of each recorder's segments (A and B side by side,
   the open segment dashed), recording gaps (red; sidecar gaps and missing audio between segments) and the stretches
   missing from both recorders ("A+B: missing", dark red with a heavy outline; from the first audio of either recorder up
-  to now). Selecting a segment opens the Player for it, as the table's Play button does; selecting a gap or a missing
-  stretch opens the Player a minute either side of it. Below it, the table of every segment from both recorders (recorder, start, end, audio duration, size,
+  to now). Selecting a segment, gap or missing stretch opens the show on air at its start, as the table's Play button
+  does. Below it, the table of every segment from both recorders (recorder, start, end, audio duration, size,
   ended by, number of gaps, open), newest first, with a UTC date filter.
-- **Player** (`/player`): date, From, To, "add N minutes before and after" (off by default, 5 minutes), recorder (Auto,
-  A, B). Prepare clip shows the recorder used, the clip's real start and end, duration, size and warnings, then plays it
-  in `PDMediaPlayer` (speeds 0.75x, 1x, 1.25x, 1.5x and 2x with pitch kept, back 15 s, forward 30 s, a seek bar with
-  markers for the requested start and end, recording gaps and recorder restarts, previous and next marker buttons, the
-  media's own error message if it cannot play) with a download button for a file named like
-  `burst_20261015T151500Z_20261015T151600Z_A.mp3`. Beside the player: the **UTC wall time** of the current position
-  (the clip's real start plus the position, following any jump across a gap), which the player itself does not know.
-  A link such as `/player?from=2026-10-15T15:15:00Z&to=2026-10-15T15:16:00Z&recorder=auto` prepares the clip on load.
 
 Rendering without flicker. The pages are prerendered on the server and then taken over by the interactive circuit,
 which draws them again from scratch; each page makes that second render match the first, so the hand-over shows no
@@ -131,7 +132,7 @@ change:
 - Status shows the last reading at once (with the time it was read) and refreshes behind it, rather than drawing
   "Reading the recorders..." between the prerendered cards and the new ones. A reading older than 15 s is read again
   before a page is prerendered.
-- Show and Player take a clip that is already in the cache in the same render, so the page does not draw the busy
+- Show takes a clip that is already in the cache in the same render, so the page does not draw the busy
   overlay without a player first. Only a clip that has to be built shows the overlay.
 - The calendars keep their scroll position: Shows keeps where its week grid was scrolled to (per browser tab) through
   the hand-over, view switches and Back from a show; Recordings starts its grid at three hours before now. Both are

@@ -1,8 +1,10 @@
 @* The one place the audio player lives: PDMediaPlayer (PanoramicData.Blazor) for transport, speed, seek bar, markers,
-   segments and download, plus the UTC wall time of the current position, which the player itself does not know. *@
+   segments and download, plus the UTC wall time of the current position, which the player itself does not know. Its own
+   marker and segment lists are off: the show page lists events beside the transcript instead. *@
 <div class="clip-player card" id="clip-player">
-    <div class="card-body">
+    <div class="card-body p-2">
         <PDMediaPlayer @key="Src"
+                       @ref="_player"
                        Src="@Src"
                        Title="@Title"
                        PlaybackRates="Speeds"
@@ -11,18 +13,21 @@
                        ShowDownload="true"
                        DownloadUrl="@DownloadUrl"
                        DownloadFileName="@DownloadName"
+                       StartAt="StartAt"
                        Markers="Markers"
                        Segments="Segments"
                        RangeStart="RangeStart"
                        RangeEnd="RangeEnd"
-                       KindLabels="ClipMarkers.KindLabels"
-                       KindColors="ClipMarkers.KindColors"
-                       MarkerListExpanded="MarkerListExpanded"
-                       MarkerListMaxHeight="12rem"
+                       KindLabels="ShowEvents.KindLabels"
+                       KindColors="ShowEvents.KindColors"
+                       ShowKindFilter="false"
+                       ShowMarkerList="false"
+                       ShowSegmentList="false"
+                       ShowNowPlaying="false"
                        ShowErrors="true"
                        OnTimeUpdate="OnTimeUpdate"
                        OnError="OnError" />
-        <div class="d-flex flex-wrap gap-3 small mt-2 clip-player-clock">
+        <div class="d-flex flex-wrap column-gap-3 small clip-player-clock">
             <span>Wall time <strong id="clip-wall" class="utc">@WallText</strong> UTC</span>
             <span class="text-body-secondary">Position in clip <span id="clip-position">@PositionText</span> of @DurationText</span>
             <span class="text-body-secondary">File <code>@DownloadName</code></span>

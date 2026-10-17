@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.AspNetCore.Components;
+using PanoramicData.Blazor;
 using PanoramicData.Blazor.Models;
 using WebAudioArchive.Web.Clips;
 
@@ -24,10 +25,17 @@ public sealed partial class ClipPlayer
     [Parameter] public IReadOnlyList<PDMediaSegment>? Segments { get; set; }
     [Parameter] public TimeSpan? RangeStart { get; set; }
     [Parameter] public TimeSpan? RangeEnd { get; set; }
-    [Parameter] public bool MarkerListExpanded { get; set; } = true;
+    /// <summary>Where to start when the clip has loaded (a deep link to a moment).</summary>
+    [Parameter] public TimeSpan? StartAt { get; set; }
+
+    /// <summary>Called on every time update. A plain callback, not an EventCallback, so the parent re-renders only when it decides to.</summary>
+    [Parameter] public Action<TimeSpan>? PositionChanged { get; set; }
 
     TimeSpan Position { get; set; }
     string? _shownSrc;
+    PDMediaPlayer? _player;
+
+    public Task SeekAsync(TimeSpan position) => _player?.SeekAsync(position) ?? Task.CompletedTask;
 
     ClipClock Clock => new(Timeline, Seconds);
 
@@ -46,7 +54,11 @@ public sealed partial class ClipPlayer
         Position = TimeSpan.Zero;
     }
 
-    void OnTimeUpdate(TimeSpan position) => Position = position;
+    void OnTimeUpdate(TimeSpan position)
+    {
+        Position = position;
+        PositionChanged?.Invoke(position);
+    }
 
 
     // The player shows the error itself (ShowErrors); it is also logged here for the operator.
