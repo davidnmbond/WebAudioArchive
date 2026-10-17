@@ -97,6 +97,55 @@ public sealed class WorkPlanningTests : IDisposable
         Assert.Equal(50.0 / 60, WorkPlanner.CoveredFraction(b, all.Where(s => s.Recorder == "a")), 6);
     }
 
+    [Theory]
+    [InlineData(60, false)]
+    [InlineData(70, false)]
+    [InlineData(74, true)]
+    [InlineData(300, true)]
+    public void B_fills_a_hole_only_when_a_covers_less_than_98_percent(int gapSeconds, bool planned)
+    {
+        // 98% of an hour is 3528 s, so an A gap of up to 72 s leaves A at or above the threshold and is not filled.
+        SegmentFiles.Closed(A, "burst", T, 3600, 0, gaps: [new SegmentGap(T.AddMinutes(20), T.AddMinutes(20).AddSeconds(gapSeconds), gapSeconds, "stream ended by server")]);
+        SegmentFiles.Closed(B, "burst", T, 3600, 0);
+
+        var jobs = WorkPlanner.Plan(Discovery().Scan(), ["a", "b"], since: null);
+
+        Assert.Equal(planned, jobs.Any(j => j.Source.Recorder == "b" && j.FillIn));
+        Assert.Contains(jobs, j => j.Source.Recorder == "a" && !j.FillIn);
+    }
+
+    [Fact]
+    public void Unreadable_foreign_and_oddly_named_sidecars_are_reported_and_do_not_stop_the_scan()
+    {
+        var good = SegmentFiles.Closed(A, "burst", T, 600, 0);
+        var dir = Path.GetDirectoryName(good.AudioPath)!;
+        File.WriteAllText(Path.Combine(dir, "090000.json"), "{ not json");
+        var foreign = SegmentFiles.Closed(A, "burst", T.AddHours(2), 600, 0);
+        var json = Path.ChangeExtension(foreign.AudioPath, ".json");
+        SegmentMetaStore.Write(json, SegmentMetaStore.Read(json)! with { Station = "other" });
+        var odd = SegmentFiles.Closed(A, "burst", T.AddHours(3), 600, 0);
+        var oddJson = Path.ChangeExtension(odd.AudioPath, ".json");
+        SegmentMetaStore.Write(oddJson, SegmentMetaStore.Read(oddJson)! with { File = "../../../etc/passwd" });
+        var problems = new List<string>();
+
+        var found = Discovery().Scan(problems);
+
+        Assert.Equal("a/2026/10-16/080000", Assert.Single(found).JobId);
+        Assert.Contains(problems, p => p.Contains("unreadable sidecar"));
+        Assert.Contains(problems, p => p.Contains("station 'other'"));
+        Assert.Contains(problems, p => p.Contains("not a plain name"));
+    }
+
+    [Fact]
+    public void A_job_that_ran_out_of_attempts_is_skipped_whether_it_says_running_or_failed()
+    {
+        var running = new JobState(1, "a/x/y/z", "fp", "tv", "dv", JobStatus.Running, JobRules.MaxAttempts, null, null, [], 0, T, 0, 0, 0);
+
+        Assert.Equal(JobAction.Skip, JobRules.Decide(running, "fp", "tv", "dv", T).Action);
+        Assert.Equal(JobAction.Run, JobRules.Decide(running with { Attempts = JobRules.MaxAttempts - 1 }, "fp", "tv", "dv", T).Action);
+        Assert.Equal(JobAction.Run, JobRules.Decide(running, "changed", "tv", "dv", T).Action);
+    }
+
     [Fact]
     public void Since_leaves_out_older_segments()
     {

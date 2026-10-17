@@ -106,6 +106,9 @@ public static class DetectorRunner
             ["clippingTruncated"] = clipping.Truncated ? 1 : 0,
             ["deadAirEvents"] = deadAir.Count,
             ["deadAirSeconds"] = R(deadAir.Sum(e => e.Seconds)),
+            ["silencedFrames"] = t.SilencedFrames ?? 0,
+            ["recoveredFrames"] = t.RecoveredFrames ?? 0,
+            ["decodeSuspect"] = t.Flags?.Contains("silenced-frames") == true ? 1 : 0,
         };
         var versions = new Dictionary<string, string>
         {

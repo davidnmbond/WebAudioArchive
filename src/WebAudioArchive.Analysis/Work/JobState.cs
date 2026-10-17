@@ -58,8 +58,12 @@ public static class JobRules
         if (state.TranscriptVersion != transcriptVersion) return new(JobAction.Run, "the transcriber or its options changed");
         if (state.Status == JobStatus.Done)
             return state.DetectorVersion == detectorVersion ? new(JobAction.Skip, "done") : new(JobAction.Redetect, "the detectors changed");
-        if (state.Status == JobStatus.Failed && state.Attempts >= MaxAttempts)
-            return new(JobAction.Skip, $"failed {state.Attempts} times: {state.LastError}");
+        if (state.Attempts >= MaxAttempts)
+        {
+            return new(JobAction.Skip, state.Status == JobStatus.Failed
+                ? $"failed {state.Attempts} times: {state.LastError}"
+                : $"interrupted or retried {state.Attempts} times without finishing (last state {state.Status}): parked");
+        }
         if (state.NextAttemptUtc is { } next && next > now) return new(JobAction.Wait, $"retry at {next:u}");
         return new(JobAction.Run, state.Status == JobStatus.Running ? "resume after an interruption" : "retry");
     }

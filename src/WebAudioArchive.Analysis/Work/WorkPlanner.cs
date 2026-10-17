@@ -7,7 +7,8 @@ public sealed record SegmentJob(SourceSegment Source, bool FillIn);
 
 /// <summary>
 /// D7 and D8: every segment of the first recorder in the preference is a job; another recorder's segment is a job only
-/// when better recorders cover less than 98% of its span (spans minus gaps). Jobs run newest first.
+/// when better recorders cover less than 98% of its span (spans minus gaps). Jobs run newest first. Known limit: an A gap
+/// of up to about 70 s in an hour (under 2%) is not filled from B; the 98% rule accepts it (documented in the plan).
 /// </summary>
 public static class WorkPlanner
 {

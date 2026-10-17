@@ -27,6 +27,27 @@ public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device
 
     public string Model => Path.GetFileNameWithoutExtension(modelPath);
 
+    /// <summary>The Whisper.net package version, the model name and the model file's size (or "missing"): the same before and after the model loads and on the GPU or the CPU.</summary>
+    public string Identity
+    {
+        get
+        {
+            var file = new FileInfo(modelPath);
+            return $"whisper.net {LibraryVersion}|{Model}|{(file.Exists ? file.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) : "missing")}";
+        }
+    }
+
+    static readonly string[] TransientMarkers = ["out of memory", "cudamalloc", "cuda error", "cublas", "failed to allocate", "ggml_cuda", "alloc_buffer"];
+
+    /// <summary>Memory and GPU errors are transient (retried later, not counted against the segment); anything else fails this chunk.</summary>
+    public static Exception Classify(Exception ex)
+    {
+        var text = ex.GetType().Name + ": " + ex.Message;
+        if (ex is OutOfMemoryException || TransientMarkers.Any(m => text.Contains(m, StringComparison.OrdinalIgnoreCase)))
+            return new TransientTranscriptionException($"whisper ran out of memory or hit a GPU error: {text}", ex);
+        return new TranscriptionFailedException($"whisper could not transcribe this chunk: {text}");
+    }
+
     /// <summary>Why the last readiness check failed, for the log; null when ready.</summary>
     public string? LastError { get; private set; }
 
@@ -87,9 +108,9 @@ public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device
         {
             throw;
         }
-        catch (Exception ex) when (ex is not OutOfMemoryException)
+        catch (Exception ex)
         {
-            throw new TranscriptionFailedException($"whisper could not transcribe this chunk: {ex.GetType().Name}: {ex.Message}");
+            throw Classify(ex);
         }
 
         return segments;

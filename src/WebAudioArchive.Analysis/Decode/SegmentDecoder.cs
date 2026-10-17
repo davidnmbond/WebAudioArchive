@@ -30,16 +30,29 @@ public sealed class SegmentDecoder
 
     public async Task<DecodedSegment> DecodeAsync(string sourceAudio, long expectedBytes, int sampleRate, int channels, ScratchLease lease, CancellationToken ct)
     {
+        if (sourceAudio.EndsWith(".part", StringComparison.OrdinalIgnoreCase))
+            throw new DecodeException($"{sourceAudio} is an open recording (.part); only closed segments are analysed");
+
+        // Copy at most one byte more than the sidecar says, so a file that is still growing cannot fill scratch.
         var copy = lease.PathFor("source.mp3");
+        long copied = 0;
         await using (var src = new FileStream(sourceAudio, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, useAsync: true))
         await using (var dst = new FileStream(copy, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true))
         {
-            await src.CopyToAsync(dst, ct);
+            var buffer = new byte[1 << 16];
+            while (copied <= expectedBytes)
+            {
+                var n = await src.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, expectedBytes + 1 - copied)), ct);
+                if (n == 0) break;
+                await dst.WriteAsync(buffer.AsMemory(0, n), ct);
+                copied += n;
+            }
         }
 
-        var length = new FileInfo(copy).Length;
-        if (length != expectedBytes)
-            throw new DecodeException($"{sourceAudio} is {length} bytes but its sidecar says {expectedBytes}; it is retried when they agree");
+        if (copied > expectedBytes)
+            throw new DecodeException($"{sourceAudio} is longer than its sidecar says ({expectedBytes} bytes); it is retried when they agree");
+        if (copied != expectedBytes)
+            throw new DecodeException($"{sourceAudio} is {copied} bytes but its sidecar says {expectedBytes}; it is retried when they agree");
 
         var wav = lease.PathFor("speech.wav");
         return await Task.Run(() => Decode(sourceAudio, copy, wav, sampleRate, channels, ct), ct);

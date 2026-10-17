@@ -39,7 +39,8 @@ public sealed class SegmentPipeline(
     IClock clock,
     ILogger log)
 {
-    public string TranscriptVersion => $"{transcriber.Engine}|{transcriber.Model}|{config.Config.Transcription.TranscriptKey()}";
+    /// <summary>What decides whether a stored transcript is current: the engine package version, the model and its file size, and the transcript options. The device (cuda or cpu) is recorded in the transcript but is not part of this.</summary>
+    public string TranscriptVersion => $"{transcriber.Identity}|{config.Config.Transcription.TranscriptKey()}";
 
     public JobDecision Decide(SegmentJob job) =>
         JobRules.Decide(JobStore.Read(paths.SegmentDir(job.Source.JobId)), job.Source.Fingerprint, TranscriptVersion, config.DetectorVersion, clock.UtcNow);
@@ -59,6 +60,8 @@ public sealed class SegmentPipeline(
         var dir = paths.SegmentDir(s.JobId);
         var state = JobStore.Read(dir);
         var decision = JobRules.Decide(state, s.Fingerprint, TranscriptVersion, config.DetectorVersion, clock.UtcNow);
+        if (decision.Action == JobAction.Skip && state is not null && state.Status is not (JobStatus.Done or JobStatus.Failed) && state.Attempts >= JobRules.MaxAttempts)
+            return Park(s, dir, state, decision.Reason);
         if (decision.Action is JobAction.Skip or JobAction.Wait)
             return new JobOutcome(s.JobId, decision.Action, state?.Status ?? "none", decision.Reason, 0, 0, 0);
         if (decision.Action == JobAction.Redetect)
@@ -69,7 +72,8 @@ public sealed class SegmentPipeline(
         var wall = Stopwatch.StartNew();
         var resumable = state is not null && state.Fingerprint == s.Fingerprint && state.TranscriptVersion == TranscriptVersion;
         var partial = resumable ? LoadPartial(dir, s.Fingerprint) : null;
-        var attempts = resumable ? state!.Attempts : 0;
+        var previousAttempts = resumable ? state!.Attempts : 0;
+        var attempts = previousAttempts + 1; // counted now, so a process that is killed again and again reaches MaxAttempts
         var current = new JobState(JobState.CurrentSchema, s.JobId, s.Fingerprint, TranscriptVersion, config.DetectorVersion, JobStatus.Running,
             attempts, null, null, partial?.Chunks.Select(c => c.Index).Order().ToList() ?? [], partial?.ChunkCount ?? 0, clock.UtcNow,
             s.Meta.AudioSeconds, partial?.TranscribeSeconds ?? 0, 0);
@@ -80,6 +84,8 @@ public sealed class SegmentPipeline(
         {
             using var lease = scratch.Acquire(s.JobId, SegmentDecoder.ScratchBytesFor(s.Meta.Bytes, s.Meta.AudioSeconds));
             var decoded = await decoder.DecodeAsync(s.AudioPath, s.Meta.Bytes, s.SampleRate, s.Channels, lease, ct);
+            if (decoded.Frames != s.Meta.Frames)
+                throw new DecodeException($"decoded {decoded.Frames} frames but the sidecar says {s.Meta.Frames} frames: the audio and its sidecar disagree");
             AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.FeaturesFile), decoded.Features);
 
             var anchors = SegmentTimeline.Anchors(s.Meta);
@@ -117,47 +123,56 @@ public sealed class SegmentPipeline(
             }
 
             var transcript = TranscriptAssembler.Build(s, paths.Station, anchors, partial.Chunks.OrderBy(c => c.Index).SelectMany(c => c.Segments),
-                o, transcriber.Engine, transcriber.Model, TranscriptVersion, decoded.Decoder, clock.UtcNow, partial.TranscribeSeconds);
+                o, transcriber.Engine, transcriber.Model, TranscriptVersion, decoded.Decoder, clock.UtcNow, partial.TranscribeSeconds,
+                new DecodeStats(decoded.Frames, decoded.SilencedFrames, decoded.RecoveredFrames));
             AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.TranscriptFile), transcript);
             AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.EventsFile), DetectorRunner.Run(transcript, decoded.Features, config, watershed, clock.UtcNow));
-            File.Delete(Path.Combine(dir, AnalysisPaths.PartialFile));
 
-            current = current with { Status = JobStatus.Done, LastError = null, NextAttemptUtc = null, WallSeconds = Math.Round(wall.Elapsed.TotalSeconds, 3), UpdatedUtc = clock.UtcNow };
+            current = current with { Status = JobStatus.Done, Attempts = 0, LastError = null, NextAttemptUtc = null, WallSeconds = Math.Round(wall.Elapsed.TotalSeconds, 3), UpdatedUtc = clock.UtcNow };
             JobStore.Write(dir, current);
+            File.Delete(Path.Combine(dir, AnalysisPaths.PartialFile)); // after Done is written, so a crash between the two leaves a finished job and a stray partial, never the reverse
             return new JobOutcome(s.JobId, JobAction.Run, JobStatus.Done, decision.Reason, s.Meta.AudioSeconds, partial.TranscribeSeconds, current.WallSeconds);
         }
-        catch (TranscriberUnavailableException ex)
+        catch (Exception ex) when (ex is TranscriberUnavailableException or TransientTranscriptionException)
         {
-            return Pause(s, dir, current, JobStatus.Waiting, ex.Message, clock.UtcNow + JobRules.UnavailableRetry);
+            return Pause(s, dir, current with { Attempts = previousAttempts }, JobStatus.Waiting, ex.Message, clock.UtcNow + JobRules.UnavailableRetry);
         }
         catch (ScratchFullException ex)
         {
-            return Pause(s, dir, current, JobStatus.Waiting, ex.Message, clock.UtcNow + JobRules.UnavailableRetry);
+            return Pause(s, dir, current with { Attempts = previousAttempts }, JobStatus.Waiting, ex.Message, clock.UtcNow + JobRules.UnavailableRetry);
         }
         catch (DiskLowException ex)
         {
-            Pause(s, dir, current, JobStatus.Waiting, ex.Message, null);
+            Pause(s, dir, current with { Attempts = previousAttempts }, JobStatus.Waiting, ex.Message, null);
             return new JobOutcome(s.JobId, JobAction.Run, JobOutcome.PausedDisk, ex.Message, 0, 0, 0);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            JobStore.Write(dir, current with { Status = JobStatus.Waiting, LastError = "stopped", UpdatedUtc = clock.UtcNow });
+            JobStore.Write(dir, current with { Status = JobStatus.Waiting, Attempts = previousAttempts, LastError = "stopped", UpdatedUtc = clock.UtcNow });
             throw;
         }
-        catch (Exception ex) when (ex is DecodeException or TranscriptionFailedException or InvalidDataException or IOException or JsonException)
+        catch (Exception ex)
         {
             var failed = current with
             {
                 Status = JobStatus.Failed,
-                Attempts = current.Attempts + 1,
-                LastError = ex.Message,
-                NextAttemptUtc = JobRules.NextAttempt(current.Attempts + 1, clock.UtcNow),
+
+                LastError = ex is DecodeException or TranscriptionFailedException ? ex.Message : $"{ex.GetType().Name}: {ex.Message}",
+                NextAttemptUtc = JobRules.NextAttempt(current.Attempts, clock.UtcNow),
                 UpdatedUtc = clock.UtcNow,
             };
             JobStore.Write(dir, failed);
-            log.LogWarning("Analysis of {Job} failed (attempt {Attempt}): {Error}", s.JobId, failed.Attempts, ex.Message);
-            return new JobOutcome(s.JobId, JobAction.Run, JobStatus.Failed, ex.Message, 0, 0, 0);
+            log.LogWarning("Analysis of {Job} failed (attempt {Attempt} of {Max}): {Error}", s.JobId, failed.Attempts, JobRules.MaxAttempts, failed.LastError);
+            return new JobOutcome(s.JobId, JobAction.Run, JobStatus.Failed, failed.LastError!, 0, 0, 0);
         }
+    }
+
+    /// <summary>A job left "running" or "waiting" that has used all its attempts (killed again and again, or retried to the limit): marked failed with the reason, so it is skipped and cannot block older segments.</summary>
+    JobOutcome Park(SourceSegment s, string dir, JobState state, string reason)
+    {
+        JobStore.Write(dir, state with { Status = JobStatus.Failed, LastError = reason, NextAttemptUtc = null, UpdatedUtc = clock.UtcNow });
+        log.LogWarning("Analysis of {Job} parked after {Attempts} attempts: {Reason}", s.JobId, state.Attempts, reason);
+        return new JobOutcome(s.JobId, JobAction.Skip, JobStatus.Failed, reason, 0, 0, 0);
     }
 
     JobOutcome Pause(SourceSegment s, string dir, JobState current, string status, string reason, DateTimeOffset? next)

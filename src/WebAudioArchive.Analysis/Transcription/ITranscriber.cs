@@ -23,7 +23,14 @@ public sealed record RawSegment(double Start, double End, string Text, double No
 /// </summary>
 public interface ITranscriber
 {
+    /// <summary>For information, recorded in the transcript: the engine and, once loaded, the device (for example "whisper.net 1.9.1 (cuda)"). It changes between runs, so it is never part of the job version.</summary>
     string Engine { get; }
+
+    /// <summary>
+    /// What decides whether a stored transcript is current: the engine package version, the model and the model file size.
+    /// Never the device or load state, so a GPU to CPU fallback does not re-transcribe the archive.
+    /// </summary>
+    string Identity { get; }
 
     string Model { get; }
 
@@ -35,3 +42,6 @@ public interface ITranscriber
 public sealed class TranscriberUnavailableException(string message, Exception? inner = null) : Exception(message, inner);
 
 public sealed class TranscriptionFailedException(string message) : Exception(message);
+
+/// <summary>The engine ran out of memory or hit a GPU error: probably not this input's fault, so the job waits and retries later without using an attempt.</summary>
+public sealed class TransientTranscriptionException(string message, Exception? inner = null) : Exception(message, inner);

@@ -4,7 +4,8 @@ namespace WebAudioArchive.Tests.Support;
 
 /// <summary>
 /// A transcriber for tests: Respond gets each request and its call number (0 based) and returns the segments, or throws
-/// to simulate whisper being down (TranscriberUnavailableException), a bad input, or a crash.
+/// to simulate whisper being down (TranscriberUnavailableException), a bad input, or a crash. Engine (which names the
+/// device, for information) can be changed to simulate a GPU to CPU fallback; Identity (the job version) ignores it.
 /// </summary>
 public sealed class FakeTranscriber : ITranscriber
 {
@@ -16,7 +17,9 @@ public sealed class FakeTranscriber : ITranscriber
 
     public bool Ready { get; set; } = true;
 
-    public string Engine => "fake";
+    public string Engine { get; set; } = "fake";
+
+    public string Identity => $"fake|{Model}";
 
     public string Model { get; set; } = "fake-model";
 

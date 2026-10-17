@@ -58,6 +58,7 @@ public sealed class SegmentDecoderTests : IDisposable
 
         Assert.InRange(decoded.Features.Seconds, 9.9, 10.1);
         Assert.Equal(2, decoded.Features.Channels);
+        Assert.Equal(AnalysisFixtures.CountFrames(mp3), decoded.Frames);
         Assert.Equal(decoded.Frames * Mp3FrameReader.SamplesPerFrame, decoded.Features.Frames);
         var dead = Assert.Single(DeadAirDetector.Detect(decoded.Features, new DeadAirOptions { MinSeconds = 3 }));
         Assert.InRange(dead.StartSeconds, 2.9, 3.15);
@@ -128,9 +129,9 @@ public sealed class SegmentDecoderTests : IDisposable
     [Fact]
     public void Leftovers_from_a_crash_are_swept_at_start_up()
     {
-        Directory.CreateDirectory(Path.Combine(ScratchRoot, "old-job"));
-        File.WriteAllText(Path.Combine(ScratchRoot, "old-job", "speech.wav"), "x");
-        File.WriteAllText(Path.Combine(ScratchRoot, "stray.tmp"), "x");
+        Directory.CreateDirectory(Path.Combine(ScratchRoot, "old-job-1a2b3c4d"));
+        File.WriteAllText(Path.Combine(ScratchRoot, "old-job-1a2b3c4d", "speech.wav"), "x");
+        File.WriteAllText(Path.Combine(ScratchRoot, "stray-1a2b3c4d"), "x");
 
         var scratch = new ScratchSpace(ScratchRoot, 1000);
 
@@ -157,6 +158,7 @@ public sealed class SegmentDecoderTests : IDisposable
 
         Assert.True(decoded.RecoveredFrames >= 1, "the stream never hit NLayer's reservoir wrap, so the recovery path was not exercised");
         Assert.Equal(0, decoded.SilencedFrames);
+        Assert.Equal(AnalysisFixtures.CountFrames(mp3), decoded.Frames);
         Assert.Equal(decoded.Frames * Mp3FrameReader.SamplesPerFrame, decoded.Features.Frames);
         Assert.InRange(decoded.Features.Seconds, 330, 330.1);
     }
@@ -180,5 +182,66 @@ public sealed class SegmentDecoderTests : IDisposable
 
         Assert.Equal(reference.Frames, decoded.Frames);
         Assert.Equal(reference.Features.Frames, decoded.Features.Frames);
+    }
+
+    [Fact]
+    public void Sweeping_keeps_anything_that_is_not_a_scratch_job_folder()
+    {
+        Directory.CreateDirectory(Path.Combine(ScratchRoot, "job-1a2b3c4d"));
+        Directory.CreateDirectory(Path.Combine(ScratchRoot, "photos"));
+        Directory.CreateDirectory(Path.Combine(ScratchRoot, "job-nothex12"));
+        File.WriteAllText(Path.Combine(ScratchRoot, "photos", "me.jpg"), "x");
+        File.WriteAllText(Path.Combine(ScratchRoot, "notes.txt"), "x");
+
+        var scratch = new ScratchSpace(ScratchRoot, 1000);
+
+        Assert.Equal(1, scratch.SweepStale());
+        Assert.False(Directory.Exists(Path.Combine(ScratchRoot, "job-1a2b3c4d")));
+        Assert.True(File.Exists(Path.Combine(ScratchRoot, "photos", "me.jpg")));
+        Assert.True(Directory.Exists(Path.Combine(ScratchRoot, "job-nothex12")));
+        Assert.True(File.Exists(Path.Combine(ScratchRoot, "notes.txt")));
+    }
+
+    [Fact]
+    public void A_scratch_root_that_equals_or_contains_a_protected_root_is_refused()
+    {
+        var data = Path.Combine(_dir, "data");
+        Directory.CreateDirectory(data);
+
+        var same = Assert.Throws<ArgumentException>(() => new ScratchSpace(data, 1000, [data]));
+        Assert.Contains("scratch", same.Message);
+        Assert.Throws<ArgumentException>(() => new ScratchSpace(_dir, 1000, [data]));
+        Assert.Throws<ArgumentException>(() => new ScratchSpace(Path.Combine(_dir, "data") + Path.DirectorySeparatorChar, 1000, [data]));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(data));
+        new ScratchSpace(ScratchRoot, 1000, [data]);
+    }
+
+    [Fact]
+    public async Task A_source_longer_than_its_sidecar_is_copied_only_up_to_the_sidecar_and_refused()
+    {
+        var mp3 = await Mp3(Signals.Stereo(Signals.Sine(1)));
+        var size = new FileInfo(mp3).Length;
+        await File.AppendAllTextAsync(mp3, new string('x', 100_000));
+        var scratch = new ScratchSpace(ScratchRoot, 64L * 1024 * 1024);
+        using var lease = scratch.Acquire("grown", 1_000_000);
+
+        var ex = await Assert.ThrowsAsync<DecodeException>(() => new SegmentDecoder().DecodeAsync(mp3, size, 44100, 2, lease, CancellationToken.None));
+
+        Assert.Contains("longer than", ex.Message);
+        Assert.True(new FileInfo(lease.PathFor("source.mp3")).Length <= size + 1);
+    }
+
+    [Fact]
+    public async Task An_open_part_file_is_never_read()
+    {
+        var part = Path.Combine(_dir, "080000.mp3.part");
+        File.Copy(await Mp3(Signals.Stereo(Signals.Sine(1))), part);
+        var scratch = new ScratchSpace(ScratchRoot, 64L * 1024 * 1024);
+        using var lease = scratch.Acquire("part", 1_000_000);
+
+        var ex = await Assert.ThrowsAsync<DecodeException>(() => new SegmentDecoder().DecodeAsync(part, new FileInfo(part).Length, 44100, 2, lease, CancellationToken.None));
+
+        Assert.Contains(".part", ex.Message);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(lease.Dir));
     }
 }

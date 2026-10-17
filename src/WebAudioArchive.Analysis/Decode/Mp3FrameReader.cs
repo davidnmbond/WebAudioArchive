@@ -19,6 +19,12 @@ public sealed class Mp3FrameReader
     public const int MaxFloatsPerFrame = SamplesPerFrame * 2;
 
     const int MaxFrameBytes = 1441 + 4;
+    /// <summary>
+    /// Previous frames kept to prime a fresh decoder. A Layer III bit reservoir reaches back at most 511 bytes, which 4
+    /// frames cover only at 128 kbps and above (417 bytes a frame); at 64 kbps (208 bytes) it takes 3 and at 32 kbps
+    /// (104 bytes) 6, so below 64 kbps a recovery can come out wrong and the frame is then written as silence (counted
+    /// in SilencedFrames, which the pipeline records and flags). The recorders only archive 128 kbps streams.
+    /// </summary>
     const int KeepFrames = 4;
 
     readonly Stream _source;

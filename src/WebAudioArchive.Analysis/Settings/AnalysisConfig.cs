@@ -54,6 +54,9 @@ public sealed record TranscriptionOptions
     public IReadOnlyList<string> Hallucinations { get; init; } = [];
     public int MaxRepeats { get; init; } = 3;
 
+    /// <summary>More silenced (undecodable) frames than this fraction of a segment's frames flags the transcript and events (default 0.1 percent). Not part of the transcript key.</summary>
+    public double MaxSilencedFrameFraction { get; init; } = 0.001;
+
     /// <summary>The options that change what whisper is asked; a change re-transcribes. Filter options do not.</summary>
     public string TranscriptKey() =>
         AnalysisConfigLoader.Hash(string.Join('|', Language, ChunkSeconds.ToString(CultureInfo.InvariantCulture),
@@ -187,6 +190,7 @@ public static partial class AnalysisConfigLoader
         Check(t.BoundarySearchSeconds >= 0 && t.BoundarySearchSeconds <= t.ChunkSeconds / 4, "transcription.boundarySearchSeconds must be from 0 to a quarter of chunkSeconds");
         Check(t.MaxNoSpeechProb is >= 0 and <= 1, "transcription.maxNoSpeechProb must be from 0 to 1");
         Check(t.MaxRepeats >= 2, "transcription.maxRepeats must be at least 2");
+        Check(t.MaxSilencedFrameFraction is >= 0 and <= 1, "transcription.maxSilencedFrameFraction must be between 0 and 1");
 
         var n = c.Enrichment;
         Check(n.NumCtx is >= 2048 and <= 262_144, "enrichment.numCtx must be from 2048 to 262144");

@@ -58,17 +58,28 @@ public sealed class SegmentDiscovery(IReadOnlyList<RecorderRoot> recorders, stri
 
     SourceSegment? Read(string recorder, string master, string json, out string? problem)
     {
-        var info = new FileInfo(json);
         SegmentMeta? meta;
-        if (_cache.TryGetValue(json, out var hit) && hit.Length == info.Length && hit.Written == info.LastWriteTimeUtc)
+        try
         {
-            meta = hit.Meta;
-            problem = hit.Problem;
+            var info = new FileInfo(json);
+            var jsonLength = info.Length;
+            var written = info.LastWriteTimeUtc;
+            if (_cache.TryGetValue(json, out var hit) && hit.Length == jsonLength && hit.Written == written)
+            {
+                meta = hit.Meta;
+                problem = hit.Problem;
+            }
+            else
+            {
+                (meta, problem) = Parse(json);
+                _cache[json] = (jsonLength, written, meta, problem);
+            }
         }
-        else
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            (meta, problem) = Parse(json);
-            _cache[json] = (info.Length, info.LastWriteTimeUtc, meta, problem);
+            // Deleted or locked between listing the folder and reading it: skipped this pass, found again on the next.
+            problem = $"{json}: not readable now ({ex.Message})";
+            return null;
         }
 
         if (meta is null) return null;
@@ -78,7 +89,7 @@ public sealed class SegmentDiscovery(IReadOnlyList<RecorderRoot> recorders, stri
         {
             length = new FileInfo(audio).Length;
         }
-        catch (FileNotFoundException)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             problem = $"{json}: its audio {meta.File} is missing";
             return null;

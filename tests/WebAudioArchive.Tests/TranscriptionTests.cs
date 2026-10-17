@@ -144,4 +144,49 @@ public class TranscriptionTests
         Assert.Equal("Um, er, right.", PromptBuilder.Build(o with { Glossary = [] }, null));
         Assert.Equal(PromptBuilder.MaxChars, PromptBuilder.Build(o, new string('x', 2000)).Length);
     }
+
+    [Fact]
+    public async Task The_identity_is_the_package_version_model_and_size_and_does_not_change_when_the_model_fails_to_load()
+    {
+        var dir = Directory.CreateTempSubdirectory("waa-model-").FullName;
+        try
+        {
+            var model = Path.Combine(dir, "ggml-test.bin");
+            await File.WriteAllBytesAsync(model, new byte[1000]);
+            using var t = new WhisperNetTranscriber(model, WhisperDevice.Cpu, 1, dtw: false);
+            var before = t.Identity;
+            var engineBefore = t.Engine;
+
+            Assert.False(await t.IsReadyAsync(CancellationToken.None));
+
+            Assert.Equal(before, t.Identity);
+            Assert.StartsWith("whisper.net 1.9.1|ggml-test|1000", before);
+            Assert.DoesNotContain("cuda", before, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("cpu", before, StringComparison.OrdinalIgnoreCase);
+            Assert.StartsWith("whisper.net 1.9.1", engineBefore);
+
+            await File.WriteAllBytesAsync(model, new byte[2000]);
+            Assert.NotEqual(before, t.Identity);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("CUDA error: out of memory")]
+    [InlineData("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 5000 MiB on device 0: cudaMalloc failed")]
+    [InlineData("failed to allocate buffer")]
+    [InlineData("cuBLAS error 3")]
+    public void Out_of_memory_and_cuda_errors_are_transient(string message) =>
+        Assert.IsType<TransientTranscriptionException>(WhisperNetTranscriber.Classify(new InvalidOperationException(message)));
+
+    [Fact]
+    public void An_out_of_memory_exception_is_transient_and_other_errors_fail_the_chunk()
+    {
+        Assert.IsType<TransientTranscriptionException>(WhisperNetTranscriber.Classify(new OutOfMemoryException()));
+        var other = Assert.IsType<TranscriptionFailedException>(WhisperNetTranscriber.Classify(new InvalidOperationException("bad audio")));
+        Assert.Contains("bad audio", other.Message);
+    }
 }

@@ -14,9 +14,19 @@ public sealed partial class ScratchSpace
     readonly object _gate = new();
     readonly Dictionary<string, long> _reserved = new();
 
-    public ScratchSpace(string root, long maxBytes)
+    /// <param name="root">The scratch folder (a tmpfs in the container). Only entries this class made (named job-name, a dash and 8 hex digits) are ever swept.</param>
+    /// <param name="maxBytes">The budget.</param>
+    /// <param name="protectedRoots">Folders that must never be inside or equal to the scratch root, such as the recorders' data root and the analysis output root: a misconfigured scratch must not put them in reach of the sweep.</param>
+    public ScratchSpace(string root, long maxBytes, IReadOnlyList<string>? protectedRoots = null)
     {
         Root = Path.GetFullPath(root);
+        foreach (var p in protectedRoots ?? [])
+        {
+            var protectedFull = Path.GetFullPath(p);
+            if (IsSameOrInside(protectedFull, Root))
+                throw new ArgumentException($"the scratch root {Root} equals or contains {protectedFull}; scratch is swept and deleted, so it must be a folder of its own (WAA_SCRATCH_PATH)", nameof(root));
+        }
+
         MaxBytes = maxBytes;
         Directory.CreateDirectory(Root);
     }
@@ -39,31 +49,44 @@ public sealed partial class ScratchSpace
         })
         : 0;
 
-    /// <summary>Deletes everything under the root. Call at start-up, before any job runs. Returns how many entries went.</summary>
+    /// <summary>
+    /// Deletes the job folders and files a crash left (names made by <see cref="Acquire"/>: job-name, a dash, 8 hex digits)
+    /// directly under the root, and nothing else. Call at start-up, before any job runs. Returns how many entries went.
+    /// </summary>
     public int SweepStale()
     {
         var n = 0;
-        foreach (var d in Directory.EnumerateDirectories(Root))
+        foreach (var d in Directory.EnumerateDirectories(Root).Where(d => IsJobName(Path.GetFileName(d))))
         {
             TryDelete(d);
             n++;
         }
 
-        foreach (var f in Directory.EnumerateFiles(Root))
+        foreach (var f in Directory.EnumerateFiles(Root).Where(f => IsJobName(Path.GetFileName(f))))
         {
             try
             {
                 File.Delete(f);
+                n++;
             }
             catch (IOException)
             {
             }
-
-            n++;
         }
 
         return n;
     }
+
+    static bool IsSameOrInside(string inner, string outer)
+    {
+        var rel = Path.GetRelativePath(outer, inner);
+        return rel == "." || (!rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel));
+    }
+
+    static bool IsJobName(string name) => JobFolder().IsMatch(name);
+
+    [GeneratedRegex("^.+-[0-9a-f]{8}$")]
+    private static partial Regex JobFolder();
 
     public ScratchLease Acquire(string jobName, long expectedBytes)
     {

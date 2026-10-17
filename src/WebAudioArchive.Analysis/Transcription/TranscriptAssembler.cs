@@ -13,11 +13,14 @@ public sealed record TranscriptPartial(int Schema, string Fingerprint, string Tr
     public const int CurrentSchema = 1;
 }
 
+/// <summary>What the decoder reports about a segment: frames found, frames written as silence, frames recovered.</summary>
+public sealed record DecodeStats(long Frames, int Silenced, int Recovered);
+
 public static class TranscriptAssembler
 {
     public static TranscriptDocument Build(
         SourceSegment s, string station, IReadOnlyList<TimelineAnchor> anchors, IEnumerable<RawSegment> segments, TranscriptionOptions o,
-        string engine, string model, string transcriptVersion, string decoder, DateTimeOffset now, double transcribeSeconds)
+        string engine, string model, string transcriptVersion, string decoder, DateTimeOffset now, double transcribeSeconds, DecodeStats? decode = null)
     {
         var ordered = segments.OrderBy(x => x.Start).ToList();
         var reasons = TranscriptFilter.Reasons(ordered.Select(x => (x.Text, x.NoSpeechProb, x.AvgLogProb)).ToList(), o);
@@ -27,7 +30,13 @@ public static class TranscriptAssembler
             .ToList();
         return new TranscriptDocument(TranscriptDocument.CurrentSchema, station, s.Recorder, s.Meta.Instance, s.JobId, s.Meta.File,
             s.Meta.StartUtc, s.Meta.EndUtc, s.Meta.AudioSeconds, anchors, engine, model, o.Language, transcriptVersion, decoder,
-            now, Math.Round(transcribeSeconds, 3), list);
+            now, Math.Round(transcribeSeconds, 3), list)
+        {
+            DecodedFrames = decode?.Frames,
+            SilencedFrames = decode?.Silenced,
+            RecoveredFrames = decode?.Recovered,
+            Flags = decode is not null && decode.Silenced > o.MaxSilencedFrameFraction * decode.Frames ? ["silenced-frames"] : null,
+        };
     }
 
     /// <summary>The same transcript with suppression worked out again under the current options (used when events are rebuilt).</summary>

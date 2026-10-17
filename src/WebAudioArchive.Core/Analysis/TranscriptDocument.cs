@@ -41,6 +41,16 @@ public sealed record TranscriptDocument(
 {
     public const int CurrentSchema = 1;
 
+    /// <summary>MPEG frames the decoder found (equals the sidecar's count, or the job fails), frames it could only write as silence, and frames it recovered by priming a fresh decoder.</summary>
+    public long? DecodedFrames { get; init; }
+
+    public int? SilencedFrames { get; init; }
+
+    public int? RecoveredFrames { get; init; }
+
+    /// <summary>Quality flags for readers, for example "silenced-frames" when more than the allowed fraction of frames could not be decoded. Null when there are none.</summary>
+    public IReadOnlyList<string>? Flags { get; init; }
+
     public DateTimeOffset ToUtc(double audioOffset) => SegmentTimeline.ToUtc(Timeline, audioOffset);
 
     [JsonIgnore]
