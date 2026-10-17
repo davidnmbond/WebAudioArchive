@@ -39,8 +39,8 @@ public static class HourMerger
 
     /// <summary>
     /// Null when neither recorder holds a frame estimated to be in the hour. The primary is the recorder with more frames
-    /// in the hour (A on a tie). The hour starts after <paramref name="previousTail"/> (the previous merged hour's last
-    /// <see cref="FrameMerge.AnchorFrames"/> frame hashes) when they occur in the merged frames, otherwise at the first
+    /// in the hour (A on a tie). The hour starts after <paramref name="previousTail"/> (the previous merged hour's
+    /// <see cref="MergedHourWriter.Tail"/>, all of it) when that whole sequence occurs in the merged frames, otherwise at the first
     /// frame estimated at or after the hour; it ends at the last frame estimated before the next hour.
     /// </summary>
     public static MergedHourPlan? Plan(DateTimeOffset hour, IReadOnlyList<SourceSegment> a, IReadOnlyList<SourceSegment> b, IReadOnlyList<ulong> previousTail)
@@ -114,10 +114,10 @@ public static class HourMerger
     static int Start(List<SourceFrame> ordered, List<DateTimeOffset> clock, DateTimeOffset hour, IReadOnlyList<ulong> previousTail)
     {
         var byTime = clock.FindIndex(t => t >= hour);
-        var n = FrameMerge.AnchorFrames;
-        if (previousTail.Count < n) return byTime;
+        var n = previousTail.Count;
+        if (n == 0) return byTime;
 
-        var tail = previousTail.Skip(previousTail.Count - n).ToArray();
+        var tail = previousTail;
         var best = -1;
         for (var i = n; i < ordered.Count && clock[i - 1] < hour + Reach; i++)
         {
