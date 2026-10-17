@@ -14,8 +14,8 @@
                        DownloadUrl="@DownloadUrl"
                        DownloadFileName="@DownloadName"
                        StartAt="StartAt"
-                       Markers="Markers"
-                       Segments="Segments"
+                       Markers="ShownMarkers"
+                       Segments="ShownSegments"
                        RangeStart="RangeStart"
                        RangeEnd="RangeEnd"
                        KindLabels="ShowEvents.KindLabels"
@@ -25,6 +25,8 @@
                        ShowSegmentList="false"
                        ShowNowPlaying="false"
                        ShowErrors="true"
+                       OnSegmentSelected="OnSegmentSelected"
+                       OnMarkerSelected="OnMarkerSelected"
                        OnTimeUpdate="OnTimeUpdate"
                        OnError="OnError" />
         <div class="d-flex flex-wrap column-gap-3 small clip-player-clock">

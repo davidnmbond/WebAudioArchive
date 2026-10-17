@@ -47,8 +47,43 @@ public sealed partial class ClipPlayer
 
     static string Clockface(double seconds) => TimeSpan.FromSeconds(Math.Floor(Math.Max(0, seconds))).ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture);
 
+    // The lists the player is given: the parameters, with the selected item's copy swapped in. Rebuilt only when a
+    // parameter list or the selection changes, so ordinary re-renders hand the player the same instances.
+    IReadOnlyList<PDMediaSegment>? _sourceSegments, ShownSegments;
+    IReadOnlyList<PDMediaMarker>? _sourceMarkers, ShownMarkers;
+    string? _selectedSegmentId, _selectedMarkerId;
+
+    void OnSegmentSelected(PDMediaSegment segment)
+    {
+        if (_selectedSegmentId == segment.Id) return;
+        _selectedSegmentId = segment.Id;
+        ShownSegments = SelectedMarks.Mark(_sourceSegments, _selectedSegmentId);
+    }
+
+    void OnMarkerSelected(PDMediaMarker marker)
+    {
+        if (_selectedMarkerId == marker.Id) return;
+        _selectedMarkerId = marker.Id;
+        ShownMarkers = SelectedMarks.Mark(_sourceMarkers, _selectedMarkerId);
+    }
+
     protected override void OnParametersSet()
     {
+        // A new list (another show or clip) clears the selection.
+        if (!ReferenceEquals(Segments, _sourceSegments))
+        {
+            _sourceSegments = Segments;
+            _selectedSegmentId = null;
+            ShownSegments = Segments;
+        }
+
+        if (!ReferenceEquals(Markers, _sourceMarkers))
+        {
+            _sourceMarkers = Markers;
+            _selectedMarkerId = null;
+            ShownMarkers = Markers;
+        }
+
         if (_shownSrc == Src) return;
         _shownSrc = Src;
         Position = TimeSpan.Zero;
