@@ -44,6 +44,18 @@ public sealed class PositionModelTests
     }
 
     [Fact]
+    public void The_last_few_seconds_before_now_are_not_reported_missing_but_a_longer_outage_up_to_now_is()
+    {
+        var recorders = new[] { new RecorderSegments("a", [Seg(600, 600)]) };
+
+        var writing = WindowCoverage.Combined(recorders, T0, T0.AddSeconds(605), ClipEvents.MinGapSeconds, liveEdgeSeconds: 10);
+        var down = WindowCoverage.Combined(recorders, T0, T0.AddSeconds(630), ClipEvents.MinGapSeconds, liveEdgeSeconds: 10);
+
+        Assert.Empty(writing.Missing); // 5 s behind now: the newest audio not yet on disk
+        Assert.Equal(new Interval(T0.AddSeconds(600), T0.AddSeconds(630)), Assert.Single(down.Missing));
+    }
+
+    [Fact]
     public void With_a_burst_byte_zero_is_burst_seconds_before_start()
     {
         // Revma: 214 s of audio in 209 s of wall time, so byte 0 holds audio from 5 s before the first arrival.

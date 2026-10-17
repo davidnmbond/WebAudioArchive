@@ -125,7 +125,7 @@ public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, 
     {
         var statuses = await ReadStatusesAsync(ct);
         var now = time.GetUtcNow();
-        var combined = WindowCoverage.Combined(catalog.All(), now.AddHours(-24), now, ClipEvents.MinGapSeconds);
+        var combined = WindowCoverage.Combined(catalog.All(), now.AddHours(-24), now, ClipEvents.MinGapSeconds, WindowCoverage.LiveEdgeSeconds);
         var snapshot = new StatusSnapshot(statuses, now, combined);
         Last = snapshot;
         return snapshot;

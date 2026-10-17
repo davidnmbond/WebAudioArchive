@@ -47,12 +47,24 @@ public static class WindowCoverage
     /// The union of every recorder's coverage of [from, to): a stretch counts when any recorder has it. Missing lists what
     /// none has, leaving out stretches shorter than <paramref name="minMissingSeconds"/>.
     /// </summary>
-    public static CombinedCoverage Combined(IEnumerable<RecorderSegments> recorders, DateTimeOffset from, DateTimeOffset to, double minMissingSeconds)
+    /// <remarks>
+    /// When <paramref name="to"/> is now, pass <paramref name="liveEdgeSeconds"/>: a missing stretch that runs up to
+    /// <paramref name="to"/> and is shorter than that is the newest audio not yet on disk (an open segment's end is its
+    /// file's last write time, which lags on Docker's Windows file sharing), not a loss. A longer one is still reported.
+    /// </remarks>
+    public static CombinedCoverage Combined(
+        IEnumerable<RecorderSegments> recorders, DateTimeOffset from, DateTimeOffset to, double minMissingSeconds, double liveEdgeSeconds = 0)
     {
         var covered = Merge(recorders.SelectMany(r =>
             Covered(r.Segments.Where(s => s.EndUtc > from && PositionModel.AudioStartUtc(s) < to), from, to)));
-        return new CombinedCoverage(covered.Sum(i => i.Seconds), to > from ? (to - from).TotalSeconds : 0, Uncovered(covered, from, to, minMissingSeconds));
+        var missing = Uncovered(covered, from, to, minMissingSeconds)
+            .Where(m => !(m.End >= to && m.Seconds < liveEdgeSeconds))
+            .ToList();
+        return new CombinedCoverage(covered.Sum(i => i.Seconds), to > from ? (to - from).TotalSeconds : 0, missing);
     }
+
+    /// <summary>A stretch missing at the very end of a window ending now, shorter than this, is writing lag, not a loss.</summary>
+    public const double LiveEdgeSeconds = 10;
 
     /// <summary>The stretches of [from, to) not in <paramref name="covered"/>, leaving out ones shorter than <paramref name="minSeconds"/>.</summary>
     public static IReadOnlyList<Interval> Uncovered(IReadOnlyList<Interval> covered, DateTimeOffset from, DateTimeOffset to, double minSeconds)

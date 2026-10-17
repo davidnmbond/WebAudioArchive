@@ -82,7 +82,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
 
         var first = all.SelectMany(r => r.Segments).Select(PositionModel.AudioStartUtc).DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
         var now = time.GetUtcNow();
-        var missingFromBoth = WindowCoverage.Combined(all, first > from ? first : from, now < to ? now : to, ClipEvents.MinGapSeconds);
+        var missingFromBoth = WindowCoverage.Combined(all, first > from ? first : from, now < to ? now : to, ClipEvents.MinGapSeconds, WindowCoverage.LiveEdgeSeconds);
         items.AddRange(missingFromBoth.Missing.Select(m => MissingFromAll(m.Start, m.End)));
 
         return items.OrderBy(i => i.StartUtc).ThenBy(i => i.Recorder, StringComparer.Ordinal).ToList();
