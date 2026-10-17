@@ -6337,6 +6337,7 @@ git commit -m "Analysis: resumable, idempotent segment pipeline writing transcri
 ---
 
 ### Task 13: Schedule types to Core, the day timeline and per-show analysis
+> Deviation (implemented): the builder excludes swear events whose Evidence["suppressed"] is not "no" (review-only) from the tier and watershed counts and reports them in `ShowCounts.SuppressedSwearRuns` (last field) and a note; test `Suppressed_swear_runs_are_review_only_and_never_counted`. Task 14's test helper is named `MakeEnricher` because `Enricher` the type is also used (`Enricher.MaxInvalidAttempts`).
 
 **Files:**
 - Move: `src/WebAudioArchive.Web/Schedule/WeeklySchedule.cs` to `src/WebAudioArchive.Core/Schedule/WeeklySchedule.cs`; `src/WebAudioArchive.Web/Schedule/ScheduleExpander.cs` to `src/WebAudioArchive.Core/Schedule/ScheduleExpander.cs` (namespace line only)
@@ -6349,7 +6350,7 @@ git commit -m "Analysis: resumable, idempotent segment pipeline writing transcri
 - Consumes: `EventsDocument`, `AnalysisEvent`, `SourceSpan`, `RecorderPreference`, `TranscriptSlicer`, `TimedLine`, `AnalysisPaths`, `AnalysisJson` (Task 3); `StationConfigLoader` (Core); `IClock`.
 - Produces:
   - Namespace `WebAudioArchive.Core.Schedule`: `ScheduleSlot`, `WeeklySchedule`, `ScheduleParseResult`, `ShowOccurrence`, `ScheduleExpander` (unchanged APIs, new namespace; Web and Tests get it as a global using); `sealed record SavedScheduleFile(string Station, string? Url, string? Timezone, DateTimeOffset FetchedUtc, List<SavedScheduleSlot> Slots)` with `static JsonSerializerOptions Json`, `static SavedScheduleFile From(string station, string? url, string? timezone, WeeklySchedule schedule, DateTimeOffset fetched)`, `WeeklySchedule? ToSchedule()`, `static SavedScheduleFile? Read(string path)`; `sealed record SavedScheduleSlot(string Day, string LocalStart, int Minutes, string Title)`.
-  - `sealed record ShowSource(string Recorder, string JobId, DateTimeOffset FromUtc, DateTimeOffset ToUtc)`; `sealed record ShowCounts(int SwearsMild, int SwearsStrong, int SwearsSevere, int SwearsBeforeWatershed, int ClippingEvents, double ClippedMs, int DeadAirEvents, double DeadAirSeconds, int Fillers, double SpeechMinutes, double? FillersPerMinute, double AnalysedSeconds)`; `sealed record ShowAnalysis(int Schema, string ShowId, string Station, string Title, DateTimeOffset StartUtc, DateTimeOffset EndUtc, DateTimeOffset WindowFromUtc, DateTimeOffset WindowToUtc, DateTimeOffset BuiltUtc, bool Complete, IReadOnlyList<ShowSource> Sources, ShowCounts Counts, IReadOnlyList<string> Notes)` with `const int CurrentSchema = 1`.
+  - `sealed record ShowSource(string Recorder, string JobId, DateTimeOffset FromUtc, DateTimeOffset ToUtc)`; `sealed record ShowCounts(int SwearsMild, int SwearsStrong, int SwearsSevere, int SwearsBeforeWatershed, int ClippingEvents, double ClippedMs, int DeadAirEvents, double DeadAirSeconds, int Fillers, double SpeechMinutes, double? FillersPerMinute, double AnalysedSeconds, int SuppressedSwearRuns)`; `sealed record ShowAnalysis(int Schema, string ShowId, string Station, string Title, DateTimeOffset StartUtc, DateTimeOffset EndUtc, DateTimeOffset WindowFromUtc, DateTimeOffset WindowToUtc, DateTimeOffset BuiltUtc, bool Complete, IReadOnlyList<ShowSource> Sources, ShowCounts Counts, IReadOnlyList<string> Notes)` with `const int CurrentSchema = 1`.
   - `sealed class ScheduleProvider(string? scheduleFile, string? stationsConfig, string station, ILogger log) { TimeZoneInfo Zone; DateTimeOffset? FetchedUtc; IReadOnlyList<ShowOccurrence> Occurrences(DateTimeOffset fromUtc, DateTimeOffset toUtc); string? TitleAt(DateTimeOffset utc); }`
   - `static class DayTimeline { IReadOnlyList<EventsDocument> ReadSegments(AnalysisPaths paths, DateTimeOffset fromUtc, DateTimeOffset toUtc); IReadOnlyList<AnalysisEvent> Merge(IReadOnlyList<EventsDocument> segments, IReadOnlyList<string> preference); EventsDocument BuildDay(string station, DateOnly day, IReadOnlyList<EventsDocument> segments, IReadOnlyList<string> preference, DateTimeOffset now); void RebuildDay(AnalysisPaths paths, DateOnly day, IReadOnlyList<string> preference, DateTimeOffset now); }` (an event is filed in the UTC day of its start)
   - `static class ShowAnalysisBuilder { ShowAnalysis Build(ShowOccurrence show, TimeSpan margin, IReadOnlyList<AnalysisEvent> events, IReadOnlyList<TimedLine> lines, IReadOnlyList<ShowSource> sources, bool complete, DateTimeOffset now); }`
@@ -6622,7 +6623,8 @@ public sealed record ShowCounts(
     int Fillers,
     double SpeechMinutes,
     double? FillersPerMinute,
-    double AnalysedSeconds);
+    double AnalysedSeconds,
+    int SuppressedSwearRuns);
 
 /// <summary>show-analysis.json: one scheduled show mapped onto the analysed segments. Rebuilt whenever its segments change.</summary>
 public sealed record ShowAnalysis(
@@ -7140,10 +7142,10 @@ public sealed class EnricherTests : IDisposable
         AnalysisJson.Write(Path.Combine(Paths.SegmentDir(Job), AnalysisPaths.TranscriptFile), TranscriptFixtures.Of(Show, lines) with { JobId = Job });
         return new ShowAnalysis(1, "burst-20261015T1900Z", "burst", "Backseat Aux", Show, Show.AddHours(1), Show.AddMinutes(-5), Show.AddMinutes(65),
             _clock.UtcNow, true, [new ShowSource("a", Job, Show, Show.AddHours(1))],
-            new ShowCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, 3600), []);
+            new ShowCounts(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, 3600, 0), []);
     }
 
-    Enricher Enricher(EnrichmentOptions? options = null) => new(Paths, _llm, EnrichmentPrompt.Load(ConfigDir, options ?? Options), options ?? Options,
+    Enricher MakeEnricher(EnrichmentOptions? options = null) => new(Paths, _llm, EnrichmentPrompt.Load(ConfigDir, options ?? Options), options ?? Options,
         "qwen3.6:latest", ["a", "b"], _clock, NullLogger.Instance);
 
     [Fact]
@@ -7188,7 +7190,7 @@ public sealed class EnricherTests : IDisposable
     {
         var show = Analysed(Said);
 
-        var result = await Enricher().EnrichAsync(show, CancellationToken.None);
+        var result = await MakeEnricher().EnrichAsync(show, CancellationToken.None);
 
         Assert.Equal(EnrichmentStatus.Done, result.Status);
         var d = result.Derived!;
@@ -7214,18 +7216,18 @@ public sealed class EnricherTests : IDisposable
         var show = Analysed(Said);
         _llm.Down = true;
 
-        var pending = await Enricher().EnrichAsync(show, CancellationToken.None);
+        var pending = await MakeEnricher().EnrichAsync(show, CancellationToken.None);
 
         Assert.Equal(EnrichmentStatus.Pending, pending.Status);
         Assert.Equal(1, pending.Unavailable);
         Assert.Equal(0, pending.Attempts);
         Assert.Equal(_clock.UtcNow.AddMinutes(5), pending.NextAttemptUtc);
-        Assert.False(Enricher().IsDue(show));
+        Assert.False(MakeEnricher().IsDue(show));
 
         _llm.Down = false;
         _clock.Advance(TimeSpan.FromMinutes(6));
-        Assert.True(Enricher().IsDue(show));
-        Assert.Equal(EnrichmentStatus.Done, (await Enricher().EnrichAsync(show, CancellationToken.None)).Status);
+        Assert.True(MakeEnricher().IsDue(show));
+        Assert.Equal(EnrichmentStatus.Done, (await MakeEnricher().EnrichAsync(show, CancellationToken.None)).Status);
     }
 
     [Fact]
@@ -7236,7 +7238,7 @@ public sealed class EnricherTests : IDisposable
 
         for (var i = 0; i < Enricher.MaxInvalidAttempts; i++)
         {
-            await Enricher().EnrichAsync(show, CancellationToken.None);
+            await MakeEnricher().EnrichAsync(show, CancellationToken.None);
             _clock.Advance(TimeSpan.FromHours(7));
         }
 
@@ -7244,21 +7246,21 @@ public sealed class EnricherTests : IDisposable
         Assert.Equal(EnrichmentStatus.Failed, stored.Status);
         Assert.Equal(3, stored.Attempts);
         Assert.True(File.Exists(Path.Combine(Paths.ShowDir(show.ShowId, show.StartUtc), "enrichment.raw.txt")));
-        Assert.False(Enricher().IsDue(show));
+        Assert.False(MakeEnricher().IsDue(show));
     }
 
     [Fact]
     public async Task It_runs_again_only_when_the_transcript_or_prompt_changes()
     {
         var show = Analysed(Said);
-        await Enricher().EnrichAsync(show, CancellationToken.None);
-        Assert.False(Enricher().IsDue(show));
-        await Enricher().EnrichAsync(show, CancellationToken.None);
+        await MakeEnricher().EnrichAsync(show, CancellationToken.None);
+        Assert.False(MakeEnricher().IsDue(show));
+        await MakeEnricher().EnrichAsync(show, CancellationToken.None);
         Assert.Single(_llm.Requests);
 
         Analysed([.. Said, "One more line about the ball."]);
-        Assert.True(Enricher().IsDue(show));
-        await Enricher().EnrichAsync(show, CancellationToken.None);
+        Assert.True(MakeEnricher().IsDue(show));
+        await MakeEnricher().EnrichAsync(show, CancellationToken.None);
         Assert.Equal(2, _llm.Requests.Count);
     }
 
@@ -7268,7 +7270,7 @@ public sealed class EnricherTests : IDisposable
         var show = Analysed(Said);
         _llm.Respond = (r, n) => n == 0 ? Answer : """{ "hosts": [ { "value": "AMY", "quote": "I'm Amy", "confidence": 0.5 } ], "summary": "" }""";
 
-        var result = await Enricher(Options with { MaxTranscriptChars = 150 }).EnrichAsync(show, CancellationToken.None);
+        var result = await MakeEnricher(Options with { MaxTranscriptChars = 150 }).EnrichAsync(show, CancellationToken.None);
 
         Assert.True(_llm.Requests.Count >= 2);
         Assert.Contains("part 1 of", _llm.Requests[0].User);
@@ -9164,7 +9166,7 @@ public sealed class AnalysisWebTests : IDisposable
             TranscriptFixtures.Of(T, "Good evening, this is Backseat Aux.", "Next up, a song.") with { JobId = "a/2026/10-15/190000" });
         AnalysisJson.Write(Path.Combine(paths.ShowDir("burst-20261015T1900Z", T), AnalysisPaths.ShowAnalysisFile),
             new ShowAnalysis(1, "burst-20261015T1900Z", "burst", "Backseat Aux", T, T.AddHours(1), T.AddMinutes(-5), T.AddMinutes(65), T.AddHours(2), true,
-                [], new ShowCounts(0, 1, 0, 1, 0, 0, 1, 8, 1, 0.1, null, 3600), []));
+                [], new ShowCounts(0, 1, 0, 1, 0, 0, 1, 8, 1, 0.1, null, 3600, 0), []));
     }
 
     public void Dispose() => Directory.Delete(_root, recursive: true);

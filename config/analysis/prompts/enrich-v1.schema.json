@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "hosts": { "$ref": "#/$defs/claims" },
+    "guests": { "$ref": "#/$defs/claims" },
+    "topics": { "$ref": "#/$defs/claims" },
+    "artists": { "$ref": "#/$defs/claims" },
+    "locations": { "$ref": "#/$defs/claims" },
+    "callsToAction": { "$ref": "#/$defs/claims" },
+    "songs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "artist": { "type": "string" },
+          "quote": { "type": "string" },
+          "confidence": { "type": "number" }
+        },
+        "required": ["title", "quote", "confidence"]
+      }
+    },
+    "language": { "type": "string" },
+    "summary": { "type": "string" }
+  },
+  "required": ["hosts", "guests", "topics", "artists", "locations", "callsToAction", "songs", "language", "summary"],
+  "$defs": {
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "value": { "type": "string" },
+          "detail": { "type": "string" },
+          "quote": { "type": "string" },
+          "confidence": { "type": "number" }
+        },
+        "required": ["value", "quote", "confidence"]
+      }
+    }
+  }
+}
