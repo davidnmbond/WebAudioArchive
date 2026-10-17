@@ -26,7 +26,8 @@ sign in with Google and fetch only their own shows; the manager can see everythi
 - No reconciliation between the two instances (decision, see 3.10). They are independent.
 - No automatic deletion unless a retention period is set (see 3.12).
 - No live alerts. Detections are reported, not pushed (decision).
-- No song identification yet, but the data model reserves a place for it (see 3.9).
+- No song identification yet, but the data model reserves a place for it (see 3.9). Designed since (2026-10-17):
+  now-playing capture and fingerprint identification with PanoramicData.SoundPrint, not yet built.
 - No speaker diarisation. People are identified only as far as the transcript supports.
 
 ## 2. Observed facts about Burst (fetched 2026-10-15)
@@ -44,6 +45,15 @@ sign in with Google and fetch only their own shows; the manager can see everythi
 - Nothing is scheduled between 22:00 and 09:00. With the 24x7 requirement that audio is recorded anyway and
   appears as unassigned time (automation, silence or whatever the station plays).
 - Thursday 20:00 is "Backseat Aux", confirmed by Amy as hers and Raff's.
+- **Now playing (fetched 2026-10-17):** the listen page shows the current song. A script on the page fetches
+  `https://burst-now-playing.joshalexgay.workers.dev/now-playing` every 60 s, which answers JSON
+  `{"artist", "title", "artwork", "timestamp"}` (artwork is a Deezer cover URL; `Cache-Control: no-store`). The
+  `timestamp` is when that service last refreshed, not when the song began: it stayed fixed across three polls 20 s
+  apart. RadioJar's own API (`proxy.radiojar.com/api/stations/nkyraup3h3nwv/now_playing/`) answers with every field
+  empty for this station, and the stream sends no ICY titles. The feed keeps no history: what is not captured when it
+  is current is lost.
+- **A and B carry identical audio (measured 2026-10-17):** frame by frame, the two recorders' MP3 frames are
+  byte-identical, offset by a few frames where each cut the hour or resumed after a reconnect (issue #104).
 
 ## 3. Architecture
 
@@ -84,7 +94,8 @@ requirement to produce up to two overlapping show files from one stream.
 `config/stations.json`, validated against a JSON schema at start-up (fail loudly, naming the field):
 `id`, `name`, `listenUrl`, `scheduleUrl`, `timezone` (default `Europe/London`), `scheduleParser`
 (`burst` or `llm`), `marginBefore` and `marginAfter` (default 5 minutes each), `scheduleRefresh` (default
-15 minutes), `watershed` (default `21:00` local), `enabled`. The segment length is fixed at one UTC hour in plan 1 and is not configurable.
+15 minutes), `watershed` (default `21:00` local), `enabled`, and an optional `nowPlaying` object (3.9.1:
+`url`, `titleField`, `artistField`, `artworkField`, `pollSeconds`, or `"enabled": false`). The segment length is fixed at one UTC hour in plan 1 and is not configurable.
 Service-wide settings (data directory, endpoints and model names for whisper and Ollama, Google client id,
 bootstrap manager email, retention) are environment variables. Secrets are only ever environment variables or
 mounted files, never committed, because the repo is public.
@@ -133,6 +144,7 @@ mounted files, never committed, because the repo is public.
 - One connection per station, always on, because the requirement is 24x7.
 - Discovery from `listenUrl`: Revma/RadioJar widgets, `<audio>`/`<source>`, media URLs in the page, playlists
   (`.pls`, `.m3u`), one level of iframe. The resolved URL is cached and re-resolved after repeated failure.
+  The same pass looks for now-playing sources (3.9.1).
 - ICY metadata blocks, when present, are removed from the audio and each title is stored with its offset.
 - A dropped connection is retried with backoff (1 s doubling to 30 s). The gap is recorded with wall-clock
   start and end in the segment's metadata and in the instance's coverage figures. Audio during a gap is lost. A station may also replay a few seconds of buffered audio when a connection is re-established (Revma: audio at connect starts about 5 s before the arrival time), so reconnects can overlap slightly with what was already recorded.
@@ -279,10 +291,9 @@ same permission checks as every other audio request):
   the same access rules (presenters search only their shows). Search also covers the derived facts (3.7: names,
   artists, topics) and, when song identification exists, songs. Search is served from a SQLite FTS5 index built
   from the transcript JSON, so it can be rebuilt at any time and holds no data that is not in the show files.
-- **Songs:** "cases of a song being played" needs song identification, which is a non-goal for v1 (3.9). Until
-  then it can only find songs that are named in ICY titles (Burst sends none, as measured on 2026-10-15), said
-  aloud in the transcript, or recorded in the enricher output. Real song search depends on the 3.9 work and is
-  recorded as a decision for the manager (section 7).
+- **Songs:** "cases of a song being played" needs song identification (3.9). Until it is built, songs can be
+  found only in ICY titles (Burst sends none, as measured on 2026-10-15), in the now-playing log once 3.9.1 is
+  built (approximate times), in speech in the transcript, or in the enricher output.
 
 **Web app MVP (built 2026-10-15, deviates from this section on purpose):** a manager-only web container
 (`docker/Dockerfile.web`, service `web`) ahead of the full design. Deviations, all to be removed when 3.8 is built
@@ -296,13 +307,82 @@ show start and end, recording gaps and recorder restarts as markers, margins and
 file. Events, transcripts, search and a remembered position are not built (issue #11). It never mixes A and B in one
 clip (3.13's stitching from both is not built): it chooses one recorder and warns. Details in `docs/operations.md`.
 
-### 3.9 Songs (later, not built in v1)
+### 3.9 Songs (designed 2026-10-17, not built)
 
-Reserved so it can be added without redesign: ICY titles are already captured when the stream provides them;
-the `events` timeline accepts a `song` type with title, artist and a confidence and source. The intended later
-approach is audio fingerprinting against open music databases (Chromaprint with AcoustID and MusicBrainz) with
-the source and confidence recorded for each identification. It will be designed separately; matching
-fingerprints needs clean music segments, and speech over music will reduce accuracy.
+Two parts that work together: the station tells us roughly **what** is playing (3.9.1), and audio fingerprints
+tell us exactly **where** it plays, and recognise it again when nothing tells us (3.9.2). The `events` timeline's
+reserved `song` type (plan 3) carries the result. Issues: now-playing capture #105, identification #2, the
+SoundPrint package #3. The earlier idea of matching against open databases (Chromaprint with AcoustID and
+MusicBrainz) is dropped: SoundPrint matches against our own catalogue, which the now-playing feed fills.
+
+#### 3.9.1 Now-playing capture (both recorders)
+
+Station metadata cannot be fetched afterwards, so it is captured live, by both recorders, for the same reason
+both record audio: if one is down, the other still has it (owner decision, 2026-10-17).
+
+- **Sources**, tried in this order and all recorded with how they were found:
+  1. `nowPlaying.url` in `stations.json`, with dotted field paths for title, artist and artwork (defaults
+     `title`, `artist`, `artwork`).
+  2. Found on `listenUrl` in the same pass as the stream (3.4): URLs in the page's scripts whose path names
+     now playing (`now-playing`, `nowplaying`, `now_playing`, `currentsong`, `current-track`). A candidate is
+     accepted only when it answers JSON with a non-empty title field. Burst's worker is found this way.
+  3. Provider APIs for a known widget or server, accepted only when they answer a non-empty title: RadioJar
+     (`proxy.radiojar.com/api/stations/<streamName>/now_playing/`), Icecast (`/status-json.xsl` on the stream
+     host), Shoutcast (`/currentsong`).
+  4. ICY `StreamTitle`, already stored in segment sidecars (3.4) whenever the stream sends it.
+- **Polling:** every `pollSeconds` (default 30, minimum 10; Burst's own page polls every 60), plain User-Agent,
+  10 s timeout, backoff to 5 minutes on failure, rediscovery after an hour of failures. It runs on its own task with
+  its own HTTP client; nothing it does can block, slow or stop the recording, and its failures are caught and
+  reported, never thrown into the recorder.
+- **Storage:** `/data/<station>/nowplaying/<yyyy>/<MM-dd>.jsonl`, UTC days, append-only, beside the master (so
+  `data/a` and `data/b` each have a copy). One line per **change**, not per poll:
+  `{ "utc", "kind": "song" | "unavailable" | "available", "source", "sourceUrl", "howFound", "title", "artist",
+  "artworkUrl", "sourceTimestamp", "raw" }`, where `utc` is our receive time and `raw` the response body as
+  received (small; kept so a parser fix can re-read history). A song lasts until the next line. `unavailable`
+  marks the feed failing and `available` its return, so a stretch with no data is never mistaken for one song.
+  Artwork is stored as a URL only.
+- **Timing is approximate:** a change is seen up to one poll interval after the feed changes, and the feed lags
+  the audio by an unknown amount. Feed times are labelled approximate everywhere; 3.9.2 places the boundaries.
+- **Reporting:** `/healthz` gains per station `nowPlaying: { source, howFound, lastOkUtc, lastError, current }`;
+  Status shows it. The web app reads both recorders' files and merges them: the same title and artist from A and B
+  within two poll intervals is one change.
+- **Recorder change:** this adds to the recorder, which is deployed one recorder at a time as in 3.13.
+
+#### 3.9.2 Identification with PanoramicData.SoundPrint (after it is published, #3)
+
+SoundPrint (MIT, public, pure managed .NET 10, no native dependencies) is landmark fingerprinting in the style of
+Wang (2003). It takes decoded mono float PCM at any sample rate, stores landmarks against track ids we choose, and
+matches a window of audio, returning `TrackId`, `QueryStart` and `QueryEnd` on the query's own clock, the
+matching `TrackStart` and `TrackEnd` in the song, and a confidence. It holds no song metadata and calls no outside
+service. Its integration guide describes this use: label spans some other way, fingerprint them, and use matches
+for boundaries and for plays nobody announced.
+
+- **Decoding:** SoundPrint never touches MP3. It reads the analyser's existing scratch decode (3.6, 16 kHz mono),
+  so the archive path is unchanged and nothing is decoded twice.
+- **Catalogue (ours):** `Song { id, title, artist, artworkUrl, firstHeardUtc }`, keyed by normalised artist and
+  title, plus **enrolments** `{ songId, recorder, fromUtc, toUtc, source, parameterFingerprint }`. SoundPrint's
+  store (`PanoramicData.SoundPrint.Postgres`, a PostgreSQL container per instance) is a cache that can be rebuilt
+  from the enrolments and the archive, which is how a change of `FingerprintOptions` is handled.
+- **Enrolment from the feed:** for a feed song with no fingerprint yet, take its approximate span, trim one poll
+  interval plus a measured feed lag from each end, require at least 60 s, and fingerprint that core. Spans with
+  `unavailable` inside are skipped. A human label (#2) can enrol too, and replaces a wrong one
+  (`RemoveTrackAsync`, then add).
+- **Matching:** per closed segment, 12 s windows every 3 s (`RollingLandmarkWindow`), frame 0 set to the segment's
+  first audio UTC. Consecutive matches of one track whose `TrackStart` keeps advancing merge into one play; a window
+  holding two songs places the boundary between the first's `QueryEnd` and the second's `QueryStart` (benchmarks:
+  within about 0.1 to 0.2 s on a hard cut). One new fingerprinter per segment, so the frame counter never nears
+  its limit.
+- **Song events:** `type: song`, with title, artist, UTC start and end, and `source` (`feed`, `fingerprint`,
+  `human`) with confidence. Feed and fingerprint agreeing is the normal case. When they disagree, both are kept and
+  the play is flagged for review. Human edits outrank both and are never overwritten by re-analysis (#2).
+- **Unknown music:** a run of windows with no match between known songs, with music but no speech, is a candidate
+  for the review queue, and for enrolment once the feed or a person names it.
+- **Behind an interface:** the rest of the app sees a small song-matching interface. Tests use SoundPrint's
+  in-memory store and synthetic audio. No recordings or real fingerprints enter the repository.
+- **Package rule:** no project reference to the SoundPrint source. Wait for the published NuGet package and pin
+  its exact version (and EF Core and Npgsql exactly, through the Postgres package).
+- **A/B and consolidation:** enrolments and song events are UTC spans, not file offsets, so they survive the
+  merged archive of #104 unchanged.
 
 ### 3.10 Two instances, no reconciliation
 
@@ -448,7 +528,9 @@ All packages pinned to exact versions.
 | Public repo | Code only. No recordings, secrets or user data in git. |
 | Compliance requirement unknown | Retention is a setting with no default deletion; manager decides the period. |
 | Upgrading the single recorder container interrupts recording | v1 accepts a recorded gap of a few seconds per upgrade. Section 3.13 specifies the recorder/rest split and A/B recorders to remove it later. |
-| Song search wanted but identification is deferred | Playback and transcript search ship in plan 4; song search is limited to ICY titles, spoken mentions and enricher output until 3.9 is built. Manager to decide whether to bring 3.9 forward. |
+| Song search wanted but identification is deferred | Now-playing capture (3.9.1) is built first so the labels accumulate; fingerprint identification (3.9.2) follows the SoundPrint release. |
+| Now-playing feed is a third party's small service and may change or vanish | Every source and how it was found is logged; discovery runs again after an hour of failures; `unavailable` stretches are recorded; Status shows the feed's state. The audio is unaffected. |
+| Feed times lag the audio | Feed times are labelled approximate; enrolment trims the ends; fingerprint matches place the boundaries. |
 
 ## 8. Decisions recorded
 
@@ -469,3 +551,6 @@ All packages pinned to exact versions.
 - Google OAuth clients: not yet created. The operator will be guided through creating one per instance at
   implementation time; client id and secret come from environment variables only.
 - Song identification deferred; events timeline reserves for it.
+- Songs (2026-10-17): both recorders capture the station's now-playing data around the clock; identification
+  uses PanoramicData.SoundPrint from its published NuGet package, trained from the now-playing labels, against our
+  own catalogue (3.9). Design first; capture to be built next, identification once the package is published.
