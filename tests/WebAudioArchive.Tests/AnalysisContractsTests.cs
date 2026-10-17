@@ -48,6 +48,32 @@ public sealed class AnalysisContractsTests : IDisposable
     }
 
     [Fact]
+    public void Audio_a_stall_lost_before_a_gap_is_placed_at_the_gap_not_at_the_end_of_the_hour()
+    {
+        // Issue #106: 30 s gap at 1800 s, but 36 s less audio than wall time minus the gap, because the stream stalled
+        // before the connection dropped. The first connection's audio ends 36 s before the gap; the hour still ends at 3600.
+        var anchors = SegmentTimeline.Anchors(Meta(3600, 3534, new SegmentGap(T.AddSeconds(1800), T.AddSeconds(1830), 30, "connection error")));
+
+        Assert.Equal([new TimelineAnchor(0, T), new TimelineAnchor(1764, T.AddSeconds(1830))], anchors);
+        Assert.Equal(T.AddSeconds(1763), SegmentTimeline.ToUtc(anchors, 1763));
+        Assert.Equal(T.AddSeconds(1831), SegmentTimeline.ToUtc(anchors, 1765));
+        Assert.Equal(T.AddSeconds(3600), SegmentTimeline.ToUtc(anchors, 3534));
+        Assert.Equal(1764, SegmentTimeline.ToOffset(anchors, T.AddSeconds(1790)), 6); // inside the stall: where the audio jumps
+    }
+
+    [Fact]
+    public void A_shortfall_is_shared_between_the_gaps_and_never_takes_more_than_a_connection_holds()
+    {
+        // 40 s short with two gaps: 20 s before each, except the first connection is only 10 s long, so it loses 10 s and
+        // the second gap takes the other 30 s.
+        var anchors = SegmentTimeline.Anchors(Meta(3600, 3520,
+            new SegmentGap(T.AddSeconds(10), T.AddSeconds(30), 20, "x"), new SegmentGap(T.AddSeconds(2000), T.AddSeconds(2020), 20, "y")));
+
+        Assert.Equal([new TimelineAnchor(0, T), new TimelineAnchor(0, T.AddSeconds(30)), new TimelineAnchor(1940, T.AddSeconds(2020))], anchors);
+        Assert.Equal(T.AddSeconds(3600), SegmentTimeline.ToUtc(anchors, 3520));
+    }
+
+    [Fact]
     public void Gaps_outside_the_span_are_ignored_and_short_audio_has_no_burst()
     {
         var anchors = SegmentTimeline.Anchors(Meta(600, 590, new SegmentGap(T.AddSeconds(-30), T.AddSeconds(-20), 10, "before")));

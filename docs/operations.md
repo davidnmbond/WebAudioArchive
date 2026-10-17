@@ -188,8 +188,10 @@ How clips are made and how accurate they are:
   names the recorder of each piece, and the only gaps reported are what neither recorder has. If the other recorder
   adds nothing, the clip stays with one recorder but its restarts are still joined frame by frame. Choosing A or B
   explicitly never mixes recorders.
-- Position estimates come from the bitrate, so a stretch missing from both is placed only approximately: when a
-  stream stalls before it drops, the shortfall shows at the end of that segment's hour (issue #106).
+- Position estimates come from the bitrate, using one model shared with analysis (`SegmentTimeline` in Core). When a
+  stream stalls before it drops, a segment holds less audio than its wall time minus its recorded gaps; that
+  shortfall is placed just before the gaps, not at the end of the hour, and coverage does not count it as recorded
+  (issue #106). A stretch missing from both recorders is therefore placed to within about a second.
 - A gap or break inside the window is joined straight across (no silence is inserted); a warning gives its UTC times.
   A join after a segment that ended by `crash` or `shutdown` is also warned.
 - Wall time maps to a byte offset by the stream bitrate (128 kbps is 16000 bytes a second), allowing for the Revma start

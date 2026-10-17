@@ -1,3 +1,5 @@
+using WebAudioArchive.Core.Analysis;
+
 namespace WebAudioArchive.Web.Clips;
 
 public readonly record struct Interval(DateTimeOffset Start, DateTimeOffset End)
@@ -12,8 +14,11 @@ public sealed record CombinedCoverage(double CoveredSeconds, double WindowSecond
 }
 
 /// <summary>
-/// Coverage arithmetic: segment spans minus sidecar gaps, merged so overlaps are not counted twice. A span starts at the
-/// segment's first audio (its start minus the Revma burst), because that audio is really there.
+/// Coverage arithmetic: the UTC stretches each segment's audio holds, from the shared position model, merged so overlaps
+/// are not counted twice. One stretch per connection: the first starts at the segment's first audio (its start minus
+/// the connect burst); a later one starts no earlier than the end of the gap before it (how the burst divides between
+/// connections is only an estimate, so it is not counted as filling a gap); each ends where its audio ends, so audio a
+/// stall lost before a gap is not counted as recorded (issue #106).
 /// </summary>
 public static class WindowCoverage
 {
@@ -22,18 +27,17 @@ public static class WindowCoverage
         var spans = new List<Interval>();
         foreach (var s in segments)
         {
-            var cursor = Max(PositionModel.AudioStartUtc(s), from);
-            var end = Min(s.EndUtc, to);
-            foreach (var g in s.SpanGaps)
+            var pieces = SegmentTimeline.Pieces(s.Anchors, s.AudioSeconds);
+            for (var i = 0; i < pieces.Count; i++)
             {
-                if (g.StartUtc > cursor) spans.Add(new Interval(cursor, Min(g.StartUtc, end)));
-                cursor = Max(cursor, g.EndUtc);
+                var pieceFrom = i > 0 && i - 1 < s.SpanGaps.Count ? Max(pieces[i].From, s.SpanGaps[i - 1].EndUtc) : pieces[i].From;
+                var start = Max(pieceFrom, from);
+                var end = Min(Min(pieces[i].To, s.EndUtc), to);
+                if (end > start) spans.Add(new Interval(start, end));
             }
-
-            if (end > cursor) spans.Add(new Interval(cursor, end));
         }
 
-        return Merge(spans.Where(i => i.End > i.Start));
+        return Merge(spans);
     }
 
     public static double Seconds(IEnumerable<CatalogSegment> segments, DateTimeOffset from, DateTimeOffset to) =>

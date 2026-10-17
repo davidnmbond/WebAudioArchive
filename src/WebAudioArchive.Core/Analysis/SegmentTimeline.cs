@@ -6,40 +6,82 @@ namespace WebAudioArchive.Core.Analysis;
 public sealed record TimelineAnchor(double AudioOffset, DateTimeOffset Utc);
 
 /// <summary>
-/// Maps seconds into a segment's audio to UTC and back, with the same model as the web app's position model: a segment
-/// is one connection per stretch between its gaps; each connection starts with a short burst of audio from before its
-/// first arrival (Revma sends about 5 s at connect) and then runs in real time. The measured surplus
-/// (AudioSeconds minus the wall span less gaps) is shared equally between connections, so after a reconnect inside a
-/// segment a time can be a few seconds out; otherwise it is good to about a second.
+/// Maps seconds into a segment's audio to UTC and back. This is the one position model: the web app's clip positions
+/// (PositionModel) and analysis event times both use it. A segment is one connection per stretch between its gaps;
+/// each connection runs in real time.
+/// <list type="bullet">
+/// <item>More audio than wall time (AudioSeconds above the span less gaps): each connection started with a burst of
+/// audio from before its first arrival (Revma sends about 5 s at connect); the surplus is shared equally between
+/// connections, so after a reconnect inside a segment a time can be a few seconds out.</item>
+/// <item>Less audio than wall time, with gaps (issue #106): the stream stalled before a connection dropped, so the
+/// sidecar's gap starts after the audio really stopped. The shortfall is taken from the ends of the connections that
+/// end at a gap, shared equally and never more than a connection holds, so the hour still ends at its end. Measured on
+/// 2026-10-16: 36 s short, which this model used to put at the end of the hour.</item>
+/// <item>Less audio with no gap: nothing says where it went, so it stays at the end.</item>
+/// </list>
 /// </summary>
 public static class SegmentTimeline
 {
-    public static IReadOnlyList<TimelineAnchor> Anchors(SegmentMeta meta)
+    /// <summary>Surplus or shortfall smaller than this is frame rounding.</summary>
+    public const double RoundingSeconds = 0.05;
+
+    public static IReadOnlyList<TimelineAnchor> Anchors(SegmentMeta meta) => Anchors(meta.StartUtc, meta.EndUtc, meta.Gaps ?? [], meta.AudioSeconds);
+
+    public static IReadOnlyList<TimelineAnchor> Anchors(DateTimeOffset start, DateTimeOffset end, IEnumerable<SegmentGap> allGaps, double audioSeconds)
     {
-        var start = meta.StartUtc;
-        var end = meta.EndUtc < start ? start : meta.EndUtc;
-        var gaps = (meta.Gaps ?? [])
+        if (end < start) end = start;
+        var gaps = allGaps
             .Where(g => g.EndUtc > start && g.StartUtc < end)
             .OrderBy(g => g.StartUtc)
             .Select(g => (Start: g.StartUtc < start ? start : g.StartUtc, End: g.EndUtc > end ? end : g.EndUtc))
             .ToList();
-        var gapSeconds = gaps.Sum(g => (g.End - g.Start).TotalSeconds);
-        var burst = Math.Max(0, meta.AudioSeconds - ((end - start).TotalSeconds - gapSeconds));
-        var lead = burst / (gaps.Count + 1);
 
-        var anchors = new List<TimelineAnchor>(gaps.Count + 1);
-        double offset = 0;
+        var connections = new List<(DateTimeOffset Start, double Seconds)>(gaps.Count + 1);
         var connectionStart = start;
         for (var i = 0; i <= gaps.Count; i++)
         {
             var connectionEnd = i < gaps.Count ? gaps[i].Start : end;
             if (connectionEnd < connectionStart) connectionEnd = connectionStart;
-            anchors.Add(new TimelineAnchor(offset, connectionStart.AddSeconds(-lead)));
-            offset += (connectionEnd - connectionStart).TotalSeconds + lead;
+            connections.Add((connectionStart, (connectionEnd - connectionStart).TotalSeconds));
             if (i < gaps.Count && gaps[i].End > connectionStart) connectionStart = gaps[i].End;
         }
 
+        var surplus = audioSeconds - connections.Sum(c => c.Seconds);
+        // Audio comes in whole frames (26 ms at 44.1 kHz) and wall times do not, so a difference under a couple of
+        // frames is rounding, not a burst or a stall; ignoring it keeps the recorded gap times exact.
+        if (Math.Abs(surplus) < RoundingSeconds) surplus = 0;
+        var lead = surplus > 0 ? surplus / connections.Count : 0;
+        var cut = Shortfall(connections, gaps.Count, surplus < 0 ? -surplus : 0);
+
+        var anchors = new List<TimelineAnchor>(connections.Count);
+        double offset = 0;
+        for (var i = 0; i < connections.Count; i++)
+        {
+            anchors.Add(new TimelineAnchor(offset, connections[i].Start.AddSeconds(-lead)));
+            offset += connections[i].Seconds - cut[i] + lead;
+        }
+
         return anchors;
+    }
+
+    /// <summary>Seconds to take from the end of each connection that ends at a gap: equal shares, capped at its length.</summary>
+    static double[] Shortfall(List<(DateTimeOffset Start, double Seconds)> connections, int endingAtGap, double missing)
+    {
+        var cut = new double[connections.Count];
+        var open = Enumerable.Range(0, endingAtGap).ToList();
+        while (missing > 1e-9 && open.Count > 0)
+        {
+            var share = missing / open.Count;
+            foreach (var i in open.ToList())
+            {
+                var take = Math.Min(share, connections[i].Seconds - cut[i]);
+                cut[i] += take;
+                missing -= take;
+                if (connections[i].Seconds - cut[i] <= 1e-9) open.Remove(i);
+            }
+        }
+
+        return cut;
     }
 
     public static DateTimeOffset ToUtc(IReadOnlyList<TimelineAnchor> anchors, double audioOffset)

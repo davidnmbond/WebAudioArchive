@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
+using WebAudioArchive.Core.Analysis;
 using WebAudioArchive.Core.Mp3;
 using WebAudioArchive.Core.Recording;
 
@@ -38,6 +39,9 @@ public sealed record CatalogSegment(
         .ToList();
 
     public double GapSeconds => SpanGaps.Sum(g => (g.EndUtc - g.StartUtc).TotalSeconds);
+
+    /// <summary>Where each connection's audio starts, in seconds into the file and UTC (Core's shared position model, worked out once).</summary>
+    public IReadOnlyList<TimelineAnchor> Anchors { get; } = SegmentTimeline.Anchors(StartUtc, EndUtc, Gaps, AudioSeconds);
 
     /// <summary>
     /// Audio held beyond the wall span: max(0, AudioSeconds - (span - gaps)). With no gaps this is the Revma start
