@@ -304,8 +304,9 @@ scheduled show cuts; clip and audio URLs are unguessable hashes but are **not** 
 the **Shows** tab (`PDCalendar`, week, month and agenda, in UTC) over the minimal schedule of 3.2, with coverage per
 show; a show's page plays a clip made on request from the masters with the 5 minute margins (the show proper shaded,
 show start and end, recording gaps and recorder restarts as markers, margins and show as segments), not a cut show
-file. Events, transcripts, search and a remembered position are not built (issue #11). It never mixes A and B in one
-clip (3.13's stitching from both is not built): it chooses one recorder and warns. Details in `docs/operations.md`.
+file. Events, transcripts, search and a remembered position are not built (issue #11). With Auto, a clip that no
+single recorder runs unbroken through is joined from A and B by matching frames (3.13, issue #12, built 2026-10-17,
+using the `FrameMerge` shared with 3.14); a chosen recorder is never mixed. Details in `docs/operations.md`.
 
 ### 3.9 Songs (designed 2026-10-17, not built)
 
@@ -476,8 +477,10 @@ container.
 
 **Evidence (2026-10-16, Burst, read-only).** 13:00 UTC: A 137,866 frames, B 137,860; every overlapping frame
 byte-identical at offset 0; A cut the hour 6 frames (0.16 s) later. 14:00 UTC, which held an outage on both: before
-it B = A + 6 frames, after reconnecting B = A - 30, so B holds about 0.94 s that A lacks; every frame of each file
-matches the other at one of those two offsets. Sidecar wall times are only estimates (a mid-run hour holds about
+it B = A + 6 frames, after reconnecting B = A - 30, so A holds 36 frames (about 0.94 s) that B lacks (corrected
+2026-10-17; first written the other way round); every frame of each file matches the other at one of those two
+offsets. Both recorders' 14:00 files also hold about 36 s less audio than their wall span minus their recorded gaps:
+the stream stalled before the connection dropped, so sidecar gap times understate what was lost (issue #106). Sidecar wall times are only estimates (a mid-run hour holds about
 2.2 s more audio than its wall-clock span; a reconnect replays about 5 s).
 
 - **Process:** a `consolidator` container, the recorder image started with `--consolidate`, mounting `data/a`,

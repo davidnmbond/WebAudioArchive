@@ -92,11 +92,11 @@
             <PDTab Id="PiecesTab" Title="@($"Joined pieces ({Clip.Plan.Pieces.Count})")" IconCssClass="fas fa-puzzle-piece">
                 <div class="p-3 table-responsive">
                     <table class="table table-sm mb-0" id="clip-pieces">
-                        <thead><tr><th>Segment start (UTC)</th><th>From (UTC)</th><th>To (UTC)</th><th>Bytes</th><th>Open</th></tr></thead>
+                        <thead><tr><th>Recorder</th><th>Segment start (UTC)</th><th>From (UTC)</th><th>To (UTC)</th><th>Bytes</th><th>Open</th></tr></thead>
                         <tbody>
                             @foreach (var p in Clip.Plan.Pieces)
                             {
-                                <tr><td>@Utc(p.Segment.StartUtc)</td><td>@Utc(p.StartUtc)</td><td>@Utc(p.EndUtc)</td><td>@((p.EndByte - p.StartByte).ToString("N0", CultureInfo.InvariantCulture))</td><td>@(p.Segment.IsOpen ? "yes" : "no")</td></tr>
+                                <tr><td>@p.Segment.Recorder.ToUpperInvariant()</td><td>@Utc(p.Segment.StartUtc)</td><td>@Utc(p.StartUtc)</td><td>@Utc(p.EndUtc)</td><td>@((p.EndByte - p.StartByte).ToString("N0", CultureInfo.InvariantCulture))</td><td>@(p.Segment.IsOpen ? "yes" : "no")</td></tr>
                             }
                         </tbody>
                     </table>

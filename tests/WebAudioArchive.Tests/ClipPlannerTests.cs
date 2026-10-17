@@ -201,7 +201,7 @@ public sealed class ClipPlannerTests : IDisposable
     }
 
     [Fact]
-    public void When_both_recorders_have_gaps_the_clip_comes_from_one_and_says_they_are_not_mixed()
+    public void When_both_recorders_have_gaps_but_the_other_holds_nothing_new_the_clip_comes_from_one()
     {
         SegmentFiles.Closed(Root("a"), "burst", T0, 60, firstSeq: 0,
             gaps: [new SegmentGap(T0.AddSeconds(20), T0.AddSeconds(30), 10, "eof")]);
@@ -211,7 +211,9 @@ public sealed class ClipPlannerTests : IDisposable
         var plan = Plan(Window(T0.AddSeconds(10), T0.AddSeconds(50)), Catalog("a", "b"));
 
         Assert.Equal("b", plan.Recorder);
-        Assert.Contains(plan.Warnings, w => w.Contains("Neither recorder") && w.Contains("never mixed"));
+        // These synthetic frames run on across the gaps, so A's frames are all in B: joining adds nothing and the clip is B's alone.
+        Assert.All(plan.Pieces, p => Assert.Equal("b", p.Segment.Recorder));
+        Assert.DoesNotContain(plan.Warnings, w => w.Contains("joins recorders"));
     }
 
     [Fact]

@@ -20,6 +20,9 @@ public static class ClipEvents
 
     public static IReadOnlyList<ClipGap> Gaps(ClipPlan plan)
     {
+        // A joined clip knows exactly what neither recorder holds; one recorder's own gaps were filled by the other.
+        if (plan.StitchedGaps is not null) return plan.StitchedGaps;
+
         var from = plan.WindowFrom;
         var to = plan.WindowTo;
         var gaps = new List<ClipGap>();
@@ -46,7 +49,8 @@ public static class ClipEvents
         return gaps.OrderBy(g => g.StartUtc).ToList();
     }
 
-    public static IReadOnlyList<ClipRestart> Restarts(ClipPlan plan) =>
+    /// <summary>Restarts of the recorder used; none for a clip joined from two recorders, where the other runs across them.</summary>
+    public static IReadOnlyList<ClipRestart> Restarts(ClipPlan plan) => plan.Recorder == ClipPlan.Joined ? [] :
         plan.Pieces.Select(p => p.Segment).Distinct()
             .Where(s => s.EndedBy is not null and not "hour-boundary" && s.EndUtc > plan.WindowFrom && s.EndUtc < plan.WindowTo)
             .Select(s => new ClipRestart(s.EndUtc, s.EndedBy!))

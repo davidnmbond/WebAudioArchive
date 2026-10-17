@@ -23,15 +23,22 @@ public sealed record ClipPlan(
     IReadOnlyList<ClipPiece> Pieces,
     IReadOnlyList<string> Warnings,
     IReadOnlyList<string> Notes,
-    IReadOnlyDictionary<string, double> CoverageSeconds)
+    IReadOnlyDictionary<string, double> CoverageSeconds,
+    IReadOnlyList<ClipGap>? StitchedGaps = null)
 {
+    /// <summary>Recorder id of a clip joined from two recorders (issue #12).</summary>
+    public const string Joined = "a+b";
+
+    public bool IsStitched => StitchedGaps is not null;
+
     public DateTimeOffset StartUtc => Pieces[0].StartUtc;
     public DateTimeOffset EndUtc => Pieces[^1].EndUtc;
 }
 
 /// <summary>
-/// Chooses a recorder for a window and lists the byte ranges to join. Recorders are never mixed in one clip. A gap or a
-/// break is joined straight across (no silence inserted) and reported as a warning with its UTC times.
+/// Chooses a recorder for a window and lists the byte ranges to join. A gap or a break is joined straight across (no
+/// silence inserted) and reported as a warning with its UTC times. A chosen recorder is never mixed with another; with
+/// Auto, when neither recorder covers the window, the clip joins both at frames matched by their bytes (issue #12).
 /// </summary>
 public static class ClipPlanner
 {
@@ -70,13 +77,33 @@ public static class ClipPlanner
             throw new ClipException(404, NothingRecorded(request.Recorder, from, to, recorders));
 
         var label = chosen.Recorder.ToUpperInvariant();
+        var windowSeconds = (to - from).TotalSeconds;
+        var covered = coverage[chosen.Recorder];
+        string? nothingNew = null;
+        // A restart or a gap inside the window is joined by estimated time, so a few frames can repeat or go missing
+        // there; the other recorder, matched frame by frame, makes the join exact or fills it.
+        var breaks = pieces.Any(p => p.Segment.SpanGaps.Any(g => g.EndUtc > from && g.StartUtc < to))
+            || pieces.SkipLast(1).Any(p => p.Segment.EndedBy is not null and not "hour-boundary");
+        if (request.Recorder == "auto" && (covered < windowSeconds - BreakSeconds || breaks))
+        {
+            var other = candidates.Where(c => c.Recorder != chosen.Recorder && c.Segments.Count > 0).OrderByDescending(c => coverage[c.Recorder]).FirstOrDefault();
+            if (other.Recorder is not null)
+            {
+                var stitched = ClipStitcher.Stitch(chosen.Segments, other.Segments, from, to);
+                if (stitched is not null && stitched.SecondarySeconds > 0)
+                    return Stitched(request, from, to, chosen.Recorder, other.Recorder, stitched, coverage, notes);
+                if (stitched is not null && breaks)
+                    return Exact(request, from, to, chosen.Recorder, other.Recorder, chosen.Segments, stitched, coverage, notes);
+                if (covered < windowSeconds - BreakSeconds)
+                    nothingNew = $"Neither recorder covers the whole window, and recorder {other.Recorder.ToUpperInvariant()} holds nothing {label} lacks here, so the clip comes from {label}.";
+            }
+        }
+
         var all = recorders.First(r => r.Recorder == chosen.Recorder).Segments;
         WarnEdges(label, all, pieces, from, to, warnings);
         WarnJoins(label, pieces, warnings);
         WarnGaps(label, chosen.Segments, from, to, warnings);
 
-        var windowSeconds = (to - from).TotalSeconds;
-        var covered = coverage[chosen.Recorder];
         if (covered < windowSeconds - BreakSeconds)
             warnings.Add($"Recorder {label} covers {covered:0.0} of {windowSeconds:0.0} seconds ({covered / windowSeconds:0%}) of the window.");
 
@@ -86,15 +113,65 @@ public static class ClipPlanner
                 warnings.Add($"Recorder {other.ToUpperInvariant()} would have covered more of this window ({seconds:0.0} s against {covered:0.0} s).");
         }
 
-        if (recorders.Count > 1 && coverage.Values.All(c => c < windowSeconds - BreakSeconds))
-            warnings.Add("Neither recorder covers the whole window, and recorders are never mixed in one clip in this version.");
+        if (nothingNew is not null) warnings.Add(nothingNew);
 
+        AddCommonNotes(pieces, notes);
+        return new ClipPlan(chosen.Recorder, request.From, request.To, from, to, pieces, warnings, notes, coverage);
+    }
+
+    static ClipPlan Stitched(
+        ClipRequest request, DateTimeOffset from, DateTimeOffset to, string primary, string secondary, StitchedClip stitched,
+        Dictionary<string, double> coverage, List<string> notes)
+    {
+        var seconds = new Dictionary<string, double> { [primary] = stitched.PrimarySeconds, [secondary] = stitched.SecondarySeconds };
+        var parts = string.Join(", ", seconds.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Value:0.0} s from {kv.Key.ToUpperInvariant()}"));
+        var who = string.Join(" and ", seconds.Keys.Order(StringComparer.Ordinal).Select(k => k.ToUpperInvariant()));
+        var warnings = new List<string>
+        {
+            $"No single recorder runs unbroken through the window, so this clip joins recorders {who} at whole MP3 frames matched by their bytes " +
+            $"({parts}; {stitched.Switches} switches). Nothing is repeated.",
+        };
+
+        foreach (var g in stitched.Gaps)
+        {
+            warnings.Add(g.Reason == ClipStitcher.MissingReason
+                ? $"No audio in either recorder from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s): the clip jumps across it with no silence inserted."
+                : $"No audio in either recorder from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s), at the edge of the window.");
+        }
+
+        AddCommonNotes(stitched.Pieces, notes);
+        return new ClipPlan(ClipPlan.Joined, request.From, request.To, from, to, stitched.Pieces, warnings, notes, coverage, stitched.Gaps);
+    }
+
+    /// <summary>
+    /// One recorder alone, but with its restarts joined frame by frame: the other recorder held nothing new, and matching
+    /// against it showed exactly which replayed frames to drop.
+    /// </summary>
+    static ClipPlan Exact(
+        ClipRequest request, DateTimeOffset from, DateTimeOffset to, string recorder, string other, List<CatalogSegment> segments,
+        StitchedClip stitched, Dictionary<string, double> coverage, List<string> notes)
+    {
+        var label = recorder.ToUpperInvariant();
+        var warnings = new List<string>();
+        foreach (var s in segments.Where(s => s.EndedBy is not null and not "hour-boundary" && s.EndUtc > from && s.EndUtc < to))
+        {
+            warnings.Add($"Recorder {label} restarted at {Utc(s.EndUtc)} ({s.EndedBy}); the join was matched frame by frame against recorder " +
+                         $"{other.ToUpperInvariant()}, so no audio is repeated there.");
+        }
+
+        foreach (var g in stitched.Gaps)
+            warnings.Add($"No audio in either recorder from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s): the clip jumps across it with no silence inserted.");
+
+        AddCommonNotes(stitched.Pieces, notes);
+        return new ClipPlan(recorder, request.From, request.To, from, to, stitched.Pieces, warnings, notes, coverage, stitched.Gaps);
+    }
+
+    static void AddCommonNotes(IReadOnlyList<ClipPiece> pieces, List<string> notes)
+    {
         var open = pieces.Select(p => p.Segment).FirstOrDefault(s => s.IsOpen);
         if (open is not null)
             notes.Add($"Includes the segment being recorded now (started {Utc(open.StartUtc)}); any gaps in it are not known until it closes at the end of the hour.");
         notes.Add(AccuracyNote);
-
-        return new ClipPlan(chosen.Recorder, request.From, request.To, from, to, pieces, warnings, notes, coverage);
     }
 
     /// <summary>

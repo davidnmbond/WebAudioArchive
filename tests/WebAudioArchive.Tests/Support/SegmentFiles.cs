@@ -45,6 +45,30 @@ public static class SegmentFiles
         return new WrittenSegment(path, bytes, firstSeq, frames, start, end, gapSeconds);
     }
 
+    /// <summary>
+    /// A closed segment cut from one station stream shared by every recorder: frame n is the audio broadcast at
+    /// <paramref name="epoch"/> + n frames, so two recorders hold byte-identical frames for the same moment, as A and B
+    /// do. Frames whose time falls inside a gap are not in the file (the recorder lost them).
+    /// </summary>
+    public static WrittenSegment Live(
+        string root, string station, DateTimeOffset epoch, DateTimeOffset start, DateTimeOffset end,
+        IReadOnlyList<SegmentGap>? gaps = null, string endedBy = "hour-boundary", double replaySeconds = 0)
+    {
+        gaps ??= [];
+        var first = FramesFor((start - epoch).TotalSeconds - replaySeconds);
+        var last = FramesFor((end - epoch).TotalSeconds);
+        var seqs = Enumerable.Range(first, last - first)
+            .Where(n => !gaps.Any(g => epoch.AddSeconds(n * FrameSeconds) >= g.StartUtc && epoch.AddSeconds(n * FrameSeconds) < g.EndUtc))
+            .ToList();
+        var bytes = seqs.SelectMany(Mp3TestData.CbrFrame).ToArray();
+        var path = AudioPath(root, station, start, null);
+        File.WriteAllBytes(path, bytes);
+        SegmentMetaStore.Write(Path.ChangeExtension(path, ".json"), new SegmentMeta(
+            1, "test", station, Path.GetFileName(path), start, end, bytes.Length, seqs.Count, seqs.Count * FrameSeconds,
+            new SegmentFormat("MPEG-1 Layer III", 128, 44100, 2), null, [], gaps, endedBy));
+        return new WrittenSegment(path, bytes, first, seqs.Count, start, end, gaps.Sum(g => (g.EndUtc - g.StartUtc).TotalSeconds));
+    }
+
     /// <summary>An open segment (.mp3.part, no sidecar) whose last write time is <paramref name="lastWrite"/>.</summary>
     public static WrittenSegment Open(
         string root, string station, DateTimeOffset start, DateTimeOffset lastWrite, int firstSeq, double burstSeconds = 5, string? name = null)

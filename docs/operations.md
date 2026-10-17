@@ -180,8 +180,16 @@ API:
 
 How clips are made and how accurate they are:
 
-- Recorders are never mixed in one clip. Auto picks the recorder whose segments (minus gaps) cover most of the window;
-  ties go to A. A warning says when the other recorder would have covered more, or when neither covers it all.
+- Auto picks the recorder whose segments (minus gaps) cover most of the window; ties go to A. When that recorder does
+  not run unbroken through the window (it lacks part of it, or has a restart or gap inside it), the clip is joined from
+  A and B (issue #12): every frame in the window is listed from both recorders and matched by its bytes (A and B
+  receive identical frames), so the clip switches recorder exactly where one has audio the other lacks, never repeats
+  audio, and drops a reconnect's replayed frames precisely. The clip's recorder then shows as `A+B`, the Pieces tab
+  names the recorder of each piece, and the only gaps reported are what neither recorder has. If the other recorder
+  adds nothing, the clip stays with one recorder but its restarts are still joined frame by frame. Choosing A or B
+  explicitly never mixes recorders.
+- Position estimates come from the bitrate, so a stretch missing from both is placed only approximately: when a
+  stream stalls before it drops, the shortfall shows at the end of that segment's hour (issue #106).
 - A gap or break inside the window is joined straight across (no silence is inserted); a warning gives its UTC times.
   A join after a segment that ended by `crash` or `shutdown` is also warned.
 - Wall time maps to a byte offset by the stream bitrate (128 kbps is 16000 bytes a second), allowing for the Revma start
