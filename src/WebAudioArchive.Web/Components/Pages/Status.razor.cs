@@ -76,7 +76,7 @@ public sealed partial class Status
     static string Duration(double s) => DurationText.Humanize(s);
 
     string CombinedText => Combined is null ? "-" :
-        string.Create(CultureInfo.InvariantCulture, $"{Combined.Fraction:0.0%} ({Combined.CoveredSeconds / 3600:0.00} h, {Combined.Missing.Count} stretches missing)");
+        string.Create(CultureInfo.InvariantCulture, $"{Combined.Fraction:0.0%} ({Combined.CoveredSeconds / 3600:0.00} h, {Combined.Missing.Count} {(Combined.Missing.Count == 1 ? "stretch" : "stretches")} missing)");
 
     static string Seconds(double? s) => s is null ? "-" : s.Value.ToString("0.0", CultureInfo.InvariantCulture) + " s";
 
