@@ -147,14 +147,22 @@ public sealed class AnalysisRunner(
             }
         }
 
-        foreach (var old in _shows.Values.Where(s => s.StartUtc < now - TimeSpan.FromDays(14)).Select(s => s.ShowId).ToList()) _shows.Remove(old);
+        foreach (var old in _shows.Values.Where(s => s.StartUtc < now - TimeSpan.FromDays(14)).Select(s => s.ShowId).ToList())
+        {
+            _shows.Remove(old);
+            enricher?.Forget(old);
+        }
 
         if (enricher is not null)
         {
             var segmentWorkReady = ready && after.Any(p => p.Decision.Action is JobAction.Run or JobAction.Redetect);
             if (!segmentWorkReady)
             {
-                foreach (var show in _shows.Values.Where(enricher.IsDue).OrderByDescending(s => s.StartUtc).Take(MaxEnrichmentsPerPass).ToList())
+                var due = _shows.Values.Where(enricher.IsDue).OrderByDescending(s => s.StartUtc).Take(MaxEnrichmentsPerPass).ToList();
+                // The GPU is shared with Ollama: drop whisper's model first so the LLM can have the memory (the next readiness check, a
+                // minute later, loads it again, and Ollama unloads its own model straight after each request, keep_alive 0).
+                if (due.Count > 0) transcriber.ResetModel();
+                foreach (var show in due)
                 {
                     ct.ThrowIfCancellationRequested();
                     metrics.SetCurrent("enrich:" + show.ShowId, clock.UtcNow);
@@ -184,11 +192,17 @@ public sealed class AnalysisRunner(
         metrics.PassCompleted(clock.UtcNow);
     }
 
+    /// <summary>How many segments the last <see cref="RebuildAll"/> marked for re-transcription (only with retranscribe on).</summary>
+    public int MarkedForRetranscription { get; private set; }
+
     /// <summary>--rebuild: events.json of every finished segment from its transcript and features, then the day files and shows. No whisper, no audio decode.</summary>
-    public int RebuildAll()
+    public int RebuildAll(bool retranscribe = false)
     {
         var jobs = WorkPlanner.Plan(discovery.Scan(), preference, since);
-        var rebuilt = jobs.Count(j => Guarded(j, "rebuild", pipeline.RebuildEvents));
+        // --retranscribe: segments made by another model are marked for the service to transcribe again (nothing is rebuilt for those).
+        var marked = retranscribe ? jobs.Where(j => Guarded(j, "mark for re-transcription", pipeline.MarkForRetranscription)).ToList() : [];
+        MarkedForRetranscription = marked.Count;
+        var rebuilt = jobs.Except(marked).Count(j => Guarded(j, "rebuild", pipeline.RebuildEvents));
         if (jobs.Count > 0)
         {
             var pending = Pending(Decide());
@@ -242,7 +256,8 @@ public sealed class AnalysisRunner(
     {
         var pending = Pending(decided);
         metrics.SetBacklog(pending.Count, pending.Count == 0 ? null : pending.Min(p => p.ToUtc),
-            decided.Count(p => p.Decision.Action == JobAction.Skip && p.Decision.Reason.StartsWith("failed", StringComparison.Ordinal)));
+            decided.Count(p => p.Decision.Action == JobAction.Skip && p.Decision.Reason.StartsWith("failed", StringComparison.Ordinal)),
+            decided.Where(p => p.Decision.Action is JobAction.Run or JobAction.Wait).Sum(p => p.Job.Source.Meta.AudioSeconds));
         return pending;
     }
 

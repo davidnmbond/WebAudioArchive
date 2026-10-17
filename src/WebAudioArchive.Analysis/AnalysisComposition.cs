@@ -49,10 +49,10 @@ public static class AnalysisComposition
         var disk = new DiskGuard(s.OutputDir, s.MinFreeBytes);
         var schedule = new ScheduleProvider(s.ScheduleFile, s.StationsConfigPath, s.Station, log);
         var watershed = Watershed.From(c.Config.Swearing, schedule.Zone);
-        var pipeline = new SegmentPipeline(paths, c, scratch, decoder, transcriber, disk, watershed, schedule.TitleAt, clock, log);
+        var pipeline = new SegmentPipeline(paths, c, scratch, decoder, transcriber, disk, watershed, schedule.TitleAt, clock, log, s.Retranscribe);
         var shows = new ShowProcessor(paths, schedule, s.Preference, ShowMargin, clock, log);
         var enricher = s.EnrichmentEnabled
-            ? new Enricher(paths, new OllamaClient(OllamaClient.CreateHttpClient(s.OllamaTimeout), s.OllamaUrl),
+            ? new Enricher(paths, new OllamaClient(OllamaClient.CreateHttpClient(s.OllamaTimeout), s.OllamaUrl, s.OllamaKeepAlive),
                 EnrichmentPrompt.Load(c.ConfigDir, c.Config.Enrichment), c.Config.Enrichment, s.OllamaModel, s.Preference, clock, log)
             : null;
         var metrics = new AnalysisMetrics(clock.UtcNow);

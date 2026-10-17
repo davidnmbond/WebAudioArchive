@@ -307,4 +307,83 @@ public sealed class ShowAnalysisTests : IDisposable
         Assert.Equal(1, doc.Counts.DeadAirEvents);
         Assert.Equal(60, doc.Counts.DeadAirSeconds, 3);
     }
+
+    static AnalysisEvent Swear(DateTimeOffset at, string tier, string severityTier, bool before) => Event(EventTypes.Swear, at, tier: tier, before: before) with
+    {
+        Id = $"swear-{at.ToUnixTimeSeconds()}-{tier}-{severityTier}",
+        Evidence = new Dictionary<string, string>
+        {
+            ["tier"] = tier, ["severityTier"] = severityTier, ["beforeWatershed"] = before ? "true" : "false", ["suppressed"] = "no",
+        },
+    };
+
+    [Fact]
+    public void Tiers_are_counted_by_the_severity_tier_so_a_masked_word_counts_at_its_lower_tier()
+    {
+        var occurrence = new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance).Occurrences(Show, Show.AddMinutes(1))[0];
+        AnalysisEvent[] events =
+        [
+            Swear(Show.AddMinutes(10), tier: "severe", severityTier: "strong", before: false),
+            Swear(Show.AddMinutes(11), tier: "strong", severityTier: "mild", before: false),
+            Swear(Show.AddMinutes(12), tier: "mild", severityTier: "mild", before: false),
+        ];
+
+        var doc = ShowAnalysisBuilder.Build(occurrence, TimeSpan.FromMinutes(5), events, [], [], complete: true, _clock.UtcNow);
+
+        Assert.Equal(2, doc.Counts.SwearsMild);
+        Assert.Equal(1, doc.Counts.SwearsStrong);
+        Assert.Equal(0, doc.Counts.SwearsSevere);
+    }
+
+    [Fact]
+    public void Each_tier_is_split_before_and_after_the_watershed_and_suppressed_runs_stay_out()
+    {
+        var occurrence = new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance).Occurrences(Show, Show.AddMinutes(1))[0];
+        AnalysisEvent Suppressed(DateTimeOffset at) => Swear(at, "severe", "severe", before: true) with
+        {
+            Id = "sup-" + at.ToUnixTimeSeconds(),
+            Evidence = new Dictionary<string, string> { ["tier"] = "severe", ["severityTier"] = "severe", ["beforeWatershed"] = "true", ["suppressed"] = "repetition" },
+        };
+        AnalysisEvent[] events =
+        [
+            Swear(Show.AddMinutes(1), "mild", "mild", before: true),
+            Swear(Show.AddMinutes(2), "mild", "mild", before: false),
+            Swear(Show.AddMinutes(3), "mild", "mild", before: false),
+            Swear(Show.AddMinutes(4), "strong", "strong", before: true),
+            Swear(Show.AddMinutes(5), "strong", "strong", before: true),
+            Swear(Show.AddMinutes(6), "severe", "severe", before: false),
+            Swear(Show.AddMinutes(7), "strong", "mild", before: true),
+            Suppressed(Show.AddMinutes(8)),
+        ];
+
+        var c = ShowAnalysisBuilder.Build(occurrence, TimeSpan.FromMinutes(5), events, [], [], complete: true, _clock.UtcNow).Counts;
+
+        Assert.Equal((2, 2, 2, 0, 0, 1), (c.SwearsMildBeforeWatershed, c.SwearsMildAfterWatershed, c.SwearsStrongBeforeWatershed, c.SwearsStrongAfterWatershed, c.SwearsSevereBeforeWatershed, c.SwearsSevereAfterWatershed));
+        Assert.Equal(c.SwearsBeforeWatershed, c.SwearsMildBeforeWatershed + c.SwearsStrongBeforeWatershed + c.SwearsSevereBeforeWatershed);
+        Assert.Equal(1, c.SuppressedSwearRuns);
+    }
+
+    [Fact]
+    public void The_worst_clipping_peak_is_the_highest_peak_of_clipping_inside_the_show()
+    {
+        var occurrence = new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance).Occurrences(Show, Show.AddMinutes(1))[0];
+        AnalysisEvent Clip(DateTimeOffset at, string peak) => Event(EventTypes.Clipping, at, seconds: 0.1) with
+        {
+            Id = "clip-" + at.ToUnixTimeSeconds(),
+            Evidence = new Dictionary<string, string> { ["peak"] = peak },
+        };
+
+        var two = ShowAnalysisBuilder.Build(occurrence, TimeSpan.FromMinutes(5),
+            [Clip(Show.AddMinutes(5), "0.995"), Clip(Show.AddMinutes(9), "1.000"), Clip(Show.AddMinutes(-30), "1.000")], [], [], complete: true, _clock.UtcNow);
+        Assert.Equal(2, two.Counts.ClippingEvents);
+        Assert.Equal(1.0, two.Counts.WorstClippingPeak!.Value, 3);
+
+        var one = ShowAnalysisBuilder.Build(occurrence, TimeSpan.FromMinutes(5), [Clip(Show.AddMinutes(5), "0.995")], [], [], complete: true, _clock.UtcNow);
+        Assert.Equal(0.995, one.Counts.WorstClippingPeak!.Value, 3);
+
+        var none = ShowAnalysisBuilder.Build(occurrence, TimeSpan.FromMinutes(5), [], [], [], complete: true, _clock.UtcNow);
+        Assert.Null(none.Counts.WorstClippingPeak);
+        Assert.Equal(ShowAnalysis.CurrentSchema, none.Schema);
+        Assert.True(ShowAnalysis.CurrentSchema >= 2, "the new count fields are a schema change");
+    }
 }

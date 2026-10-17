@@ -29,15 +29,18 @@ public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device
 
     public string Device => RuntimeOptions.LoadedLibrary is { } lib ? lib.ToString().ToLowerInvariant() : "not loaded";
 
-    /// <summary>The Whisper.net package version, the model name and the model file's size (or "missing"): the same before and after the model loads and on the GPU or the CPU.</summary>
-    public string Identity
-    {
-        get
-        {
-            var file = new FileInfo(modelPath);
-            return $"whisper.net {LibraryVersion}|{Model}|{(file.Exists ? file.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) : "missing")}";
-        }
-    }
+    /// <summary>
+    /// The Whisper.net package major version ("whisper.net 1"), the only engine part of the job version: the same before and
+    /// after the model loads, on the GPU or the CPU, and whichever model file is in use (a model switch never re-transcribes by
+    /// itself; see <see cref="ModelIdentity"/>).
+    /// </summary>
+    public string Identity => "whisper.net " + LibraryVersion.Split('.', '-')[0];
+
+    /// <summary>The model file's size in bytes, or null when the file is missing.</summary>
+    public long? ModelBytes => File.Exists(modelPath) ? new FileInfo(modelPath).Length : null;
+
+    /// <summary>The model name and file size, or "missing": recorded with each job, compared only when re-transcription is asked for.</summary>
+    public string ModelIdentity => $"{Model}|{(ModelBytes is { } bytes ? bytes.ToString(System.Globalization.CultureInfo.InvariantCulture) : "missing")}";
 
     static readonly string[] TransientMarkers = ["out of memory", "cudamalloc", "cuda error", "cublas", "failed to allocate", "ggml_cuda", "alloc_buffer"];
 
@@ -109,12 +112,43 @@ public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device
             .WithNoContext();
         if (request.Prompt.Length > 0) builder = builder.WithPrompt(request.Prompt).WithCarryInitialPrompt(true);
 
+        return await RunAsync(builder.Build, p => Project(p.ProcessAsync(new MemoryStream(request.Wav, writable: false), ct)), ResetModel, ct);
+    }
+
+    static async IAsyncEnumerable<RawSegment> Project(IAsyncEnumerable<SegmentData> segments)
+    {
+        await foreach (var s in segments) yield return WhisperResponse.FromSegment(s);
+    }
+
+    /// <summary>
+    /// Builds a processor and runs it. Whisper.net makes a new processor, with its own GPU state, for every chunk; another program
+    /// (Ollama) holding the GPU makes that allocation fail, and that is not the segment's fault. So any failure to build the
+    /// processor (before any audio is fed) is transient (the job waits and retries without using an attempt), and after a
+    /// transient failure <paramref name="resetModel"/> drops the loaded model so it is rebuilt clean. A failure while processing is
+    /// classified by <see cref="Classify"/>. Generic over the processor so tests can fake it.
+    /// </summary>
+    public static async Task<IReadOnlyList<RawSegment>> RunAsync<TProcessor>(
+        Func<TProcessor> build, Func<TProcessor, IAsyncEnumerable<RawSegment>> process, Action resetModel, CancellationToken ct)
+        where TProcessor : IAsyncDisposable
+    {
+        TProcessor processor;
+        try
+        {
+            processor = build();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            resetModel();
+            throw new TransientTranscriptionException($"whisper could not set up to transcribe (the GPU may be in use by another program): {ex.GetType().Name}: {ex.Message}", ex);
+        }
+
         var segments = new List<RawSegment>();
         try
         {
-            await using var processor = builder.Build();
-            await foreach (var s in processor.ProcessAsync(new MemoryStream(request.Wav, writable: false), ct))
-                segments.Add(WhisperResponse.FromSegment(s));
+            await using (processor)
+            {
+                await foreach (var s in process(processor)) segments.Add(s);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -122,7 +156,9 @@ public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device
         }
         catch (Exception ex)
         {
-            throw Classify(ex);
+            var classified = Classify(ex);
+            if (ReloadsModelAfter(classified)) resetModel();
+            throw classified;
         }
 
         return segments;

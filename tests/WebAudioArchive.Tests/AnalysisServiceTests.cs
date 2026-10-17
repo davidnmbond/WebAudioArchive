@@ -56,18 +56,18 @@ public sealed partial class AnalysisServiceTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    (AnalysisRunner Runner, AnalysisMetrics Metrics) Runner(ITranscriber? transcriber = null)
+    (AnalysisRunner Runner, AnalysisMetrics Metrics) Runner(ITranscriber? transcriber = null, bool retranscribe = false, Func<string, TranscriptDocument?>? readTranscript = null, string? configPath = null)
     {
         var whisper = transcriber ?? _whisper;
-        var config = AnalysisConfigLoader.Load(ConfigPath);
+        var config = AnalysisConfigLoader.Load(configPath ?? ConfigPath);
         var scratch = new ScratchSpace(Path.Combine(_root, "scratch"), 512L * 1024 * 1024);
         var disk = new DiskGuard(Paths.Root, 1L << 30, _ => _diskBroken ? throw new IOException("disk gone") : _free);
         var schedule = new ScheduleProvider(Path.Combine(_root, "schedule.json"), null, "burst", NullLogger.Instance);
         var pipeline = new SegmentPipeline(Paths, config, scratch, new SegmentDecoder(), whisper, disk,
-            Watershed.From(config.Config.Swearing, schedule.Zone), schedule.TitleAt, _clock, NullLogger.Instance);
+            Watershed.From(config.Config.Swearing, schedule.Zone), schedule.TitleAt, _clock, NullLogger.Instance, retranscribe);
         var shows = new ShowProcessor(Paths, schedule, ["a"], AnalysisComposition.ShowMargin, _clock, NullLogger.Instance);
         var enricher = new Enricher(Paths, _llm, EnrichmentPrompt.Load(config.ConfigDir, config.Config.Enrichment), config.Config.Enrichment,
-            "qwen3.6:latest", ["a"], _clock, NullLogger.Instance);
+            "qwen3.6:latest", ["a"], _clock, NullLogger.Instance, readTranscript);
         var metrics = new AnalysisMetrics(_clock.UtcNow);
         var runner = new AnalysisRunner(new SegmentDiscovery([new RecorderRoot("a", A)], "burst", NullLogger.Instance), pipeline, shows, enricher,
             whisper, disk, scratch, metrics, ["a"], null, _clock, NullLogger.Instance);

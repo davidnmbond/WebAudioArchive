@@ -146,7 +146,7 @@ public class TranscriptionTests
     }
 
     [Fact]
-    public async Task The_identity_is_the_package_version_model_and_size_and_does_not_change_when_the_model_fails_to_load()
+    public async Task The_identity_is_the_package_major_and_the_model_identity_does_not_change_when_the_model_fails_to_load()
     {
         var dir = Directory.CreateTempSubdirectory("waa-model-").FullName;
         try
@@ -160,13 +160,15 @@ public class TranscriptionTests
             Assert.False(await t.IsReadyAsync(CancellationToken.None));
 
             Assert.Equal(before, t.Identity);
-            Assert.StartsWith("whisper.net 1.9.1|ggml-test|1000", before);
+            Assert.Equal("whisper.net 1", before);
+            Assert.Equal("ggml-test|1000", t.ModelIdentity);
             Assert.DoesNotContain("cuda", before, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("cpu", before, StringComparison.OrdinalIgnoreCase);
             Assert.StartsWith("whisper.net 1.9.1", engineBefore);
 
             await File.WriteAllBytesAsync(model, new byte[2000]);
-            Assert.NotEqual(before, t.Identity);
+            Assert.Equal(before, t.Identity);
+            Assert.Equal("ggml-test|2000", t.ModelIdentity);
         }
         finally
         {

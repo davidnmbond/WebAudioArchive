@@ -23,11 +23,37 @@ public static class AnalysisJson
         try
         {
             File.WriteAllText(tmp, JsonSerializer.Serialize(value, Options));
-            File.Move(tmp, full, overwrite: true);
+            MoveOver(tmp, full);
         }
         finally
         {
             if (File.Exists(tmp)) File.Delete(tmp);
+        }
+    }
+
+    /// <summary>The waits between the tries of a replace that a reader is blocking (the web app reads these files over a Windows bind mount).</summary>
+    public static readonly IReadOnlyList<TimeSpan> ReplaceRetryDelays = [TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(200)];
+
+    /// <summary>
+    /// Replaces <paramref name="target"/> with <paramref name="temp"/>. A reader holding the target open can make the replace fail on
+    /// Windows (a bind mount), so it is tried again after 50, 100 and 200 ms before the error is allowed through.
+    /// <paramref name="move"/> and <paramref name="sleep"/> are test seams.
+    /// </summary>
+    public static void MoveOver(string temp, string target, Action<string, string>? move = null, Action<TimeSpan>? sleep = null)
+    {
+        move ??= static (from, to) => File.Move(from, to, overwrite: true);
+        sleep ??= Thread.Sleep;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                move(temp, target);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < ReplaceRetryDelays.Count)
+            {
+                sleep(ReplaceRetryDelays[attempt]);
+            }
         }
     }
 

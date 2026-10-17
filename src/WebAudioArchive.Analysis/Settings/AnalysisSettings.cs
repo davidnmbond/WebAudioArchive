@@ -48,11 +48,20 @@ public sealed partial record AnalysisSettings(
     /// <summary>How long one Ollama request may take (WAA_OLLAMA_TIMEOUT_MINUTES, 10 to 240, default 20): an enrichment of a long show takes minutes.</summary>
     public TimeSpan OllamaTimeout { get; init; } = TimeSpan.FromMinutes(20);
 
+    /// <summary>WAA_RETRANSCRIBE (true or false, default false): transcribe again every segment whose transcript was made with a different model (name or file size). Off, a model switch never touches the archive; the transcript options and the Whisper.net package major version always do.</summary>
+    public bool Retranscribe { get; init; }
+
+    /// <summary>WAA_OLLAMA_KEEP_ALIVE (default "0"): how long Ollama keeps the model in memory after a request; 0 frees the GPU straight away for whisper. A number of seconds, -1 for always, or a duration such as 30s, 5m, 1h30m.</summary>
+    public string OllamaKeepAlive { get; init; } = OllamaClient.DefaultKeepAlive;
+
     /// <summary>How long one job may run before /healthz calls the worker stalled: 3 hours, or the Ollama timeout plus 5 minutes if that is longer (one enrichment request can legitimately take the whole timeout).</summary>
     public TimeSpan JobStallAfter => TimeSpan.FromTicks(Math.Max(AnalysisHealth.JobStallAfter.Ticks, (OllamaTimeout + TimeSpan.FromMinutes(5)).Ticks));
 
     /// <summary>The model label recorded in transcripts: the model file name without its extension.</summary>
     public string WhisperModel => Path.GetFileNameWithoutExtension(WhisperModelPath);
+
+    [GeneratedRegex(@"^(-1|\d+|(\d+(\.\d+)?(ms|s|m|h))+)$")]
+    private static partial Regex KeepAlivePattern();
 
     [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]
     private static partial Regex IdPattern();
@@ -166,7 +175,21 @@ public sealed partial record AnalysisSettings(
             since,
             TimeSpan.FromHours(Number("WAA_LAG_ALARM_HOURS", 6, 0.1, 24 * 365)),
             (int)Number("WAA_PORT", 8080, 1, 65535));
-        return settings with { OllamaTimeout = TimeSpan.FromMinutes(Number("WAA_OLLAMA_TIMEOUT_MINUTES", 20, OllamaClient.MinTimeout.TotalMinutes, 240)) };
+        var retranscribe = Text("WAA_RETRANSCRIBE", "false").ToLowerInvariant() switch
+        {
+            "true" => true,
+            "false" => false,
+            var v => throw new AnalysisSettingsException($"WAA_RETRANSCRIBE: '{v}' must be true or false."),
+        };
+        var keepAlive = Text("WAA_OLLAMA_KEEP_ALIVE", OllamaClient.DefaultKeepAlive);
+        if (!KeepAlivePattern().IsMatch(keepAlive))
+            throw new AnalysisSettingsException($"WAA_OLLAMA_KEEP_ALIVE: '{keepAlive}' must be 0, -1, a number of seconds, or a duration such as 30s, 5m or 1h30m.");
+        return settings with
+        {
+            OllamaTimeout = TimeSpan.FromMinutes(Number("WAA_OLLAMA_TIMEOUT_MINUTES", 20, OllamaClient.MinTimeout.TotalMinutes, 240)),
+            Retranscribe = retranscribe,
+            OllamaKeepAlive = keepAlive,
+        };
     }
 
     static Uri HttpUrl(string name, string value) =>

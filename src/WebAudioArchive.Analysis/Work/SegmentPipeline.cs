@@ -37,13 +37,14 @@ public sealed class SegmentPipeline(
     Watershed watershed,
     Func<DateTimeOffset, string?> showTitleAt,
     IClock clock,
-    ILogger log)
+    ILogger log,
+    bool retranscribe = false)
 {
-    /// <summary>What decides whether a stored transcript is current: the engine package version, the model and its file size, and the transcript options. The device (cuda or cpu) is recorded in the transcript but is not part of this.</summary>
+    /// <summary>What decides whether a stored transcript is current: the Whisper.net package major version and the transcript options. Not the model, its size or the device (cuda or cpu): they are recorded in the transcript and the state, and a different model re-transcribes only when asked (WAA_RETRANSCRIBE or --rebuild --retranscribe).</summary>
     public string TranscriptVersion => $"{transcriber.Identity}|{config.Config.Transcription.TranscriptKey()}";
 
     public JobDecision Decide(SegmentJob job) =>
-        JobRules.Decide(JobStore.Read(paths.SegmentDir(job.Source.JobId)), job.Source.Fingerprint, TranscriptVersion, config.DetectorVersion, clock.UtcNow);
+        JobRules.Decide(JobStore.Read(paths.SegmentDir(job.Source.JobId)), job.Source.Fingerprint, TranscriptVersion, config.DetectorVersion, clock.UtcNow, transcriber.ModelIdentity, retranscribe);
 
     /// <summary>Rebuilds a finished job's events.json (and its transcript's suppression flags) from the stored transcript and features: no whisper, no audio.</summary>
     public bool RebuildEvents(SegmentJob job)
@@ -52,6 +53,23 @@ public sealed class SegmentPipeline(
         var state = JobStore.Read(dir);
         if (state is null || state.Status != JobStatus.Done) return false;
         return Redetect(job.Source, dir, state, new JobDecision(JobAction.Redetect, "rebuild")).Status == JobStatus.Done;
+    }
+
+    /// <summary>The version a finished job is given by --rebuild --retranscribe so the service sees "transcriber changed" and runs it again; never equal to a real version.</summary>
+    public const string RetranscribeRequested = "retranscribe-requested";
+
+    /// <summary>
+    /// --rebuild --retranscribe: a finished job made by a different model than the current one (or by one that was never recorded)
+    /// is marked so the service transcribes it again; its old results stay until the new ones replace them. False when nothing was marked.
+    /// </summary>
+    public bool MarkForRetranscription(SegmentJob job)
+    {
+        var dir = paths.SegmentDir(job.Source.JobId);
+        var state = JobStore.Read(dir);
+        if (state is null || state.Status != JobStatus.Done || state.ModelIdentity == transcriber.ModelIdentity) return false;
+        JobStore.Write(dir, state with { TranscriptVersion = RetranscribeRequested, UpdatedUtc = clock.UtcNow });
+        log.LogInformation("Marked {Job} for re-transcription (made by {Was}, now {Now})", job.Source.JobId, state.ModelIdentity ?? "an unrecorded model", transcriber.ModelIdentity);
+        return true;
     }
 
     /// <summary>--unpark: puts a failed or parked job back in the queue with a fresh attempt count (for example after five forced stops). False when there is nothing to un-park.</summary>
@@ -78,7 +96,7 @@ public sealed class SegmentPipeline(
         var s = job.Source;
         var dir = paths.SegmentDir(s.JobId);
         var state = JobStore.Read(dir);
-        var decision = JobRules.Decide(state, s.Fingerprint, TranscriptVersion, config.DetectorVersion, clock.UtcNow);
+        var decision = JobRules.Decide(state, s.Fingerprint, TranscriptVersion, config.DetectorVersion, clock.UtcNow, transcriber.ModelIdentity, retranscribe);
         if (decision.Parkable)
             return Park(s, dir, state!, decision.Reason);
         if (decision.Action is JobAction.Skip or JobAction.Wait)
@@ -95,7 +113,7 @@ public sealed class SegmentPipeline(
         var attempts = previousAttempts + 1; // counted now, so a process that is killed again and again reaches MaxAttempts
         var current = new JobState(JobState.CurrentSchema, s.JobId, s.Fingerprint, TranscriptVersion, config.DetectorVersion, JobStatus.Running,
             attempts, null, null, partial?.Chunks.Select(c => c.Index).Order().ToList() ?? [], partial?.ChunkCount ?? 0, clock.UtcNow,
-            s.Meta.AudioSeconds, partial?.TranscribeSeconds ?? 0, 0);
+            s.Meta.AudioSeconds, partial?.TranscribeSeconds ?? 0, 0) { ModelIdentity = transcriber.ModelIdentity };
         JobStore.Write(dir, current);
         log.LogInformation("Analysing {Job} ({Reason})", s.JobId, decision.Reason);
 
@@ -143,7 +161,7 @@ public sealed class SegmentPipeline(
 
             var transcript = TranscriptAssembler.Build(s, paths.Station, anchors, partial.Chunks.OrderBy(c => c.Index).SelectMany(c => c.Segments),
                 o, transcriber.Engine, transcriber.Model, TranscriptVersion, decoded.Decoder, clock.UtcNow, partial.TranscribeSeconds,
-                new DecodeStats(decoded.Frames, decoded.SilencedFrames, decoded.RecoveredFrames));
+                new DecodeStats(decoded.Frames, decoded.SilencedFrames, decoded.RecoveredFrames)) with { ModelBytes = transcriber.ModelBytes, Device = transcriber.Device };
             AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.TranscriptFile), transcript);
             AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.EventsFile), DetectorRunner.Run(transcript, decoded.Features, config, watershed, clock.UtcNow));
 
@@ -212,7 +230,14 @@ public sealed class SegmentPipeline(
             return new JobOutcome(s.JobId, JobAction.Redetect, "none", "results missing, the job runs again", 0, 0, 0);
         }
 
-        var refiltered = TranscriptAssembler.Refilter(transcript, config.Config.Transcription);
+        // The timeline is worked out again from the current sidecar, never reused from the transcript, so a fix to the position model re-places every event on a rebuild or redetect.
+        var refiltered = TranscriptAssembler.Refilter(transcript, config.Config.Transcription) with
+        {
+            Timeline = SegmentTimeline.Anchors(s.Meta),
+            SegmentStartUtc = s.Meta.StartUtc,
+            SegmentEndUtc = s.Meta.EndUtc,
+            AudioSeconds = s.Meta.AudioSeconds,
+        };
         AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.TranscriptFile), refiltered);
         AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.EventsFile), DetectorRunner.Run(refiltered, features, config, watershed, clock.UtcNow));
         JobStore.Write(dir, state with { DetectorVersion = config.DetectorVersion, UpdatedUtc = clock.UtcNow });

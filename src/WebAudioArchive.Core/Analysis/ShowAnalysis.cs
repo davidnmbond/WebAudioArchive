@@ -22,7 +22,24 @@ public sealed record ShowCounts(
     double SpeechMinutes,
     double? FillersPerMinute,
     double AnalysedSeconds,
-    int SuppressedSwearRuns);
+    int SuppressedSwearRuns)
+{
+    /// <summary>The highest clipping peak (0 to 1) of any clipping event overlapping the show; null when there was none.</summary>
+    public double? WorstClippingPeak { get; init; }
+
+    /// <summary>The tier counts split at the watershed (spec 3.6): before and after, by severity tier. Suppressed runs are excluded; each before total adds up to <see cref="SwearsBeforeWatershed"/>.</summary>
+    public int SwearsMildBeforeWatershed { get; init; }
+
+    public int SwearsMildAfterWatershed { get; init; }
+
+    public int SwearsStrongBeforeWatershed { get; init; }
+
+    public int SwearsStrongAfterWatershed { get; init; }
+
+    public int SwearsSevereBeforeWatershed { get; init; }
+
+    public int SwearsSevereAfterWatershed { get; init; }
+}
 
 /// <summary>show-analysis.json: one scheduled show mapped onto the analysed segments. Rebuilt whenever its segments change.</summary>
 public sealed record ShowAnalysis(
@@ -40,5 +57,6 @@ public sealed record ShowAnalysis(
     ShowCounts Counts,
     IReadOnlyList<string> Notes)
 {
-    public const int CurrentSchema = 1;
+    /// <summary>2 adds the worst clipping peak and the per-tier before and after watershed counts to the counts (older files read with those at zero or null).</summary>
+    public const int CurrentSchema = 2;
 }

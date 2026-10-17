@@ -16,7 +16,8 @@ public static partial class RepoFiles
         }
     }
 
-    public static string Read(string relative) => File.ReadAllText(Path.Combine(Root, relative));
+    /// <summary>The file as text with line endings normalised to LF, so checks pass whether git checked it out with CRLF (Windows) or LF.</summary>
+    public static string Read(string relative) => File.ReadAllText(Path.Combine(Root, relative)).Replace("\r", "");
 
     /// <summary>Each service under "services:" and its block of lines (to the next service or top-level key).</summary>
     public static Dictionary<string, string> ComposeServices(string relative)

@@ -6,11 +6,18 @@ namespace WebAudioArchive.Analysis.Enrichment;
 /// <summary>
 /// Ollama's HTTP API (0.40): /api/tags for the digest, /api/show for capabilities, /api/chat with a JSON schema in
 /// "format", stream off, a fixed seed and low temperature, "think": false for thinking models (the reasoning text is
-/// not wanted and costs minutes), and keep_alive 10 minutes so a run of shows does not reload the model each time.
+/// not wanted and costs minutes), and keep_alive 0 by default (WAA_OLLAMA_KEEP_ALIVE): the model is unloaded straight after each request, so
+/// the GPU it shares with whisper (about 9 GB for the default model) is free again for the next transcription.
 /// </summary>
-public sealed class OllamaClient(HttpClient http, Uri baseUrl) : ILlmClient
+public sealed class OllamaClient(HttpClient http, Uri baseUrl, string keepAlive = OllamaClient.DefaultKeepAlive) : ILlmClient
 {
     public const int MaxReplyBytes = 4 * 1024 * 1024;
+
+    /// <summary>Unload at once: the GPU is shared with whisper, which needs its memory back for every chunk.</summary>
+    public const string DefaultKeepAlive = "0";
+
+    /// <summary>Ollama reads a string as a duration with a unit ("5m") and a bare number as seconds; "0" is a valid duration, so only other bare integers are sent as numbers.</summary>
+    object KeepAliveValue => keepAlive != "0" && int.TryParse(keepAlive, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var seconds) ? seconds : keepAlive;
 
     /// <summary>The shortest request timeout allowed: an enrichment of a long show takes minutes, and the HttpClient default is 100 s.</summary>
     public static readonly TimeSpan MinTimeout = TimeSpan.FromMinutes(10);
@@ -101,7 +108,7 @@ public sealed class OllamaClient(HttpClient http, Uri baseUrl) : ILlmClient
             ["model"] = r.Model,
             ["stream"] = false,
             ["format"] = r.Schema,
-            ["keep_alive"] = "10m",
+            ["keep_alive"] = KeepAliveValue,
             ["options"] = new Dictionary<string, object> { ["temperature"] = r.Temperature, ["seed"] = r.Seed, ["num_ctx"] = r.NumCtx, ["num_predict"] = r.NumPredict },
             ["messages"] = new object[] { new { role = "system", content = r.System }, new { role = "user", content = r.User } },
         };

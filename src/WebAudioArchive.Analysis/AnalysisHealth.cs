@@ -23,8 +23,14 @@ public static class AnalysisHealth
         var stalled = now - lastSign > (m.CurrentJob is null ? StallAfter : jobStallAfter ?? JobStallAfter);
         // Passes that keep failing (the folder cannot be listed, the disk check throws) never refresh LastPassUtc, whatever else shows activity.
         var failing = m.CurrentJob is null && m.LastPassError is not null && now - (m.LastPassUtc ?? m.StartedUtc) > StallAfter;
-        var lagging = lag > lagAlarm;
-        var status = stalled ? "stalled" : failing ? "failing" : lagging ? "lagging" : m.Paused is not null ? "paused" : "ok";
+        var overAlarm = lag > lagAlarm;
+        // Progress is a segment job finished within the stall window (inclusive). Over the alarm while jobs finish is the backlog being worked off
+        // (the first catch-up runs newest first, so lag stays high for days); over the alarm with no progress is a real problem.
+        var progressing = m.LastJobDoneUtc is { } done && now - done <= (jobStallAfter ?? JobStallAfter);
+        var lagging = overAlarm && !progressing;
+        var catchingUp = overAlarm && progressing && m.Paused is null;
+        var status = stalled ? "stalled" : failing ? "failing" : lagging ? "lagging" : catchingUp ? "catching-up" : m.Paused is not null ? "paused" : "ok";
+        var backlogHours = m.BacklogAudioSeconds / 3600;
         var classes = (m.Classes ?? new Dictionary<string, SegmentClassStatus>())
             .OrderBy(c => c.Key, StringComparer.Ordinal)
             .ToDictionary(c => c.Key, c => (object)new
@@ -43,6 +49,9 @@ public static class AnalysisHealth
             lagAlarmSeconds = Math.Round(lagAlarm.TotalSeconds),
             queueSegments = m.Backlog,
             backlogSegments = m.Backlog,
+            backlogAudioHours = Math.Round(backlogHours, 2),
+            // Transcription seconds per audio second (the average realtime factor) times the audio still to do; unknown until a job has finished.
+            catchUpEtaHours = m.AverageRealtimeFactor is { } rtf ? (double?)Math.Round(backlogHours * rtf, 2) : null,
             failedSegments = m.FailedSegments,
             oldestPendingEndUtc = m.OldestPendingEndUtc,
             currentJob = m.CurrentJob,

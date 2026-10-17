@@ -117,7 +117,10 @@ if ((args.Contains("--rebuild") || args.Contains("--unpark")) && ServiceLock.Run
 
 if (args.Contains("--rebuild"))
 {
-    Console.WriteLine($"rebuilt events for {runtime.Runner.RebuildAll()} segments");
+    var retranscribe = args.Contains("--retranscribe");
+    var rebuilt = runtime.Runner.RebuildAll(retranscribe);
+    Console.WriteLine($"rebuilt events for {rebuilt} segments");
+    if (retranscribe) Console.WriteLine($"marked {runtime.Runner.MarkedForRetranscription} segments made by another model for re-transcription; the service does them on its next start");
     return 0;
 }
 

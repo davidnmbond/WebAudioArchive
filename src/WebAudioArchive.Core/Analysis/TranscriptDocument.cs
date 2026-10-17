@@ -48,6 +48,11 @@ public sealed record TranscriptDocument(
 
     public int? RecoveredFrames { get; init; }
 
+    /// <summary>The model file size in bytes and the device it ran on ("cuda" or "cpu"), for information only: neither decides whether this transcript is current.</summary>
+    public long? ModelBytes { get; init; }
+
+    public string? Device { get; init; }
+
     /// <summary>Quality flags for readers, for example "silenced-frames" when more than the allowed fraction of frames could not be decoded. Null when there are none.</summary>
     public IReadOnlyList<string>? Flags { get; init; }
 

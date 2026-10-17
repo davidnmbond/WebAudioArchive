@@ -110,8 +110,8 @@ public sealed partial class AnalysisServiceTests
         await first.PassAsync(CancellationToken.None);
         Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
 
-        // A restart with the model missing: every finished segment looks new to the planner (the model identity changed).
-        _whisper.Model = "missing-model";
+        // A restart with the model missing: every finished segment looks new to the planner (the Whisper.net package major changed; a model switch alone would not do it).
+        _whisper.Identity = "fake-next-major";
         _whisper.Ready = false;
         var (second, metrics) = Runner();
         _clock.Advance(TimeSpan.FromMinutes(1));
@@ -119,7 +119,7 @@ public sealed partial class AnalysisServiceTests
         Assert.Equal(1, metrics.Snapshot().Backlog);
         Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
 
-        _whisper.Model = "fake-model";
+        _whisper.Identity = "fake";
         _whisper.Ready = true;
         _clock.Advance(TimeSpan.FromMinutes(1));
         await second.PassAsync(CancellationToken.None);
@@ -222,6 +222,9 @@ public sealed partial class AnalysisServiceTests
         var now = DateTimeOffset.UtcNow;
         var first = new ServiceLock(dir);
         Assert.True(first.TryAcquire(now, out _));
+        // This process cannot tell itself from a second holder (its own pid is "ours"), so the lock is made to look like another instance's.
+        var lockFile = Path.Combine(dir, ServiceLock.FileName);
+        File.WriteAllText(lockFile, File.ReadAllText(lockFile).Replace(Environment.MachineName, "another-container"));
 
         Assert.Contains("Stop the service first", ServiceLock.RunningMessage(dir, now));
         var second = new ServiceLock(dir);
@@ -253,7 +256,7 @@ public sealed partial class AnalysisServiceTests
         File.WriteAllText(file, "not json");
         Assert.Null(ServiceLock.RunningMessage(dir, now));
 
-        File.WriteAllText(file, $$"""{ "pid": {{Environment.ProcessId}}, "startedUtc": "2026-01-01T00:00:00Z" }""");
+        File.WriteAllText(file, $$"""{ "pid": {{Environment.ProcessId}}, "host": "another-container", "startedUtc": "2026-01-01T00:00:00Z" }""");
         Assert.NotNull(ServiceLock.RunningMessage(dir, now));
         Assert.True(new ServiceLock(dir).TryAcquire(now.AddMinutes(30), out _));
     }
@@ -270,7 +273,7 @@ public sealed partial class AnalysisServiceTests
         Assert.False(File.Exists(Path.Combine(_root, "host-out", ServiceLock.FileName)));
 
         Directory.CreateDirectory(Path.Combine(_root, "host-out"));
-        File.WriteAllText(Path.Combine(_root, "host-out", ServiceLock.FileName), $$"""{ "pid": {{Environment.ProcessId}}, "startedUtc": "2026-01-01T00:00:00Z" }""");
+        File.WriteAllText(Path.Combine(_root, "host-out", ServiceLock.FileName), $$"""{ "pid": {{Environment.ProcessId}}, "host": "another-container", "startedUtc": "2026-01-01T00:00:00Z" }""");
         using var second = Host();
         Assert.ThrowsAny<Exception>(() => second.CreateClient());
     }

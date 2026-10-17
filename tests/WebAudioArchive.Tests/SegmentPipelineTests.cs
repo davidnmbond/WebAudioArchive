@@ -395,7 +395,7 @@ public sealed class SegmentPipelineTests : IAsyncLifetime
     }
 
     [Fact]
-    public void Transcript_version_ignores_the_device_and_tracks_the_model_and_options()
+    public void Transcript_version_ignores_the_device_and_the_model_and_tracks_the_package_major_and_options()
     {
         var version = Pipeline().TranscriptVersion;
 
@@ -409,6 +409,9 @@ public sealed class SegmentPipelineTests : IAsyncLifetime
         var filtered = _config with { Config = _config.Config with { Transcription = _config.Config.Transcription with { MaxRepeats = 9 } } };
         Assert.Equal(version, Pipeline(config: filtered).TranscriptVersion);
         _whisper.Model = "other-model";
+        _whisper.ModelBytes = 12345;
+        Assert.Equal(version, Pipeline().TranscriptVersion);
+        _whisper.Identity = "fake-next-major";
         Assert.NotEqual(version, Pipeline().TranscriptVersion);
     }
 

@@ -11,7 +11,8 @@ public sealed record SegmentClassStatus(int Done, int Failed, DateTimeOffset? La
 /// <summary>
 /// What /healthz reports. OldestPendingEndUtc is the end of the oldest closed segment not yet analysed: lag is now
 /// minus that. Backlog is the queue length. LastActivityUtc is the last sign of life inside a long pass (a job, show update or enrichment started or
-/// finished); while CurrentJob is set it is when that job started. A failed pass is not a sign of life.
+/// finished); while CurrentJob is set it is when that job started. A failed pass is not a sign of life. BacklogAudioSeconds is the audio
+/// still to transcribe (queued and waiting jobs); LastJobDoneUtc is when a segment job last finished (an enrichment does not count): the progress mark.
 /// </summary>
 public sealed record MetricsSnapshot(
     DateTimeOffset StartedUtc,
@@ -38,7 +39,9 @@ public sealed record MetricsSnapshot(
     DateTimeOffset? LastActivityUtc = null,
     long ScratchMaxBytes = 0,
     long MinFreeBytes = 0,
-    string? LastPassError = null);
+    string? LastPassError = null,
+    double BacklogAudioSeconds = 0,
+    DateTimeOffset? LastJobDoneUtc = null);
 
 public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
 {
@@ -68,8 +71,8 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
     public void SetCurrent(string? job, DateTimeOffset now) =>
         Set(s => s with { CurrentJob = job, LastActivityUtc = now });
 
-    public void SetBacklog(int backlog, DateTimeOffset? oldestPendingEnd, int failed) =>
-        Set(s => s with { Backlog = backlog, OldestPendingEndUtc = oldestPendingEnd, FailedSegments = failed });
+    public void SetBacklog(int backlog, DateTimeOffset? oldestPendingEnd, int failed, double backlogAudioSeconds = 0) =>
+        Set(s => s with { Backlog = backlog, OldestPendingEndUtc = oldestPendingEnd, FailedSegments = failed, BacklogAudioSeconds = backlogAudioSeconds });
 
     public void SetEnrichment(int pending, int done, int failed) =>
         Set(s => s with { EnrichmentPending = pending, EnrichmentDone = done, EnrichmentFailed = failed });
@@ -102,7 +105,7 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
             }
 
             if (o.Status != JobStatus.Done) return;
-            _s = _s with { JobsDone = _s.JobsDone + 1, LastSuccessUtc = now };
+            _s = _s with { JobsDone = _s.JobsDone + 1, LastSuccessUtc = now, LastJobDoneUtc = now };
             _s = With(_s, segmentClass, c => c with { Done = c.Done + 1, LastSuccessUtc = now });
             if (o.RealtimeFactor is not { } rtf) return;
             _done.Enqueue((now, o.AudioSeconds));

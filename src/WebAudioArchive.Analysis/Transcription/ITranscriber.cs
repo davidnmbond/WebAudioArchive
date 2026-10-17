@@ -27,12 +27,25 @@ public interface ITranscriber
     string Engine { get; }
 
     /// <summary>
-    /// What decides whether a stored transcript is current: the engine package version, the model and the model file size.
-    /// Never the device or load state, so a GPU to CPU fallback does not re-transcribe the archive.
+    /// What decides, with the transcript options, whether a stored transcript is current: the Whisper.net package major version
+    /// ("whisper.net 1"). Never the model, its size, the device or the load state, so switching the model (for example to the CPU
+    /// base.en) or a GPU to CPU fallback does not re-transcribe the archive. <see cref="ModelIdentity"/> is recorded with each job
+    /// and compared only when re-transcription is asked for (WAA_RETRANSCRIBE, or --rebuild --retranscribe).
     /// </summary>
     string Identity { get; }
 
     string Model { get; }
+
+    /// <summary>The model file's size in bytes, or null when unknown or the file is missing. Information only.</summary>
+    long? ModelBytes => null;
+
+    /// <summary>The model name and file size ("ggml-base.en|147951465"): recorded with each finished job, compared only when re-transcription is asked for.</summary>
+    string ModelIdentity => $"{Model}|{(ModelBytes is { } bytes ? bytes.ToString(System.Globalization.CultureInfo.InvariantCulture) : "unknown")}";
+
+    /// <summary>Drops the loaded model so its memory (the GPU's) is free for another program; the next readiness check or chunk loads it again. Safe when nothing is loaded.</summary>
+    void ResetModel()
+    {
+    }
 
     /// <summary>Where the model runs, for /healthz: "cuda", "cpu", "not loaded" or "unknown". For information only; never part of the job version.</summary>
     string Device => "unknown";

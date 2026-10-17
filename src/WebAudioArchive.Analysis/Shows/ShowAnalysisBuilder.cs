@@ -14,7 +14,11 @@ public static class ShowAnalysisBuilder
         // Suppressed runs are review-only (probable hallucination): kept out of every count and score, only tallied.
         static bool IsSuppressed(AnalysisEvent e) => e.Evidence?.GetValueOrDefault("suppressed") is { } s && s != "no";
         var swears = allSwears.Where(e => !IsSuppressed(e)).ToList();
-        int Tier(string tier) => swears.Count(e => e.Evidence?.GetValueOrDefault("tier") == tier);
+        // Severity follows severityTier (a masked word is counted at its lower tier); events from before that field existed fall back to tier.
+        static string? SeverityTierOf(AnalysisEvent e) => e.Evidence?.GetValueOrDefault("severityTier") ?? e.Evidence?.GetValueOrDefault("tier");
+        static bool Before(AnalysisEvent e) => e.Evidence?.GetValueOrDefault("beforeWatershed") == "true";
+        int Tier(string tier) => swears.Count(e => SeverityTierOf(e) == tier);
+        int TierSplit(string tier, bool before) => swears.Count(e => SeverityTierOf(e) == tier && Before(e) == before);
         // Clipping and dead air have a duration: they count when they overlap the show proper, and only the part inside it is measured.
         var clipping = events.Where(e => e.Type == EventTypes.Clipping && Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc) > 0).ToList();
         var deadAir = events.Where(e => e.Type == EventTypes.DeadAir && Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc) > 0).ToList();
@@ -31,11 +35,20 @@ public static class ShowAnalysisBuilder
 
         var counts = new ShowCounts(
             Tier(SwearTiers.Mild), Tier(SwearTiers.Strong), Tier(SwearTiers.Severe),
-            swears.Count(e => e.Evidence?.GetValueOrDefault("beforeWatershed") == "true"),
+            swears.Count(Before),
             clipping.Count, Math.Round(clipping.Sum(e => Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc) * 1000), 3),
             deadAir.Count, Math.Round(deadAir.Sum(e => Overlap(e.StartUtc, e.EndUtc, show.StartUtc, show.EndUtc)), 3),
             fillers, Math.Round(speechMinutes, 6), speechMinutes >= 1 ? Math.Round(fillers / speechMinutes, 6) : null,
-            Math.Round(analysed, 3), allSwears.Count(IsSuppressed));
+            Math.Round(analysed, 3), allSwears.Count(IsSuppressed))
+        {
+            WorstClippingPeak = clipping.Select(e => double.TryParse(e.Evidence?.GetValueOrDefault("peak"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var p) ? p : (double?)null).Max(),
+            SwearsMildBeforeWatershed = TierSplit(SwearTiers.Mild, true),
+            SwearsMildAfterWatershed = TierSplit(SwearTiers.Mild, false),
+            SwearsStrongBeforeWatershed = TierSplit(SwearTiers.Strong, true),
+            SwearsStrongAfterWatershed = TierSplit(SwearTiers.Strong, false),
+            SwearsSevereBeforeWatershed = TierSplit(SwearTiers.Severe, true),
+            SwearsSevereAfterWatershed = TierSplit(SwearTiers.Severe, false),
+        };
 
         return new ShowAnalysis(ShowAnalysis.CurrentSchema, show.Id, show.Station, show.Title, show.StartUtc, show.EndUtc,
             show.StartUtc - margin, show.EndUtc + margin, now, complete, sources, counts, notes);

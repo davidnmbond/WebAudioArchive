@@ -98,7 +98,7 @@ public sealed class AnalysisConfigException(IReadOnlyList<string> errors)
 public static partial class AnalysisConfigLoader
 {
     /// <summary>Bump when detector code changes what it reports, so stored events are rebuilt from transcripts and features.</summary>
-    public const string DetectorCodeVersion = "1";
+    public const string DetectorCodeVersion = "2";
 
     internal static readonly JsonSerializerOptions Options = new()
     {

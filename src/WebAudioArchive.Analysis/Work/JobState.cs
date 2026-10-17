@@ -32,6 +32,9 @@ public sealed record JobState(
     double WallSeconds)
 {
     public const int CurrentSchema = 1;
+
+    /// <summary>The model name and file size that made the transcript ("ggml-base.en|147951465"), for information and for re-transcription on request; null in jobs written before it was recorded.</summary>
+    public string? ModelIdentity { get; init; }
 }
 
 public enum JobAction
@@ -52,11 +55,18 @@ public static class JobRules
     /// <summary>How long to wait when whisper is unreachable; not counted as an attempt.</summary>
     public static readonly TimeSpan UnavailableRetry = TimeSpan.FromMinutes(5);
 
-    public static JobDecision Decide(JobState? state, string fingerprint, string transcriptVersion, string detectorVersion, DateTimeOffset now)
+    /// <summary>
+    /// <paramref name="modelIdentity"/> and <paramref name="retranscribe"/> matter only for a finished job: with re-transcription asked for,
+    /// a job made by a different model (or one that never recorded its model) runs again, once, because the new run records the model it used.
+    /// </summary>
+    public static JobDecision Decide(JobState? state, string fingerprint, string transcriptVersion, string detectorVersion, DateTimeOffset now,
+        string? modelIdentity = null, bool retranscribe = false)
     {
         if (state is null) return new(JobAction.Run, "new");
         if (state.Fingerprint != fingerprint) return new(JobAction.Run, "the segment changed");
         if (state.TranscriptVersion != transcriptVersion) return new(JobAction.Run, "the transcriber or its options changed");
+        if (retranscribe && modelIdentity is not null && state.Status == JobStatus.Done && state.ModelIdentity != modelIdentity)
+            return new(JobAction.Run, "the model changed and re-transcription was asked for");
         if (state.Status == JobStatus.Done)
             return state.DetectorVersion == detectorVersion ? new(JobAction.Skip, "done") : new(JobAction.Redetect, "the detectors changed");
         if (state.Attempts >= MaxAttempts)

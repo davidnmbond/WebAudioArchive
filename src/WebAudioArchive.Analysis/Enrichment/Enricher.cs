@@ -14,19 +14,23 @@ namespace WebAudioArchive.Analysis.Enrichment;
 /// the model changes.
 /// </summary>
 public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentPrompt prompt, EnrichmentOptions options, string model,
-    IReadOnlyList<string> preference, IClock clock, ILogger log)
+    IReadOnlyList<string> preference, IClock clock, ILogger log, Func<string, TranscriptDocument?>? readTranscript = null)
 {
     public const int MaxInvalidAttempts = 3;
+
+    readonly Func<string, TranscriptDocument?> _readTranscript = readTranscript ?? (path => AnalysisJson.TryRead<TranscriptDocument>(path, out _));
+
+    /// <summary>What was last worked out for each show (its transcript fingerprint and line count), valid while the show's transcript files keep the same write times and sizes: the 60 s pass must not re-read hours of transcript for every finished show.</summary>
+    readonly Dictionary<string, (string Key, string Fingerprint, int LineCount)> _summaries = new(StringComparer.Ordinal);
 
     public bool IsDue(ShowAnalysis show)
     {
         // Only finished shows with analysed speech: a scheduled show with no recording has nothing to enrich.
         if (!show.Complete || show.Sources.Count == 0) return false;
-        var lines = Lines(show);
-        if (lines.Count == 0) return false;
+        var (fingerprint, lineCount) = Summary(show);
+        if (lineCount == 0) return false;
         var existing = Read(show);
         if (existing is null) return true;
-        var fingerprint = Fingerprint(lines);
         var current = existing.Derived is { } d && d.TranscriptFingerprint == fingerprint && d.PromptVersion == prompt.Version && d.Model == model;
         if (existing.Status == EnrichmentStatus.Done) return !current;
         // Pending or failed for other input (transcript, prompt or model changed): try again now with a fresh attempt count.
@@ -95,6 +99,38 @@ public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentProm
         return result;
     }
 
+    /// <summary>Forgets what was worked out for a show (it has aged out of the shows in memory).</summary>
+    public void Forget(string showId) => _summaries.Remove(showId);
+
+    /// <summary>
+    /// The transcript fingerprint and line count of a show's window. Worked out by reading its transcripts only when one of them (or the
+    /// window, or the sources) has changed since last time, judged by file write time and length; otherwise the last answer is returned.
+    /// </summary>
+    (string Fingerprint, int LineCount) Summary(ShowAnalysis show)
+    {
+        var key = StatKey(show);
+        if (_summaries.TryGetValue(show.ShowId, out var cached) && cached.Key == key) return (cached.Fingerprint, cached.LineCount);
+        var lines = Lines(show);
+        var fingerprint = Fingerprint(lines);
+        _summaries[show.ShowId] = (key, fingerprint, lines.Count);
+        return (fingerprint, lines.Count);
+    }
+
+    string StatKey(ShowAnalysis show)
+    {
+        var sb = new StringBuilder();
+        sb.Append(show.WindowFromUtc.UtcTicks).Append('-').Append(show.WindowToUtc.UtcTicks).Append('|').Append(string.Join(',', preference));
+        foreach (var job in show.Sources.Select(s => s.JobId).Distinct(StringComparer.Ordinal))
+        {
+            var info = new FileInfo(Path.Combine(paths.SegmentDir(job), AnalysisPaths.TranscriptFile));
+            sb.Append('|').Append(job).Append(':');
+            if (info.Exists) sb.Append(info.LastWriteTimeUtc.Ticks).Append(':').Append(info.Length);
+            else sb.Append("none");
+        }
+
+        return sb.ToString();
+    }
+
     /// <summary>The stored enrichment status of a show, or null when it has none yet.</summary>
     public string? StatusOf(ShowAnalysis show) => Read(show)?.Status;
 
@@ -107,7 +143,7 @@ public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentProm
         var docs = show.Sources
             .Select(s => s.JobId)
             .Distinct(StringComparer.Ordinal)
-            .Select(job => AnalysisJson.TryRead<TranscriptDocument>(Path.Combine(paths.SegmentDir(job), AnalysisPaths.TranscriptFile), out _))
+            .Select(job => _readTranscript(Path.Combine(paths.SegmentDir(job), AnalysisPaths.TranscriptFile)))
             .OfType<TranscriptDocument>()
             .ToList();
         return TranscriptSlicer.Slice(docs, show.WindowFromUtc, show.WindowToUtc, preference);
