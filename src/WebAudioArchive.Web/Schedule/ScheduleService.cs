@@ -177,7 +177,7 @@ public sealed class ScheduleService(ScheduleSource source, WebSettings settings,
         try
         {
             if (!File.Exists(SavedPath)) return;
-            var saved = JsonSerializer.Deserialize<SavedSchedule>(File.ReadAllText(SavedPath), Json);
+            var saved = JsonSerializer.Deserialize<SavedScheduleFile>(File.ReadAllText(SavedPath), Json);
             var schedule = saved?.ToSchedule();
             if (saved is null || schedule is null || saved.Station != source.Station)
             {
@@ -199,7 +199,7 @@ public sealed class ScheduleService(ScheduleSource source, WebSettings settings,
         {
             Directory.CreateDirectory(Path.GetDirectoryName(SavedPath)!);
             var tmp = SavedPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(SavedSchedule.From(source, schedule, fetched), Json));
+            File.WriteAllText(tmp, JsonSerializer.Serialize(SavedScheduleFile.From(source.Station, source.Url?.ToString(), source.Zone?.Id, schedule, fetched), Json));
             File.Move(tmp, SavedPath, overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -207,32 +207,6 @@ public sealed class ScheduleService(ScheduleSource source, WebSettings settings,
             log.LogWarning("Could not save the schedule to {Path}: {Error}", SavedPath, ex.Message);
         }
     }
-
-    /// <summary>The last good schedule as kept in the cache volume. Slot times are the page's local times.</summary>
-    sealed record SavedSchedule(string Station, string? Url, string? Timezone, DateTimeOffset FetchedUtc, List<SavedSlot> Slots)
-    {
-        public static SavedSchedule From(ScheduleSource s, WeeklySchedule schedule, DateTimeOffset fetched) => new(
-            s.Station, s.Url?.ToString(), s.Zone?.Id, fetched.ToUniversalTime(),
-            schedule.Slots.Select(x => new SavedSlot(x.Day.ToString(), x.LocalStart.ToString("HH:mm", CultureInfo.InvariantCulture), (int)x.Duration.TotalMinutes, x.Title)).ToList());
-
-        public WeeklySchedule? ToSchedule()
-        {
-            if (Slots is null || Slots.Count == 0) return null;
-            var slots = new List<ScheduleSlot>();
-            foreach (var s in Slots)
-            {
-                if (!Enum.TryParse<DayOfWeek>(s.Day, out var day)
-                    || !TimeOnly.TryParseExact(s.LocalStart, "HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var start)
-                    || s.Minutes <= 0 || string.IsNullOrWhiteSpace(s.Title))
-                    return null;
-                slots.Add(new ScheduleSlot(day, start, TimeSpan.FromMinutes(s.Minutes), s.Title));
-            }
-
-            return new WeeklySchedule(slots);
-        }
-    }
-
-    sealed record SavedSlot(string Day, string LocalStart, int Minutes, string Title);
 }
 
 /// <summary>Fetches the schedule at start-up and then every 15 minutes.</summary>

@@ -36,7 +36,7 @@ public sealed partial class Recordings
     {
         Provider.Rows = Query.Rows(null);
         var today = Today;
-        var monday = today.AddDays(-WebAudioArchive.Web.Schedule.WeeklySchedule.DayIndex(today.DayOfWeek));
+        var monday = today.AddDays(-WebAudioArchive.Core.Schedule.WeeklySchedule.DayIndex(today.DayOfWeek));
         var from = new DateTimeOffset(monday.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
         OnCalendarRangeChanged((from, from.AddDays(7)));
     }

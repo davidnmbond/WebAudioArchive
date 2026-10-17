@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 
-namespace WebAudioArchive.Web.Schedule;
+namespace WebAudioArchive.Core.Schedule;
 
 /// <summary>
 /// One weekly recurring show as the station's page gives it: a day of the week, a start in the station's local wall

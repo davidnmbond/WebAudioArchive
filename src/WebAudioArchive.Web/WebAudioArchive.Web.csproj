@@ -10,4 +10,7 @@
   <ItemGroup>
     <ProjectReference Include="..\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Using Include="WebAudioArchive.Core.Schedule" />
+  </ItemGroup>
 </Project>

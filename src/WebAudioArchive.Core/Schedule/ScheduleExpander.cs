@@ -1,4 +1,4 @@
-namespace WebAudioArchive.Web.Schedule;
+namespace WebAudioArchive.Core.Schedule;
 
 /// <summary>
 /// Turns weekly slots into dated occurrences with UTC start and end instants. The station's zone (Europe/London for
