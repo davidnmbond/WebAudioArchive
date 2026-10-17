@@ -22,6 +22,9 @@ public static class SegmentFiles
 {
     public const double FrameSeconds = 1152.0 / 44100;
 
+    /// <summary>The sequence number of the one frame a <c>silence</c> range repeats; no stream position in a test reaches it.</summary>
+    public const int SilenceSeq = 99_999_999;
+
     public static int FramesFor(double seconds) => (int)Math.Round(seconds / FrameSeconds);
 
     /// <summary>
@@ -48,11 +51,13 @@ public static class SegmentFiles
     /// <summary>
     /// A closed segment cut from one station stream shared by every recorder: frame n is the audio broadcast at
     /// <paramref name="epoch"/> + n frames, so two recorders hold byte-identical frames for the same moment, as A and B
-    /// do. Frames whose time falls inside a gap are not in the file (the recorder lost them).
+    /// do. Frames whose time falls inside a gap are not in the file (the recorder lost them). Stream positions in
+    /// <paramref name="silence"/> [From, To) all carry the same bytes, the frame of <see cref="SilenceSeq"/>, as silence does.
     /// </summary>
     public static WrittenSegment Live(
         string root, string station, DateTimeOffset epoch, DateTimeOffset start, DateTimeOffset end,
-        IReadOnlyList<SegmentGap>? gaps = null, string endedBy = "hour-boundary", double replaySeconds = 0)
+        IReadOnlyList<SegmentGap>? gaps = null, string endedBy = "hour-boundary", double replaySeconds = 0,
+        string? name = null, (int From, int To)? silence = null)
     {
         gaps ??= [];
         var first = FramesFor((start - epoch).TotalSeconds - replaySeconds);
@@ -60,8 +65,8 @@ public static class SegmentFiles
         var seqs = Enumerable.Range(first, last - first)
             .Where(n => !gaps.Any(g => epoch.AddSeconds(n * FrameSeconds) >= g.StartUtc && epoch.AddSeconds(n * FrameSeconds) < g.EndUtc))
             .ToList();
-        var bytes = seqs.SelectMany(Mp3TestData.CbrFrame).ToArray();
-        var path = AudioPath(root, station, start, null);
+        var bytes = seqs.SelectMany(n => Mp3TestData.CbrFrame(silence is { } q && n >= q.From && n < q.To ? SilenceSeq : n)).ToArray();
+        var path = AudioPath(root, station, start, name);
         File.WriteAllBytes(path, bytes);
         SegmentMetaStore.Write(Path.ChangeExtension(path, ".json"), new SegmentMeta(
             1, "test", station, Path.GetFileName(path), start, end, bytes.Length, seqs.Count, seqs.Count * FrameSeconds,
