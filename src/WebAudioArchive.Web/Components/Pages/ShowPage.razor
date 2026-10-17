@@ -64,6 +64,25 @@ else
                                 </td>
                             </tr>
                         }
+                        <tr data-recorder="combined" class="fw-semibold">
+                            <td>A and B together</td>
+                            <td>@Covered(Coverage.Combined)</td>
+                            <td>
+                                @if (Coverage.Combined.Missing.Count == 0)
+                                {
+                                    <span>none missing from both</span>
+                                }
+                                else
+                                {
+                                    <ul class="list-unstyled mb-0">
+                                        @foreach (var g in Coverage.Combined.Missing)
+                                        {
+                                            <li class="utc">@Utc(g.Start) to @Utc(g.End) (@Seconds(g.Seconds))</li>
+                                        }
+                                    </ul>
+                                }
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
             </div>

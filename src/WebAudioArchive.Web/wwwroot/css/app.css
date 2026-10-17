@@ -79,6 +79,9 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 .rec-a { --pd-calendar-item-bg: var(--bs-primary-bg-subtle); --pd-calendar-item-fg: var(--bs-primary-text-emphasis); }
 .rec-b { --pd-calendar-item-bg: var(--bs-info-bg-subtle); --pd-calendar-item-fg: var(--bs-info-text-emphasis); }
 .rec-gap { --pd-calendar-item-bg: var(--bs-danger); --pd-calendar-item-fg: var(--bs-white); }
+/* Missing from every recorder: the worst case, so it is drawn heavier than one recorder's gap. */
+.rec-missing { --pd-calendar-item-bg: var(--bs-danger-text-emphasis); --pd-calendar-item-fg: var(--bs-body-bg); }
+.pdcal .rec-missing, .rec-legend.rec-missing { outline: 2px solid var(--bs-danger); outline-offset: -2px; font-weight: 700; }
 .pdcal .rec-open { outline: 1px dashed var(--pd-calendar-item-fg); outline-offset: -1px; }
 .show-live .show-cov-icon { color: var(--bs-danger); }
 

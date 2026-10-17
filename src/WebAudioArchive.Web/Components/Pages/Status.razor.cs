@@ -9,11 +9,15 @@ public sealed partial class Status
 {
     public const int RefreshSeconds = 15;
 
+    /// <summary>The station card lists at most this many stretches missing from both recorders, newest first.</summary>
+    public const int MaxMissingShown = 10;
+
     [Inject] public required StatusService StatusService { get; set; }
     [Inject] public required WebSettings Settings { get; set; }
     [Inject] public required TimeProvider Time { get; set; }
 
     IReadOnlyList<RecorderStatus>? Statuses { get; set; }
+    CombinedCoverage? Combined { get; set; }
     DateTimeOffset? Checked { get; set; }
     Timer? _timer;
 
@@ -57,6 +61,7 @@ public sealed partial class Status
     void Show(StatusSnapshot s)
     {
         Statuses = s.Statuses;
+        Combined = s.Combined;
         Checked = s.CheckedUtc;
     }
 
@@ -67,6 +72,11 @@ public sealed partial class Status
     static string YesNo(bool? b) => b is null ? "-" : b.Value ? "yes" : "no";
 
     static string Uptime(double? s) => DurationText.Humanize(s);
+
+    static string Duration(double s) => DurationText.Humanize(s);
+
+    string CombinedText => Combined is null ? "-" :
+        string.Create(CultureInfo.InvariantCulture, $"{Combined.Fraction:0.0%} ({Combined.CoveredSeconds / 3600:0.00} h, {Combined.Missing.Count} stretches missing)");
 
     static string Seconds(double? s) => s is null ? "-" : s.Value.ToString("0.0", CultureInfo.InvariantCulture) + " s";
 

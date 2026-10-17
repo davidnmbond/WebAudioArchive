@@ -103,8 +103,8 @@ public static class StatusRules
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String && v.TryGetDateTimeOffset(out var t) ? t.ToUniversalTime() : null;
 }
 
-/// <summary>The recorders' statuses and the UTC time they were read.</summary>
-public sealed record StatusSnapshot(IReadOnlyList<RecorderStatus> Statuses, DateTimeOffset CheckedUtc);
+/// <summary>The recorders' statuses, the UTC time they were read, and the last 24 hours of all recorders together.</summary>
+public sealed record StatusSnapshot(IReadOnlyList<RecorderStatus> Statuses, DateTimeOffset CheckedUtc, CombinedCoverage? Combined = null);
 
 /// <summary>Builds the Status page: each recorder's health (fetched server side) and its last 24 hours of coverage.</summary>
 public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, IHttpClientFactory http, TimeProvider time)
@@ -123,7 +123,10 @@ public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, 
     /// <summary>Reads every recorder now and keeps the result as <see cref="Last"/>.</summary>
     public async Task<StatusSnapshot> ReadAsync(CancellationToken ct)
     {
-        var snapshot = new StatusSnapshot(await ReadStatusesAsync(ct), time.GetUtcNow());
+        var statuses = await ReadStatusesAsync(ct);
+        var now = time.GetUtcNow();
+        var combined = WindowCoverage.Combined(catalog.All(), now.AddHours(-24), now, ClipEvents.MinGapSeconds);
+        var snapshot = new StatusSnapshot(statuses, now, combined);
         Last = snapshot;
         return snapshot;
     }

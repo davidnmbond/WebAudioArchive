@@ -26,7 +26,7 @@ public sealed record RecordingCalendarItem(
     string Key, string Recorder, string Kind, DateTimeOffset StartUtc, DateTimeOffset EndUtc, string Title, string Tooltip, string CssClass, string PlayerUrl);
 
 /// <summary>All segments of every recorder, newest first, optionally limited to one UTC date.</summary>
-public sealed class RecordingsQuery(SegmentCatalog catalog)
+public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
 {
     public IReadOnlyList<RecordingRow> Rows(DateOnly? utcDate)
     {
@@ -41,13 +41,15 @@ public sealed class RecordingsQuery(SegmentCatalog catalog)
     }
 
     /// <summary>
-    /// The Recordings calendar's items overlapping [from, to): every segment of every recorder, and every recording gap
-    /// (a gap in a segment's sidecar, or missing audio between one segment and the next of the same recorder).
+    /// The Recordings calendar's items overlapping [from, to): every segment of every recorder, every recording gap
+    /// (a gap in a segment's sidecar, or missing audio between one segment and the next of the same recorder), and every
+    /// stretch that no recorder has, from the first audio of any recorder up to now.
     /// </summary>
     public IReadOnlyList<RecordingCalendarItem> CalendarItems(DateTimeOffset from, DateTimeOffset to)
     {
         var items = new List<RecordingCalendarItem>();
-        foreach (var r in catalog.All())
+        var all = catalog.All();
+        foreach (var r in all)
         {
             var label = r.Recorder.ToUpperInvariant();
             CatalogSegment? previous = null;
@@ -78,6 +80,11 @@ public sealed class RecordingsQuery(SegmentCatalog catalog)
             }
         }
 
+        var first = all.SelectMany(r => r.Segments).Select(PositionModel.AudioStartUtc).DefaultIfEmpty(DateTimeOffset.MaxValue).Min();
+        var now = time.GetUtcNow();
+        var missingFromBoth = WindowCoverage.Combined(all, first > from ? first : from, now < to ? now : to, ClipEvents.MinGapSeconds);
+        items.AddRange(missingFromBoth.Missing.Select(m => MissingFromAll(m.Start, m.End)));
+
         return items.OrderBy(i => i.StartUtc).ThenBy(i => i.Recorder, StringComparer.Ordinal).ToList();
     }
 
@@ -92,6 +99,17 @@ public sealed class RecordingsQuery(SegmentCatalog catalog)
             $"rec-item rec-gap rec-{recorder}",
             // A minute either side of the gap; for a gap of hours, the minute either side of where it starts (a clip is at most 4 hours).
             PlayerLink.For(start.AddMinutes(-1), end - start > TimeSpan.FromHours(3) ? start.AddMinutes(1) : end.AddMinutes(1), recorder));
+    }
+
+    static RecordingCalendarItem MissingFromAll(DateTimeOffset start, DateTimeOffset end)
+    {
+        var seconds = (end - start).TotalSeconds;
+        return new RecordingCalendarItem(
+            $"missing|{start.UtcTicks}", "A+B", "missing", start, end,
+            string.Create(CultureInfo.InvariantCulture, $"A+B: missing {seconds:0.0} s"),
+            string.Create(CultureInfo.InvariantCulture, $"Neither recorder has audio from {ClipPlanner.Utc(start)} to {ClipPlanner.Utc(end)} ({seconds:0.0} s)"),
+            "rec-item rec-missing",
+            PlayerLink.For(start.AddMinutes(-1), end - start > TimeSpan.FromHours(3) ? start.AddMinutes(1) : end.AddMinutes(1), "auto"));
     }
 
     static bool Overlaps(CatalogSegment s, DateOnly date)

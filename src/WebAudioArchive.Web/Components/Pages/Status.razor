@@ -17,6 +17,43 @@
 }
 else
 {
+    @if (Combined is not null)
+    {
+        <section class="card border-2 @(Combined.Missing.Count == 0 ? "border-success" : "border-warning") mb-3" id="station-coverage" aria-label="Station coverage, A and B together">
+            <div class="card-header d-flex align-items-center flex-wrap gap-2">
+                <PDLabel Text="@(Combined.Missing.Count == 0 ? "COMPLETE" : "MISSING AUDIO")" IconCssClass="@(Combined.Missing.Count == 0 ? "fas fa-check-circle" : "fas fa-exclamation-triangle")"
+                         CssClass="@($"badge {(Combined.Missing.Count == 0 ? "text-bg-success" : "text-bg-warning")} status-badge")" />
+                <strong>Station: A and B together</strong>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between small mb-1">
+                        <span>Coverage by any recorder, last 24 hours</span>
+                        <span>@CombinedText</span>
+                    </div>
+                    <PDProgressBar Value="@(Combined.Fraction * 100)" Total="100" DecimalPlaces="1" Height="1.25rem" />
+                </div>
+                <p class="small fw-semibold mb-1">Missing from both recorders, last 24 hours</p>
+                @if (Combined.Missing.Count == 0)
+                {
+                    <p class="mb-0">None: every moment was recorded by at least one recorder.</p>
+                }
+                else
+                {
+                    <ul class="mb-0" id="station-missing">
+                        @foreach (var g in Combined.Missing.Reverse().Take(MaxMissingShown))
+                        {
+                            <li class="utc">@Utc(g.Start) to @Utc(g.End) (@Duration(g.Seconds))</li>
+                        }
+                    </ul>
+                    @if (Combined.Missing.Count > MaxMissingShown)
+                    {
+                        <p class="small text-body-secondary mb-0">and @(Combined.Missing.Count - MaxMissingShown) earlier; see the Recordings calendar.</p>
+                    }
+                }
+            </div>
+        </section>
+    }
     <div class="row g-3">
         @foreach (var s in Statuses)
         {

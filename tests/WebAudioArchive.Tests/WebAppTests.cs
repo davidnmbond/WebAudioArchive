@@ -202,6 +202,27 @@ public sealed class WebAppTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Status_page_shows_what_neither_recorder_has_in_the_last_24_hours()
+    {
+        // A has 15:49:55 to 16:10 and B 15:59:55 to 16:10 with a 3 s gap at 16:02 that A covers. Now is 16:30.
+        var snapshot = await _factory.Services.GetRequiredService<StatusService>().ReadAsync(CancellationToken.None);
+
+        var combined = Assert.IsType<web::WebAudioArchive.Web.Clips.CombinedCoverage>(snapshot.Combined);
+        Assert.Equal(20 * 60 + 5, combined.CoveredSeconds, 1);
+        Assert.Equal(2, combined.Missing.Count);
+        Assert.Equal(T0.AddHours(-23).AddMinutes(30), combined.Missing[0].Start);
+        Assert.InRange((combined.Missing[0].End - T0.AddMinutes(49).AddSeconds(55)).TotalSeconds, -0.05, 0.05); // within a frame of the first audio
+        Assert.Equal((T0.AddHours(1).AddMinutes(10), T0.AddHours(1).AddMinutes(30)), (combined.Missing[1].Start, combined.Missing[1].End));
+
+        var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/"));
+        Assert.Contains("id=\"station-coverage\"", html);
+        Assert.Contains("A and B together", html);
+        Assert.Contains("Missing from both recorders", html);
+        Assert.Contains("2026-10-15 16:10:00 UTC to 2026-10-15 16:30:00 UTC", html);
+        Assert.DoesNotContain("16:02:00 UTC to", html); // B's gap is covered by A
+    }
+
+    [Fact]
     public async Task Recordings_page_has_the_table_and_utc_columns()
     {
         var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/recordings"));
@@ -362,12 +383,31 @@ public sealed class WebAppTests : IAsyncLifetime
         Assert.Contains("Segments", html);
         Assert.Contains("recordings-table", html); // the table is kept
 
-        var items = new web::WebAudioArchive.Web.RecordingsQuery(_factory.Services.GetRequiredService<web::WebAudioArchive.Web.Clips.SegmentCatalog>())
+        var items = new web::WebAudioArchive.Web.RecordingsQuery(_factory.Services.GetRequiredService<web::WebAudioArchive.Web.Clips.SegmentCatalog>(), _time)
             .CalendarItems(T0, T0.AddHours(2));
         var segment = items.First(i => i.Kind == "segment" && i.Recorder == "A");
         Assert.Equal("/player?from=2026-10-15T15:50:00Z&to=2026-10-15T16:00:00Z&recorder=a", segment.PlayerUrl);
         var g = Assert.Single(items, i => i.Kind == "gap");
         Assert.Equal("/player?from=2026-10-15T16:01:00Z&to=2026-10-15T16:03:03Z&recorder=b", g.PlayerUrl);
+    }
+
+    [Fact]
+    public async Task Recordings_calendar_marks_what_neither_recorder_has_between_the_first_audio_and_now()
+    {
+        var items = new web::WebAudioArchive.Web.RecordingsQuery(_factory.Services.GetRequiredService<web::WebAudioArchive.Web.Clips.SegmentCatalog>(), _time)
+            .CalendarItems(T0, T0.AddHours(2));
+
+        // Not before the first audio (15:49:55) or after now (16:30); B's 16:02 gap is covered by A.
+        var m = Assert.Single(items, i => i.Kind == "missing");
+        Assert.Equal((T0.AddHours(1).AddMinutes(10), T0.AddHours(1).AddMinutes(30)), (m.StartUtc, m.EndUtc));
+        Assert.Equal("A+B", m.Recorder);
+        Assert.Equal("rec-item rec-missing", m.CssClass);
+        Assert.Equal("A+B: missing 1200.0 s", m.Title);
+        Assert.Contains("Neither recorder has audio from 2026-10-15 16:10:00 UTC to 2026-10-15 16:30:00 UTC", m.Tooltip);
+        Assert.Equal("/player?from=2026-10-15T16:09:00Z&to=2026-10-15T16:31:00Z&recorder=auto", m.PlayerUrl);
+
+        var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/recordings"));
+        Assert.Contains("rec-legend rec-missing", html);
     }
 
     [Fact]

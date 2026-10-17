@@ -89,6 +89,8 @@ public sealed partial class ShowPage
             var clip = Clips.TryPrepareCached(null, request) ?? await Task.Run(() => Clips.Prepare(null, request));
             if (Coverage.State == ShowState.Partial)
                 Warnings.Add("Only part of this show was recorded; the player plays what exists, joined across the gaps listed above.");
+            else if (Coverage.NeedsBoth)
+                Warnings.Add("Between them the recorders have all of this show, but no single recorder does. The player uses one recorder, so it has that recorder's gaps.");
             Warnings.AddRange(clip.Plan.Warnings);
             Timeline = ShowTimeline.Build(Show, clip, now);
             ClipTimeline = clip.Timeline();
@@ -115,6 +117,9 @@ public sealed partial class ShowPage
 
     static string Covered(RecorderCoverage r) =>
         string.Create(CultureInfo.InvariantCulture, $"{Clockface(r.CoveredSeconds)} of {Clockface(r.WindowSeconds)} ({r.Fraction:0.0%})");
+
+    static string Covered(CombinedCoverage c) =>
+        string.Create(CultureInfo.InvariantCulture, $"{Clockface(c.CoveredSeconds)} of {Clockface(c.WindowSeconds)} ({c.Fraction:0.0%})");
 
     static string Clockface(double seconds) => TimeSpan.FromSeconds(Math.Round(seconds)).ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture);
 

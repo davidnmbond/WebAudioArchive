@@ -85,15 +85,21 @@ Pages:
   in the last 10 s; amber: reconnecting, a recent write error, frames 10 to 120 s late, or no health URL; red: health
   URL unreachable or no frame for over 120 s), connected, seconds since the last frame, last error, current segment
   start, reconnects, uptime, and coverage over the last 24 hours. Coverage is computed by the web app from the sidecars
-  (segment spans minus gaps) plus the open `.part` up to its last write time. Refreshes every 15 s.
+  (segment spans minus gaps) plus the open `.part` up to its last write time. Refreshes every 15 s. Above the recorder
+  cards, **Station: A and B together** gives the coverage of the last 24 hours by any recorder (the union of A and B)
+  and lists, newest first, the stretches of 1.5 s or more that neither recorder has (up to 10; the Recordings calendar
+  shows the rest). A gap in one recorder that the other covers is not listed there.
 - **Shows** (`/shows`): the station's schedule in a `PDCalendar` (week by default; month and agenda; weeks start on
   Monday; the calendar runs in UTC and every time is labelled UTC). `?view=month` and `?date=2026-10-26` (a UTC date)
-  choose the first view. Each show is marked, by colour, icon and tooltip: **recorded** (at least one recorder has all
-  of it, within 2 s), **partly recorded** (some of it, but no single recorder has all of it), **not recorded**,
+  choose the first view. Each show is marked, by colour, icon and tooltip: **recorded** (A and B together have all of
+  it, within 2 s; the tooltip says when no single recorder does), **partly recorded** (some of it is missing from both
+  recorders), **not recorded**,
   **on air now** (measured up to now, counting the open `.part`) or **in the future**. Above the calendar: where the
   schedule came from and when, or a warning (see "Schedule" below).
 - **Show** (`/shows/<station>-<yyyyMMdd>T<HHmm>Z`, the UTC start, for example `/shows/burst-20261015T1900Z`): title,
-  UTC start and end, coverage per recorder with the uncovered stretches listed in UTC, a margin (default **5 minutes**
+  UTC start and end, coverage per recorder with the uncovered stretches listed in UTC, then a row for A and B together
+  listing what is missing from both; when only the two together have all of the show, a warning says the player uses
+  one recorder and so has that recorder's gaps (joining A and B is issue #12); a margin (default **5 minutes**
   before and after, 0 to 60) and a recorder (Auto, A, B). The show's clip (made by the same planner and builder as the
   Player, from the show's start minus the margin to its end plus the margin, or to now while it is on air) plays in
   `PDMediaPlayer`: the show proper is the shaded range of the seek bar, so the lead-in and tail are visibly outside it;
@@ -104,9 +110,10 @@ Pages:
   warning; one with nothing recorded says so. The id is the station and UTC start, so a link works after a restart or
   reload as long as the schedule still has a show starting then.
 - **Recordings** (`/recordings`): a week calendar (`PDCalendar`, UTC) of each recorder's segments (A and B side by side,
-  the open segment dashed) and recording gaps (red; sidecar gaps and missing audio between segments). Selecting a
-  segment opens the Player for it, as the table's Play button does; selecting a gap opens the Player a minute either
-  side of it. Below it, the table of every segment from both recorders (recorder, start, end, audio duration, size,
+  the open segment dashed), recording gaps (red; sidecar gaps and missing audio between segments) and the stretches
+  missing from both recorders ("A+B: missing", dark red with a heavy outline; from the first audio of either recorder up
+  to now). Selecting a segment opens the Player for it, as the table's Play button does; selecting a gap or a missing
+  stretch opens the Player a minute either side of it. Below it, the table of every segment from both recorders (recorder, start, end, audio duration, size,
   ended by, number of gaps, open), newest first, with a UTC date filter.
 - **Player** (`/player`): date, From, To, "add N minutes before and after" (off by default, 5 minutes), recorder (Auto,
   A, B). Prepare clip shows the recorder used, the clip's real start and end, duration, size and warnings, then plays it

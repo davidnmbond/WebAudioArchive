@@ -65,6 +65,43 @@ public sealed class ShowCoverageTests : IDisposable
     }
 
     [Fact]
+    public void Gaps_in_both_recorders_at_different_times_still_make_the_show_recorded_by_the_two_together()
+    {
+        var gapA = new SegmentGap(T0.AddMinutes(3), T0.AddMinutes(3).AddSeconds(40), 40, "end-of-stream");
+        var gapB = new SegmentGap(T0.AddMinutes(7), T0.AddMinutes(7).AddSeconds(20), 20, "end-of-stream");
+        SegmentFiles.Closed(A, "burst", T0.AddMinutes(-1), 12 * 60, firstSeq: 0, gaps: [gapA]);
+        SegmentFiles.Closed(B, "burst", T0.AddMinutes(-1), 12 * 60, firstSeq: 0, gaps: [gapB]);
+
+        var c = ShowCoverage.Classify(Show(0, 10), Catalog(), T0.AddHours(1));
+
+        Assert.Equal(ShowState.Full, c.State);
+        Assert.Empty(c.FullRecorders);
+        Assert.True(c.NeedsBoth);
+        Assert.Empty(c.Combined.Missing);
+        Assert.Equal(600, c.Combined.CoveredSeconds, 1);
+        Assert.Equal("show-full", c.CssClass);
+        Assert.Contains("Recorded in full by A and B together", c.Summary);
+        Assert.Contains("no single recorder has all of it", c.Summary);
+    }
+
+    [Fact]
+    public void A_stretch_missing_from_both_recorders_is_partial_and_listed_once()
+    {
+        var gapA = new SegmentGap(T0.AddMinutes(4), T0.AddMinutes(5), 60, "end-of-stream");
+        var gapB = new SegmentGap(T0.AddMinutes(4).AddSeconds(30), T0.AddMinutes(5).AddSeconds(30), 60, "end-of-stream");
+        SegmentFiles.Closed(A, "burst", T0.AddMinutes(-1), 12 * 60, firstSeq: 0, gaps: [gapA]);
+        SegmentFiles.Closed(B, "burst", T0.AddMinutes(-1), 12 * 60, firstSeq: 0, gaps: [gapB]);
+
+        var c = ShowCoverage.Classify(Show(0, 10), Catalog(), T0.AddHours(1));
+
+        Assert.Equal(ShowState.Partial, c.State);
+        Assert.False(c.NeedsBoth);
+        var both = Assert.Single(c.Combined.Missing); // only the overlap of the two gaps is missing from both
+        Assert.Equal((T0.AddMinutes(4).AddSeconds(30), T0.AddMinutes(5)), (both.Start, both.End));
+        Assert.Equal(570, c.Combined.CoveredSeconds, 1);
+    }
+
+    [Fact]
     public void Partly_recorded_and_not_recorded_shows_are_told_apart()
     {
         SegmentFiles.Closed(A, "burst", T0.AddMinutes(5), 10 * 60, firstSeq: 0);
@@ -76,6 +113,9 @@ public sealed class ShowCoverageTests : IDisposable
         Assert.Equal(T0, gap.Start);
         Assert.InRange((gap.End - T0.AddMinutes(5)).TotalSeconds, -0.05, 0.05); // within a frame of the first audio
         Assert.Single(partial.Recorders.Single(r => r.Recorder == "b").Gaps); // B has nothing: the whole show is its gap
+        var both = Assert.Single(partial.Combined.Missing); // A and B together still lack the first five minutes
+        Assert.Equal(T0, both.Start);
+        Assert.Contains("A and B together 50%", partial.Summary);
 
         var missing = ShowCoverage.Classify(Show(-60, -50), Catalog(), T0.AddHours(1));
         Assert.Equal(ShowState.NotRecorded, missing.State);
