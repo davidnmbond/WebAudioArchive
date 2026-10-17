@@ -2,24 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A separate, low-priority analysis container that finds every closed master segment, decodes a scratch copy, transcribes it locally on the GPU with whisper.cpp, runs the swearing, clipping, filler and dead-air detectors, writes a versioned, rebuildable `events.json` timeline and per-segment transcripts in UTC, maps them onto the schedule's shows, and enriches each finished show with hosts, guests, topics, songs and artists from the local Ollama, all without ever touching a recorder.
+**Goal:** A separate, low-priority analysis container that finds every closed master segment, decodes a scratch copy in managed code, transcribes it locally on the GPU with whisper.cpp (in process, through the Whisper.net NuGet packages), runs the swearing, clipping, filler and dead-air detectors, writes a versioned, rebuildable `events.json` timeline and per-segment transcripts in UTC, maps them onto the schedule's shows, and enriches each finished show with hosts, guests, topics, songs and artists from the local Ollama, all without ever touching a recorder.
 
-**Architecture:** Two new projects: `WebAudioArchive.Analysis` (a class library: decode, features, detectors, transcriber and LLM clients, work planning, the segment pipeline) and `WebAudioArchive.Analysis.Service` (the host: one background worker, `/healthz` with lag metrics, and maintenance commands). The file contracts (transcript, events, show documents, the segment timeline that maps audio offsets to UTC) live in `WebAudioArchive.Core` so the web app reads them without depending on the analysis code. The analysis container mounts the recorders' folders read-only, writes only to `data/analysis`, decodes only into a size-bounded tmpfs scratch, runs at `nice 10` with low CPU shares and a memory cap, and talks to a whisper.cpp server container (CUDA, opt-in GPU override) and to Ollama on the host over HTTP.
+**Architecture:** Two new projects: `WebAudioArchive.Analysis` (a class library: decode, features, detectors, transcriber and LLM clients, work planning, the segment pipeline) and `WebAudioArchive.Analysis.Service` (the host: one background worker, `/healthz` with lag metrics, and maintenance commands). The file contracts (transcript, events, show documents, the segment timeline that maps audio offsets to UTC) live in `WebAudioArchive.Core` so the web app reads them without depending on the analysis code. The analysis container mounts the recorders' folders read-only, writes only to `data/analysis`, decodes only into a size-bounded tmpfs scratch, runs at `nice 10` with low CPU shares and a memory cap, transcribes in its own process with Whisper.net (CUDA runtime in the opt-in GPU image, CPU otherwise; decision D18), and talks to Ollama on the host over HTTP. There is no ffmpeg and no separate whisper container.
 
-**Tech Stack:** .NET 10, ASP.NET Core minimal host (for `/healthz`), System.Text.Json, ffmpeg 6.1 (Ubuntu 24.04 package in the image), whisper.cpp v1.9.5 `whisper-server` built from source with CUDA 13.0.1 (model `ggml-large-v3-turbo-q8_0`), Ollama 0.40.4 on the host (model `qwen3.6:latest`), xUnit 2, Docker Compose, GitHub Actions. No new NuGet packages.
+**Tech Stack:** .NET 10, ASP.NET Core minimal host (for `/healthz`), System.Text.Json, NuGet (all MIT unless noted, pinned, decision D18): `NLayer` 3.0.0 (managed MP3 frame decoder), `NAudio.Core` 3.1.0 (WDL resampler), `Whisper.net` 1.9.1 with `Whisper.net.Runtime` 1.9.1 (CPU) and `Whisper.net.Runtime.Cuda.Linux` 1.9.1 (CUDA 13; whisper.cpp commit `f24588a2`), test project only `GroovyMp3` 0.1.3 (LGPL-3.0, managed LAME port, makes synthetic MP3s); CUDA 13.0 `cuda-cudart-13-0` and `libcublas-13-0` from NVIDIA's Ubuntu 24.04 apt repository in the GPU image; model `ggml-large-v3-turbo-q8_0`; Ollama 0.40.4 on the host (model `qwen3.6:latest`) over plain `HttpClient`; xUnit 2, Docker Compose, GitHub Actions.
 
 **Spec:** `docs/superpowers/specs/2026-10-15-webaudioarchive-design.md` (sections 3.5, 3.6, 3.7, 3.8, 3.9, 3.11, 3.13, 5, 6). This is plan 3 of 5. It is written before plan 2 (schedule service, cutter) and does not depend on it: it maps analysis onto shows using the schedule the web app already saves (`/cache/schedule/<station>.json`, spec 3.2 MVP) and works per master segment, not per cut show file. When plan 2 lands, `ScheduleProvider` switches to `/data/<station>/schedule.json` (one constructor argument).
 
 ## Global Constraints
 
-- .NET 10, `net10.0`, `Nullable` enabled, `TreatWarningsAsErrors` true. Packages pinned to exact versions; this plan adds none.
+- .NET 10, `net10.0`, `Nullable` enabled, `TreatWarningsAsErrors` true. Packages pinned to exact versions; this plan adds only those listed in the Tech Stack (D18).
 - **All times UTC everywhere**: file names, JSON, logs, `/healthz`, API responses. The station zone (`Europe/London`) is used for exactly two things: turning the schedule's local slots into UTC (existing code) and deciding whether an instant is before the 21:00 watershed. Nothing local is stored or shown.
 - **The archive is stored exactly as broadcast.** Analysis never opens a master `.mp3` or sidecar for writing, never decodes the archive in place: it copies a closed segment into scratch and decodes the copy. `.mp3.part` files are never read.
 - **The recorders are never affected.** Analysis is its own image and container, mounts `data/a` and `data/b` read-only, writes only to `data/analysis` and its tmpfs scratch, runs below the recorders' priority (nice 10, `cpu_shares: 256`, CPU and memory caps, high `oom_score_adj`), and stops work first when free disk falls below its threshold. No compose change may alter the `recorder-a` or `recorder-b` service definitions.
-- **Public repo:** no broadcast audio, recordings, transcripts of real broadcasts, model files or credentials in git. Test audio is synthetic, generated at test time (signals in code; MP3 made by ffmpeg into a temp folder). The `models/` and `data/` folders are gitignored.
+- **Public repo:** no broadcast audio, recordings, transcripts of real broadcasts, model files or credentials in git. Test audio is synthetic, generated at test time (signals in code; MP3 made by GroovyMp3 in the test process into a temp folder). The `models/` and `data/` folders are gitignored.
 - No transcript or audio leaves the machine: Ollama must be local or on a private network (the settings refuse `:cloud` models and public hosts).
 - No em dashes in any text, code comment, commit message or doc.
-- No skipped tests. A test that cannot run (for example ffmpeg missing) must fail with a message saying what is missing and how to install it.
+- No skipped tests. A test that cannot run (for example a test helper whose package internals changed) must fail with a message saying what is missing and how to fix it. No test needs a native tool or a whisper model: decoding and MP3 encoding are managed code, and transcription is faked in tests.
 - Commit messages end with the attribution trailer the harness supplies. Commit after each task. `git add` named paths only; never `git add -A` (unrelated tracked files such as `CLAUDE.md` and `AGENTS.md` must not be touched).
 - Detector figures are estimates. Every event carries `severity`, `confidence`, `source` (`audio`, `transcript` or `llm`), the detector name and version, and enough to play the audio around it; reports say "detected", never "proven".
 
@@ -31,41 +31,65 @@ Each decision is the owner's to overturn; the alternatives were considered and r
 
 | # | Decision | Evidence and reasons | Rejected alternatives |
 |---|---|---|---|
-| D1 | **Transcription engine: whisper.cpp `whisper-server` v1.9.5, built from source in `docker/Dockerfile.whisper` (CUDA 13.0.1, compute capability 86 for the RTX 3060), called over HTTP.** | MIT licence (checked 2026-10-16, `LICENSE` at tag v1.9.5, commit `d2a764c648779feb36d44363f212a29b00aad1af`). The server's `verbose_json` response gives segments with `no_speech_prob`, `avg_logprob` and per-token `start`, `end`, `t_dtw` and `probability` (read in `examples/server/server.cpp` at v1.9.5), has `/health`, takes `prompt`, `language` and `temperature` per request, and serialises requests with a mutex. HTTP keeps CUDA, model memory and any native crash out of the .NET process; the analysis image stays a plain aspnet image with ffmpeg. The spec already names whisper.cpp. | (b) **Whisper.net 1.9.1** (MIT; `Whisper.net.Runtime.Cuda` needs CUDA toolkit 13.0.1 runtime libraries in the image, `Whisper.net.Runtime.Cuda12` for 12.4.1): in-process native code, a CUDA runtime in the analysis image (several GB), a native fault kills the worker, and its word or token timestamp API is not documented on the package page. (c) **faster-whisper 1.2.1** (MIT, last release 2025-10-31; CUDA 12 and cuDNN 9; batched mode is the fastest measured: 13 min of audio in 16 to 17 s on an RTX 3070 Ti): needs a Python service we would write and maintain (no official server), a second language in the repo, and its speed advantage is not needed (see D3). The official `ghcr.io/ggml-org/whisper.cpp:main-cuda-<sha>` images were rejected because no image exists for the v1.9.5 release commit (checked on GHCR: only `main-cuda-<sha>` tags of main commits), so pinning one would pin an unreleased commit. |
-| D2 | **Model: `ggml-large-v3-turbo-q8_0.bin`** (874,188,075 bytes, sha256 `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1`, Hugging Face `ggerganov/whisper.cpp` commit `5359861c739e955e79d9a303bcbc70fb988958b1`), language forced to `en`, DTW token timestamps (`--dtw large.v3.turbo`) with flash attention off (whisper.cpp disables DTW when flash attention is on, `src/whisper.cpp` line 3817 at v1.9.5). | large-v3-turbo has the large-v3 encoder with 4 decoder layers instead of 32: near large-v3 accuracy at several times the speed. q8_0 halves VRAM against f16 with negligible accuracy loss, which matters because the 3060's 12 GB is shared with the Windows desktop (5.4 GB in use when measured) and Ollama. DTW gives better word times for swear and filler links. | `medium.en`: slower than turbo (24 decoder layers) and less accurate. `large-v3` f16: about 3 to 4 times slower to decode, about 4 GB VRAM. `small.en` / `base.en`: kept only as the CPU fallback (`ggml-base.en.bin`, 147,964,211 bytes, sha256 `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002`). |
-| D3 | **Expected speed: 15x to 30x realtime on the RTX 3060** (realtime factor 0.03 to 0.07), to be measured in Task 19 and recorded in `docs/analysis-validation.md`. | Published figure: whisper.cpp large-v2 fp16 with flash attention transcribes 13 min in 65 s (12x) on an RTX 3070 Ti (faster-whisper README benchmark). A 3060 has about 70% of a 3070 Ti's throughput; turbo decodes far faster than large-v2; DTW without flash attention costs some of that back. 24 hours of audio a day at 15x is 1.6 GPU hours a day, so the queue keeps up with a wide margin and can clear a day of backlog in about 2 hours. If Task 19 measures slower than 5x realtime, switch to flash attention on without DTW (Task 16 shows the flag) and record it. | n/a |
-| D4 | **GPU passthrough works on this host** (checked 2026-10-16: `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` shows the RTX 3060, driver 610.88, CUDA 13.3, inside Docker Desktop 29.8.2). GPU use is opt-in through `docker/docker-compose.gpu.yml` (spec 5); without it whisper runs a CPU build with `base.en`. | The driver's CUDA 13.3 supports CUDA 13.0.1 images. | n/a |
+| D1 | *Superseded by D18: whisper.cpp now runs in the analysis process through Whisper.net 1.9.1; the reasons below for a separate HTTP server were weighed again there.* **Transcription engine (original): whisper.cpp `whisper-server` v1.9.5, built from source in `docker/Dockerfile.whisper` (CUDA 13.0.1, compute capability 86 for the RTX 3060), called over HTTP.** | MIT licence (checked 2026-10-16, `LICENSE` at tag v1.9.5, commit `d2a764c648779feb36d44363f212a29b00aad1af`). The server's `verbose_json` response gives segments with `no_speech_prob`, `avg_logprob` and per-token `start`, `end`, `t_dtw` and `probability` (read in `examples/server/server.cpp` at v1.9.5), has `/health`, takes `prompt`, `language` and `temperature` per request, and serialises requests with a mutex. HTTP keeps CUDA, model memory and any native crash out of the .NET process; the analysis image stays a plain aspnet image with ffmpeg. The spec already names whisper.cpp. | (b) **Whisper.net 1.9.1** (MIT; `Whisper.net.Runtime.Cuda` needs CUDA toolkit 13.0.1 runtime libraries in the image, `Whisper.net.Runtime.Cuda12` for 12.4.1): in-process native code, a CUDA runtime in the analysis image (several GB), a native fault kills the worker, and its word or token timestamp API is not documented on the package page. (c) **faster-whisper 1.2.1** (MIT, last release 2025-10-31; CUDA 12 and cuDNN 9; batched mode is the fastest measured: 13 min of audio in 16 to 17 s on an RTX 3070 Ti): needs a Python service we would write and maintain (no official server), a second language in the repo, and its speed advantage is not needed (see D3). The official `ghcr.io/ggml-org/whisper.cpp:main-cuda-<sha>` images were rejected because no image exists for the v1.9.5 release commit (checked on GHCR: only `main-cuda-<sha>` tags of main commits), so pinning one would pin an unreleased commit. |
+| D2 | *Model kept; DTW revised by D18 (off by default, measured).* **Model: `ggml-large-v3-turbo-q8_0.bin`** (874,188,075 bytes, sha256 `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1`, Hugging Face `ggerganov/whisper.cpp` commit `5359861c739e955e79d9a303bcbc70fb988958b1`), language forced to `en`, DTW token timestamps (`--dtw large.v3.turbo`) with flash attention off (whisper.cpp disables DTW when flash attention is on, `src/whisper.cpp` line 3817 at v1.9.5). | large-v3-turbo has the large-v3 encoder with 4 decoder layers instead of 32: near large-v3 accuracy at several times the speed. q8_0 halves VRAM against f16 with negligible accuracy loss, which matters because the 3060's 12 GB is shared with the Windows desktop (5.4 GB in use when measured) and Ollama. DTW gives better word times for swear and filler links. | `medium.en`: slower than turbo (24 decoder layers) and less accurate. `large-v3` f16: about 3 to 4 times slower to decode, about 4 GB VRAM. `small.en` / `base.en`: kept only as the CPU fallback (`ggml-base.en.bin`, 147,964,211 bytes, sha256 `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002`). |
+| D3 | *Replaced by measurements in D18 (22x to 46x on speech, 7.5x on a music-heavy hour under full host CPU load).* **Expected speed: 15x to 30x realtime on the RTX 3060** (realtime factor 0.03 to 0.07), to be measured in Task 19 and recorded in `docs/analysis-validation.md`. | Published figure: whisper.cpp large-v2 fp16 with flash attention transcribes 13 min in 65 s (12x) on an RTX 3070 Ti (faster-whisper README benchmark). A 3060 has about 70% of a 3070 Ti's throughput; turbo decodes far faster than large-v2; DTW without flash attention costs some of that back. 24 hours of audio a day at 15x is 1.6 GPU hours a day, so the queue keeps up with a wide margin and can clear a day of backlog in about 2 hours. If Task 19 measures slower than 5x realtime, switch to flash attention on without DTW (Task 16 shows the flag) and record it. | n/a |
+| D4 | **GPU passthrough works on this host** (checked 2026-10-16: `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` shows the RTX 3060, driver 610.88, CUDA 13.3, inside Docker Desktop 29.8.2). GPU use is opt-in through `docker/docker-compose.gpu.yml` (spec 5), which since D18 builds the `cuda` target of the analysis image and gives the analysis container the GPU; without it the analysis image is the `cpu` target and transcribes with `base.en`. Re-checked 2026-10-16 with the Whisper.net CUDA runtime inside a throwaway aspnet-based image (D18). | The driver's CUDA 13.3 supports CUDA 13.0.1 images. | n/a |
 | D5 | **Enricher model: `qwen3.6:latest`** (Ollama digest `07d35212591fc27746f0a317c975a6d68754fb38e9053d82e25f06057af28522`, 36B mixture of experts, 8 of 256 experts active, Q4_K_M, 22.3 GB, Apache 2.0), with `think: false`, temperature 0.1, fixed seed, JSON schema output, `num_ctx` 32768. | Measured on this host 2026-10-16 with the same synthetic extraction prompt and JSON schema: qwen3.6:latest 154 tokens/s prompt, 15.0 tokens/s output, every quote verbatim; gemma4:26b (MoE) 11 tokens/s prompt, 7.8 tokens/s output, short but correct quotes; llama3.1:8b 35 tokens/s prompt, 47.9 tokens/s output, but gave Raff a quote that does not contain his name (the validator would drop it). A 1 hour show transcript (about 10,000 to 15,000 tokens) is 2 to 4 minutes on qwen3.6:latest; about 13 shows a day is under an hour. MoE means it runs well partly on CPU, so it coexists with whisper on the 12 GB card. The analysis records the model digest it used in every result. | Dense 27B and 31B models (`qwen3.8:27b`, `qwen3.6:27b`, `gemma4:31b`): 16 to 18.5 GB do not fit the free VRAM and run slowly on CPU. `qwen3.5:2b`, `qwen2.5-coder:*`: too small or code models. `nomic-embed-text`: embeddings only (useful later for search). **`kimi-k2.6:cloud` is refused by configuration**: it runs remotely, so transcripts would leave the machine. |
 | D6 | **Unit of work: one closed recorder segment** (an hourly `.mp3` plus its sidecar). Transcripts and events are stored per segment; shows are views over them (spec 3.6: "one transcript for the station; each show's transcript is a slice"). | Segments are immutable once closed, so a job is idempotent and keyed by the sidecar's bytes, frames, end and `endedBy`. Show times can change; re-mapping a show is cheap and never re-transcribes. | Per show cut files: plan 2 does not exist yet, and a schedule change would force re-transcription. Live decode in the recorder's fan-out (spec 3.6 "decode the live stream"): would put analysis in the recorder process, which spec 3.13 forbids. |
 | D7 | **A/B: recorder A is analysed; B only fills A's holes.** A B segment is queued only when A's segments cover less than 98% of its span (spans minus gaps). Timelines and transcript slices drop B events and lines at instants that an A segment covers. `WAA_ANALYSIS_PREFERENCE` (default `a,b`) sets the order. | Analysing both doubles GPU work for near-identical results; the two copies are not byte-identical (3.13) so they cannot be merged sample by sample. | Analyse both and reconcile: double the cost and no reconciliation rule in the spec (3.10). |
 | D8 | **Newest segment first.** The queue is ordered by segment start, newest first. | After an outage the latest shows (the ones people ask about) are done first, and the backlog drains behind them. Lag is reported as the age of the oldest unanalysed closed segment, so a backlog is visible. | Oldest first: a long backlog would delay today's shows by days. |
-| D9 | **Scratch is a 2 GiB tmpfs** (`/scratch`), per job: a copy of the segment (about 57.6 MB), the 16 kHz mono WAV for whisper (about 115 MB an hour); the full-rate float PCM for the audio detectors is streamed from ffmpeg's stdout and never written. Budget enforced in code (`WAA_SCRATCH_MAX_MB`, default 2048); scratch is swept at start-up and after every job, success or failure. | tmpfs vanishes on restart (no stale files on disk), costs no disk wear and never competes with the recorders for disk. 96 GB RAM makes 2 GiB cheap. | Scratch on the data disk: competes with the recorders for space and IO, the very thing to avoid. |
+| D9 | **Scratch is a 2 GiB tmpfs** (`/scratch`), per job: a copy of the segment (about 57.6 MB), the 16 kHz mono WAV for whisper (about 115 MB an hour); the full-rate float PCM for the audio detectors is streamed from the managed decoder into the feature extractor and never written (D18). Budget enforced in code (`WAA_SCRATCH_MAX_MB`, default 2048); scratch is swept at start-up and after every job, success or failure. | tmpfs vanishes on restart (no stale files on disk), costs no disk wear and never competes with the recorders for disk. 96 GB RAM makes 2 GiB cheap. | Scratch on the data disk: competes with the recorders for space and IO, the very thing to avoid. |
 | D10 | **Audio detectors are rebuildable without decoding.** Each segment keeps `features.json`: 50 ms window levels (dBFS) and the clipped-sample runs at fixed levels 0.98, 0.99 and 0.999 of full scale (runs of 2 or more samples, at most 50,000 per level). Thresholds can be retuned and events rebuilt (`--rebuild`) from it; a clipping threshold not in that list needs a re-decode (the config loader says so). | Retuning is expected (spec 3.6 says the thresholds are provisional). | Storing PCM: 600 MB an hour. Storing nothing: every retune re-decodes the archive. |
 | D11 | **Watershed: before-watershed means UK local time from 05:30 to 21:00** (both configurable). | Spec 3.6 gives 21:00 local; Ofcom's watershed runs 21:00 to 05:30. | 21:00 only: would mark 01:00 swearing as before the watershed. |
 | D12 | **Swear list content:** general profanity in three tiers (`mild`, `strong`, `severe`), whole words plus listed suffixes, masked forms (`f***`) at reduced confidence, an allow list for near misses. Discriminatory slurs are not shipped in this public repo; the list is a mounted config file the owner can extend locally. Lyrics in songs are transcribed too, so a hit may be a lyric; the event says so in its evidence (`context: unknown`) and links to the audio. | Ofcom treats aired lyrics like speech, so they should be reported, not filtered. | Filtering music: no reliable music detector yet (3.9). |
 | D13 | **Hallucination handling:** segments are kept but marked `suppressed` (with the reason) when whisper's own no-speech rule fires (`no_speech_prob > 0.6` and `avg_logprob < -1.0`), when the text is a known hallucination ("thank you for watching", "subtitles by", ...), when it is only an annotation (`[BLANK_AUDIO]`, `(music)`), or when the same text repeats 3 or more times in a row. Detectors ignore suppressed segments. | Whisper invents text on music and silence; a radio stream is mostly music. | Silero VAD in whisper.cpp: needs a second model and drops sung lyrics, which D12 wants kept. Can be added later. |
-| D14 | **ffmpeg comes from the Ubuntu 24.04 package (6.1.1) and is not version-pinned in apt**; the version used is recorded in every transcript. | apt pins of old point releases break the build when Ubuntu replaces them with security fixes. The aspnet 10.0 image is Ubuntu 24.04 (checked). | A static ffmpeg download: another binary to verify and update by hand. |
+| D14 | *Superseded by D18: there is no ffmpeg; the decoder library versions (`NLayer 3.0.0 frame decoder, NAudio.Core 3.1.0 WDL sinc resampler`) are recorded in every transcript instead.* **ffmpeg comes from the Ubuntu 24.04 package (6.1.1) and is not version-pinned in apt**; the version used is recorded in every transcript. | apt pins of old point releases break the build when Ubuntu replaces them with security fixes. The aspnet 10.0 image is Ubuntu 24.04 (checked). | A static ffmpeg download: another binary to verify and update by hand. |
 | D15 | **Show mapping uses the web app's saved schedule** (`/cache/schedule/<station>.json`, mounted read-only from the `web-cache` volume). The schedule types (`WeeklySchedule`, `ShowOccurrence`, `ScheduleExpander`) move from Web to Core so both use one implementation. | No new schedule fetcher; one expansion rule for DST. | Calling the web app's HTTP API: analysis would stop mapping shows whenever the web app is down. A second schedule parser: duplicate code. |
 | D16 | **Health alarm:** `/healthz` returns 503 when the analysis lag exceeds `WAA_LAG_ALARM_HOURS` (default 6) or the worker loop has not completed a pass for 15 minutes, so `docker ps` shows `unhealthy`. Docker does not restart unhealthy containers; it is an alarm, not a restart. | Spec 5 asks for analysis lag in `/healthz`; spec 1 says no pushed alerts. | Restart on unhealthy: a restart cannot fix a lag. |
 | D17 | **One work lane:** transcription first, enrichment only when no segment job is ready. | Whisper and Ollama share one GPU; running them at once slows both and risks running out of VRAM. | Two concurrent lanes. |
+| D18 | **The analysis stack comes from NuGet (owner's question, spike 2026-10-16; evidence below).** (a) **Decode:** our own MPEG-1 Layer III frame splitter feeding `NLayer` 3.0.0's `MpegFrameDecoder` frame by frame, with a fresh decoder primed on the previous frames when NLayer refuses a frame; resample to 16 kHz mono with `NAudio.Core` 3.1.0's `WdlResampler` in sinc mode; one pass gives the full-rate features and the speech WAV. No ffmpeg anywhere (image, CI, development host). (b) **Transcription:** `Whisper.net` 1.9.1 in the analysis process behind the same `ITranscriber`, `Whisper.net.Runtime` (CPU) plus `Whisper.net.Runtime.Cuda.Linux` (CUDA 13); one Dockerfile with a `cpu` target (aspnet image plus `libgomp1`) and a `cuda` target (adds NVIDIA's `cuda-cudart-13-0` and `libcublas-13-0`); `WAA_WHISPER_DEVICE` `auto` tries CUDA then falls back to the CPU. Chunks of 300 s as before, no carried context, prompt carried into every 30 s window, flash attention on, **DTW off by default** (`WAA_WHISPER_DTW=on` only with `chunkSeconds` 30). The separate whisper container, `Dockerfile.whisper` and its CUDA workflow are dropped. (c) **Enrichment:** keep the plain `HttpClient` Ollama client (no package). (d) **Tests:** synthetic MP3s from `GroovyMp3` 0.1.3 in the test process. | Decode: the frame-by-frame decode of a real 1 hour Burst segment gave 137,749 frames and 158,686,848 samples per channel, exactly the sidecar's frame count x 1152 and exactly ffmpeg 7.1's count; 81.5 dB SNR against ffmpeg's float decode; samples at or above 0.99: 61,373 in both; above 1.0: 45,608 in both; 79x to 93x realtime on one core (38.7 to 45.5 s an hour), 71 MB peak working set streaming; same on Windows and in a Linux container. Resampler: within 0.1 dB to 6 kHz, -67 dB at 10 kHz. Whisper.net: same whisper.cpp engine, the same per-token start, end, DTW time and probability as whisper-server's verbose_json plus the segment's no-speech probability (so `WhisperResponse.MergeTokens` and `TranscriptFilter` are unchanged); RTX 3060 large-v3-turbo q8_0 on 5 minutes of real speech: 46x realtime (300 s request, no DTW) natively on Windows, 28x in a Linux container with `--gpus all`; about 1 GB of VRAM above idle. In process removes a container, an HTTP hop, a CMake and nvcc build and the 3.8 GB CUDA devel image; a native crash restarts the container and the job resumes after its last finished chunk (Task 12). DTW: a 300 s request with DTW on stopped after 58 s (18 of 140 segments, 131 of 943 words) in every combination tried (context on or off, DTW memory 128 MB or 1 GB); with 30 s requests DTW works at 16.3x. | NLayer's `MpegFile` alone: drops a frame (26 ms) about every 4.7 minutes when its 8 KiB bit-reservoir ring wraps at a frame boundary, 17 to 18 frames (0.47 s) short per hour, so the timeline drifts. `MP3Sharp` 1.0.5 (LGPL-3.0, 2019): correct length, 112x, but 16-bit output only, so the overshoot above full scale that clipping needs is lost. NAudio's `WdlResamplingSampleProvider` default (linear plus IIR): -8.2 dB at 6 kHz, a 10 kHz tone through at -27 dB. A Whisper.net HTTP wrapper container: keeps the crash isolation but is a second service to write and run, for a fault the resume already absorbs. The plain `nvidia/cuda:13.0.1-runtime-ubuntu24.04` base: 1.57 GB compressed against 2.0 GB uncompressed for the whole aspnet-based CUDA image. `OllamaSharp` 5.5.0: works (structured output, `think: false`, streaming, 9.1 s against 9.3 s for `HttpClient`) but adds `Microsoft.Extensions.AI` 10.8 for 15 lines we already have; `Microsoft.Extensions.AI.Ollama` 9.7.0-preview is deprecated in favour of OllamaSharp. ffmpeg kept only for test MP3s: a native tool on every developer machine and CI runner for test data a managed encoder makes. |
+
+### D18 evidence: the NuGet spike (2026-10-16 UTC)
+
+Measured on this host (i9-11900K, 16 threads, 96 GB, RTX 3060 12 GB, driver 610.88, Docker Desktop 29.8.2) on a copy of `data/a/burst/master/2026/10-16/120000.mp3` (a closed hour: 57,573,460 bytes, 137,749 frames, 128 kbps, 44.1 kHz, joint stereo; the copy lived in a scratch folder outside the repo and was deleted afterwards). The reference decode was ffmpeg 7.1 in a throwaway container. The host CPU was at 60% to 100% from other work during most runs, so the CPU figures are lower bounds; Task 19 measures again on the real deployment.
+
+| Question | Package (licence) | Result |
+|---|---|---|
+| MP3 decode, correctness | NLayer 3.0.0 (MIT) `MpegFile` | 137,731 of 137,749 frames: one frame lost at the start and one at each of 17 ring-buffer wraps (frames 10,788, 11,603, 22,391, ... about every 10,787 frames); 0.47 s short. Rejected. |
+| | NLayer 3.0.0 `MpegFrameDecoder` + our frame splitter and re-priming (Task 9) | 137,749 frames, 158,686,848 samples per channel = sidecar frames x 1152 = ffmpeg's count; 18 frames recovered by re-priming, 1 written as silence (the first, whose reservoir is in the previous file); SNR 81.5 dB against ffmpeg; samples >= 0.99: 61,373 and 61,373; > 1.0: 45,608 and 45,608; peak 1.4746 in both. |
+| MP3 decode, speed and memory | same | 79x to 93x realtime on one thread (38.7 to 45.5 s for the hour, including resampling and writing the WAV); 71 MB peak working set when streaming; identical figures in a Linux container. |
+| | MP3Sharp 1.0.5 (LGPL-3.0) | 112x, correct length, 16-bit only. Rejected (clipping needs floats above 1.0). |
+| Resampling to 16 kHz mono | NAudio.Core 3.1.0 (MIT) `WdlResampler`, sinc 64 taps | 0.0 dB at 100 Hz to 4 kHz, -0.1 dB at 6 kHz, -1.5 dB at 7 kHz, -3.9 dB at 7.5 kHz; aliases: -15.5 dB at 8.5 kHz, -67 dB at 10 kHz, -114 dB at 12 kHz, -135 dB at 15 kHz. Whisper's features stop at 8 kHz: adequate. 14 s of the hour's decode time. |
+| | `WdlResamplingSampleProvider` default | -2.1 dB at 4 kHz, -8.2 dB at 6 kHz; aliases -27 dB at 10 kHz. Rejected. |
+| Test MP3 encoding | GroovyMp3 0.1.3 (LGPL-3.0, 2018, test project only) | Valid 128 kbps frames that NLayer and ffmpeg decode. LAME's default input scale is 0.95 (a 0.5 sine decodes at 0.4751; ffmpeg agrees); with the scale set to 1.0 (Task 9 helper) a planted clip at 5.0 to 5.5 s is found at 5.051 to 5.550 s and planted silence at 3.0 to 7.0 s at 3.05 to 7.05 s (25 ms encoder delay, not trimmed). 330 s of audio encodes in 13 s and reproduces NLayer's wrap (2 frames recovered). |
+| Whisper.net packages | Whisper.net 1.9.1 (MIT, 2026-06-01), Runtime 1.9.1, Runtime.Cuda.Linux 1.9.1, Runtime.Cuda.Windows 1.9.1 | Bundle whisper.cpp commit `f24588a272ae8e23280d9c220536437164e6ed28` (2026-05-29, between v1.8.x tags; not v1.9.5). (Also found: the original D1 pin `d2a764c6...` is not the commit GitHub lists for tag v1.9.5, `d1be6fde11ac6e0407606b4e42fe72d34add8037`, so the original Dockerfile's `rev-parse` check would have stopped the build.) CPU package: `libwhisper.so` and `libggml-*-whisper.so` for linux-x64 (needs `libgomp.so.1`, not in the aspnet image: without it the load fails with "Failed to load native whisper library"). CUDA Linux package: adds a 167 MB `libggml-cuda-whisper.so` built for compute capabilities 75 to 121, linking `libcudart.so.13`, `libcublas.so.13` and the driver's `libcuda.so.1`; it bundles no CUDA libraries. Windows CUDA needs `cublas64_13.dll` (and `cublasLt64_13.dll`) on PATH: NVIDIA's cuBLAS 13.0.2.14 redistributable zip was enough, no toolkit install. |
+| Whisper.net on the RTX 3060 (Windows, native) | large-v3-turbo q8_0, 5 min of real speech | 300 s request, no context, prompt carried, flash attention: 46.2x realtime, 159 segments; 30 s requests: 22.0x (no DTW), 16.3x (DTW). Whole hour, mostly music, 30 s requests, host CPU at 100%: 7.5x. base.en on the GPU: 8.3x to 9.9x (more temperature fallbacks). VRAM: about 1 GB above the idle desktop (2.5 to 3.5 GB). |
+| Whisper.net on the GPU in a Linux container | aspnet:10.0 + `libgomp1` + `cuda-cudart-13-0` + `libcublas-13-0`, `docker run --gpus all` | Loads the CUDA runtime (`auto` order); 300 s request: 28.2x (no DTW); 30 s requests: 12.7x (no DTW), 9.5x (DTW). Same words as on Windows. Without `--gpus` the same image falls back to the CPU runtime (after a 92 s first-load attempt). |
+| Whisper.net on the CPU | base.en | 9.0x (Windows, 8 threads, host 57% busy, 60 s); 1.8x to 2.4x in a container with the host at 100%. With the host saturated, whisper.cpp's OpenMP threads starve: a 300 s run did not finish its first 30 s window in 18 minutes. CPU transcription is for machines without a GPU and needs few threads. large-v3-turbo on the CPU: 0.94x (4 threads, loaded host). |
+| Word timestamps | Whisper.net `SegmentData` and `WhisperToken` | Per token `Text`, `Start` and `End` (centiseconds), `DtwTimestamp` (centiseconds, -1 without DTW), `Probability`, `ProbabilityLog`; per segment `NoSpeechProbability`. Sample with DTW: `' As' 0 25 dtw 80 p 0.790`, `' she' 25 63 dtw 104 p 0.983`. `SegmentData` and `WhisperToken` are constructible in tests without the native library. |
+| DTW on long requests | whisper.cpp `f24588a2` via Whisper.net | Stops after about 58 s of a 300 s request (18 segments) with context on or off and DTW memory 128 MB or 1 GB; 60 s requests lose about 20%. Not tested on v1.9.5's whisper-server, which the original Task 16 would have called with `--dtw` and 300 s chunks. Hence DTW off by default. |
+| Images | throwaway builds, removed afterwards | `aspnet:10.0`: 340 MB; + app + `libgomp1` (cpu target): 376 MB; + CUDA libraries (cuda target): 2.01 GB (of which 155 MB was a Windows CUDA library the real build does not carry). For comparison the original plan's runtime base `nvidia/cuda:13.0.1-runtime-ubuntu24.04` is 1.57 GB compressed and its build stage `13.0.1-devel` 3.77 GB compressed. |
+| LLM enrichment | OllamaSharp 5.5.0 (MIT) and plain `HttpClient` against Ollama 0.40.4, qwen3.6:latest | Both return schema-valid JSON with `format` = the schema and `think: false` (117 output tokens, 9.1 s and 9.3 s warm; the first call 179 s while the model loaded under host load). OllamaSharp streams (93 chunks, first after 0.84 s). An `HttpClient` timeout surfaces as `TaskCanceledException` with an inner `TimeoutException`, which `OllamaClient` (Task 14) already maps to "pending". |
+| Native tools elsewhere | plan Tasks 5 to 8 | The clipping, dead-air, swear and filler detectors and `FeatureExtractor` are plain C# (checked); nothing else in the plan starts a process. |
 
 ## Prerequisites and owner actions
 
-1. **ffmpeg on the development host** for the decode tests (they fail, not skip, without it): `winget install --id Gyan.FFmpeg -e`, then open a new terminal and check `ffmpeg -version`. CI installs it with apt.
-2. **Download the whisper models** into `models/` at the repo root (gitignored, about 1 GB). Task 16 Step 1 gives the exact commands with the pinned commit and sha256 checks.
-3. **GPU:** already verified (D4). Keep Docker Desktop on the WSL 2 backend with the NVIDIA driver installed on Windows (no driver inside WSL). If `nvidia-smi` in a container ever fails after a driver update, rerun the check in D4.
+1. **Nothing to install for building or testing** (D18): decoding, resampling and test MP3 encoding are NuGet packages restored by `dotnet build`; no ffmpeg, CMake, CUDA toolkit or compiler. The GPU image fetches its two CUDA libraries from NVIDIA's apt repository at `docker build` time (about 1.3 GB), so the first CUDA build needs internet access and some minutes.
+2. **Download the whisper models** into `models/` at the repo root (gitignored, about 1 GB). Task 16 Step 1 gives the exact commands with the pinned commit and sha256 checks. They are mounted read-only into the analysis container; nothing downloads a model at run time.
+3. **GPU:** already verified (D4, D18). Keep Docker Desktop on the WSL 2 backend with the NVIDIA driver installed on Windows (no driver inside WSL, no CUDA toolkit on Windows: the image carries the CUDA 13.0 runtime libraries, the driver supplies `libcuda`). The driver must support CUDA 13.0 (610.88 reports 13.3). If `nvidia-smi` in a container ever fails after a driver update, rerun the check in D4. Running the service natively on Windows with CUDA (not needed for deployment) also needs NVIDIA's cuBLAS 13 and cudart 13 redistributable DLLs on PATH and `WAA_WHISPER_DEVICE=cuda`.
 4. **Ollama:** keep it running on the host at `http://127.0.0.1:11434` and keep `qwen3.6:latest` pulled. Do not change its tag without re-running the Task 14 smoke check; the digest used is recorded per result. If Ollama is updated so that `qwen3.6:latest` points at a new digest, enrichments are not redone automatically (they record the digest); run `--rebuild-enrichment` if wanted.
 5. **Disk:** decide the free-space threshold (`WAA_MIN_FREE_GB`, default 20). Analysis output is about 1.5 MB per audio hour (about 13 GB a year).
 6. **Validation labels (Task 18):** listen to at least 30 minutes of real Burst speech (several presenters, before and after 21:00) and label fillers, swears, dead air and clipping in a local CSV under `data/analysis/validation/` (never committed). The measured precision and recall go into `docs/analysis-validation.md`.
 7. **Review the swear list** `config/analysis/swearwords.json` (D12) and add any local terms in a mounted copy if needed.
-8. **Review the decisions above**, especially D5 (model), D7 (A first), D11 (watershed hours) and D13 (what is suppressed).
+8. **Review the decisions above**, especially D5 (model), D7 (A first), D11 (watershed hours), D13 (what is suppressed) and D18 (NuGet stack, whisper in process, DTW off by default, GroovyMp3's LGPL licence in the test project only).
 
 ## Issues closed by this plan
 
 | Issue | Closed by | Notes |
 |---|---|---|
-| #76 ffmpeg decode of a scratch copy | Task 9 (code), Task 16 (ffmpeg in the image) | |
-| #77 Transcription with whisper.cpp | Tasks 10, 12, 16; realtime factor measured in Task 19 | Close after Task 19 records the model and the realtime factor. |
+| #76 ffmpeg decode of a scratch copy | Task 9 (managed decode, D18), Task 16 (image) | Decoded without ffmpeg; say so when closing. |
+| #77 Transcription with whisper.cpp | Tasks 10, 12, 16; realtime factor measured in Task 19 | whisper.cpp through Whisper.net (D18). Close after Task 19 records the model and the realtime factor. |
 | #78 Swearing with tiers and the watershed | Task 7 | |
 | #79 Clipping | Task 5 | Thresholds stay provisional until Task 18's real-audio labels. |
 | #80 Filler words | Task 8 | Labelled an estimate. |
@@ -89,6 +113,7 @@ Input classes the spec implies but that the main path would not exercise. Each h
 5. A container killed mid-transcription, and the disk filling mid-job: resume must not re-transcribe finished chunks, scratch must be empty afterwards, the job must stop between chunks (Task 12: `Resume_after_a_crash_skips_finished_chunks`, `Low_disk_stops_between_chunks_and_keeps_progress`).
 6. An LLM answer that is valid JSON but invents a guest, quotes words that are not in the transcript, names someone the quote does not contain, or comes back wrapped in a code fence (Task 14: `Invented_claims_are_dropped`, `Fenced_json_is_accepted`).
 7. Segments that are not tidy hours: a 2 second restart segment, a sidecar rewritten after crash recovery, an audio file whose size disagrees with its sidecar, a `.part` beside it (Task 11: `Discovery_skips_parts_tmp_and_mismatched_sizes`, `Changed_sidecar_changes_the_fingerprint_and_reprocesses`, and the 2 s segment in `Discovery_reads_closed_segments_and_builds_job_ids_newest_first`).
+8. A managed decoder that silently drops frames (NLayer's bit-reservoir ring wrapping at a frame boundary, D18) or loses sync on stray bytes: the decoded length must stay frames x 1152 and match the sidecar (Task 9: `A_long_stream_keeps_every_frame_through_the_reservoir_wrap`, `Stray_bytes_and_a_corrupt_frame_keep_the_timeline`).
 
 ---
 
@@ -130,11 +155,12 @@ src/WebAudioArchive.Analysis/Detectors/SwearDetector.cs
 src/WebAudioArchive.Analysis/Detectors/FillerDetector.cs
 src/WebAudioArchive.Analysis/Detectors/DetectorRunner.cs    detector output -> AnalysisEvent
 src/WebAudioArchive.Analysis/Decode/ScratchSpace.cs
-src/WebAudioArchive.Analysis/Decode/Ffmpeg.cs
+src/WebAudioArchive.Analysis/Decode/Mp3FrameReader.cs       frame splitter + NLayer frame decoder (D18)
+src/WebAudioArchive.Analysis/Decode/SpeechResampler.cs      16 kHz mono, NAudio WDL sinc
 src/WebAudioArchive.Analysis/Decode/SegmentDecoder.cs
 src/WebAudioArchive.Analysis/Transcription/ITranscriber.cs
-src/WebAudioArchive.Analysis/Transcription/WhisperCppTranscriber.cs
-src/WebAudioArchive.Analysis/Transcription/WhisperResponse.cs
+src/WebAudioArchive.Analysis/Transcription/WhisperNetTranscriber.cs  whisper.cpp in process (D18)
+src/WebAudioArchive.Analysis/Transcription/WhisperResponse.cs       Whisper.net segments to RawSegment
 src/WebAudioArchive.Analysis/Transcription/TranscriptFilter.cs
 src/WebAudioArchive.Analysis/Transcription/ChunkPlanner.cs
 src/WebAudioArchive.Analysis/Transcription/PromptBuilder.cs
@@ -167,7 +193,7 @@ src/WebAudioArchive.Web/Analysis/AnalysisMarkers.cs         events -> PDMediaMar
 src/WebAudioArchive.Web/WebSettings.cs, Program.cs           WAA_ANALYSIS, three read-only endpoints
 src/WebAudioArchive.Web/Schedule/ScheduleService.cs          uses the shared saved schedule format (Task 13)
 tests/WebAudioArchive.Tests/Support/Signals.cs              synthetic audio
-tests/WebAudioArchive.Tests/Support/TestFfmpeg.cs           ffmpeg or a failing message
+tests/WebAudioArchive.Tests/Support/TestMp3.cs              synthetic MP3 with GroovyMp3 (no native tool)
 tests/WebAudioArchive.Tests/Support/FakeTranscriber.cs
 tests/WebAudioArchive.Tests/Support/FakeLlm.cs
 tests/WebAudioArchive.Tests/Support/AnalysisFixtures.cs     decodable synthetic segments, transcriber answers
@@ -175,12 +201,10 @@ tests/WebAudioArchive.Tests/Support/TranscriptFixtures.cs   hand-made transcript
 tests/WebAudioArchive.Tests/Support/ValidationCorpus.cs     the labelled synthetic sample
 tests/WebAudioArchive.Tests/Support/RepoFiles.cs            deployment file checks
 tests/WebAudioArchive.Tests/*Tests.cs                       one file per task area
-docker/Dockerfile.analysis
-docker/Dockerfile.whisper                                   targets cpu and cuda
-docker/docker-compose.yml                                   add analysis and whisper (recorders untouched)
-docker/docker-compose.gpu.yml                               GPU override for whisper only
-.github/workflows/ci.yml                                    ffmpeg for tests, analysis and whisper-cpu image builds
-.github/workflows/whisper-cuda.yml                          CUDA image build on change or by hand
+docker/Dockerfile.analysis                                  targets cpu and cuda (D18)
+docker/docker-compose.yml                                   add analysis (recorders untouched)
+docker/docker-compose.gpu.yml                               GPU override for analysis only
+.github/workflows/ci.yml                                    analysis image builds (cpu and cuda targets)
 docs/analysis.md                                            how analysis works, files, schemas, operations
 docs/analysis-validation.md                                 thresholds, synthetic and real-sample results
 docs/operations.md, README.md, spec                         updated in Task 19
@@ -200,7 +224,7 @@ docs/operations.md, README.md, spec                         updated in Task 19
 - Produces:
   - `sealed record RecorderRoot(string Id, string Root)`
   - `sealed class AnalysisSettingsException(string message) : Exception`
-  - `sealed record AnalysisSettings(string Station, IReadOnlyList<RecorderRoot> Recorders, IReadOnlyList<string> Preference, string OutputDir, string ScratchDir, long ScratchMaxBytes, long MinFreeBytes, Uri WhisperUrl, string WhisperModel, Uri OllamaUrl, string OllamaModel, bool EnrichmentEnabled, string ConfigPath, string? StationsConfigPath, string? ScheduleFile, DateTimeOffset? Since, string Ffmpeg, TimeSpan LagAlarm, int Port)` with `static AnalysisSettings Load(Func<string, string?> get)`.
+  - `sealed record AnalysisSettings(string Station, IReadOnlyList<RecorderRoot> Recorders, IReadOnlyList<string> Preference, string OutputDir, string ScratchDir, long ScratchMaxBytes, long MinFreeBytes, string WhisperModelPath, WhisperDevice WhisperDevice, int WhisperThreads, bool WhisperDtw, Uri OllamaUrl, string OllamaModel, bool EnrichmentEnabled, string ConfigPath, string? StationsConfigPath, string? ScheduleFile, DateTimeOffset? Since, TimeSpan LagAlarm, int Port)` with `string WhisperModel` (the model file name without extension) and `static AnalysisSettings Load(Func<string, string?> get)`; `enum WhisperDevice { Auto, Cpu, Cuda }` (D18).
   - Test project references `WebAudioArchive.Analysis` (no alias) and `WebAudioArchive.Analysis.Service` with `Aliases="analysissvc"`; `config/analysis/**` is copied to `AppContext.BaseDirectory/config/analysis/`.
 
 - [ ] **Step 1: Create the projects**
@@ -217,6 +241,12 @@ New-Item -ItemType Directory -Force src/WebAudioArchive.Analysis/Settings, src/W
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Decision D18: managed MP3 frame decoder, resampler and whisper.cpp bindings. No native runtime here (see the service). -->
+    <PackageReference Include="NLayer" Version="3.0.0" />
+    <PackageReference Include="NAudio.Core" Version="3.1.0" />
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
@@ -225,12 +255,16 @@ New-Item -ItemType Directory -Force src/WebAudioArchive.Analysis/Settings, src/W
 </Project>
 ```
 
-`src/WebAudioArchive.Analysis.Service/WebAudioArchive.Analysis.Service.csproj`:
+`src/WebAudioArchive.Analysis.Service/WebAudioArchive.Analysis.Service.csproj` (the native whisper.cpp runtimes are referenced only here: their build targets do not flow to referencing projects, so the test project never copies the 167 MB CUDA library and never loads native code):
 ```xml
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime.Cuda.Linux" Version="1.9.1" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\WebAudioArchive.Core\WebAudioArchive.Core.csproj" />
     <ProjectReference Include="..\WebAudioArchive.Analysis\WebAudioArchive.Analysis.csproj" />
@@ -249,9 +283,13 @@ In `tests/WebAudioArchive.Tests/WebAudioArchive.Tests.csproj`, add inside the `P
     <!-- Aliased because the Worker project has a public top-level Program class. -->
     <ProjectReference Include="..\..\src\WebAudioArchive.Analysis.Service\WebAudioArchive.Analysis.Service.csproj" Aliases="analysissvc" />
 ```
-and inside the item group holding the fixtures `None` item:
+inside the item group holding the fixtures `None` item:
 ```xml
     <None Include="..\..\config\analysis\**\*" Link="config\analysis\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+```
+and inside the `PackageReference` item group (decision D18; a managed LAME port, LGPL-3.0, used only by the tests to make synthetic MP3s, never shipped in an image):
+```xml
+    <PackageReference Include="GroovyMp3" Version="0.1.3" />
 ```
 
 Append to `.gitignore`:
@@ -304,14 +342,16 @@ public sealed class AnalysisSettingsTests : IDisposable
         Assert.Equal("/scratch", s.ScratchDir);
         Assert.Equal(2048L * 1024 * 1024, s.ScratchMaxBytes);
         Assert.Equal(20L * 1024 * 1024 * 1024, s.MinFreeBytes);
-        Assert.Equal(new Uri("http://whisper:8080"), s.WhisperUrl);
+        Assert.Equal("/models/ggml-large-v3-turbo-q8_0.bin", s.WhisperModelPath);
         Assert.Equal("ggml-large-v3-turbo-q8_0", s.WhisperModel);
+        Assert.Equal(WhisperDevice.Auto, s.WhisperDevice);
+        Assert.Equal(4, s.WhisperThreads);
+        Assert.False(s.WhisperDtw);
         Assert.Equal(new Uri("http://host.docker.internal:11434"), s.OllamaUrl);
         Assert.Equal("qwen3.6:latest", s.OllamaModel);
         Assert.True(s.EnrichmentEnabled);
         Assert.Equal("/config/analysis/analysis.json", s.ConfigPath);
         Assert.Equal(TimeSpan.FromHours(6), s.LagAlarm);
-        Assert.Equal("ffmpeg", s.Ffmpeg);
         Assert.Equal(8080, s.Port);
         Assert.Null(s.Since);
     }
@@ -336,7 +376,7 @@ public sealed class AnalysisSettingsTests : IDisposable
     [Theory]
     [InlineData("WAA_OLLAMA_MODEL", "kimi-k2.6:cloud", "cloud model")]
     [InlineData("WAA_OLLAMA_URL", "https://ollama.example.com", "leave")]
-    [InlineData("WAA_WHISPER_URL", "whisper:8080", "absolute http(s) URL")]
+    [InlineData("WAA_WHISPER_DEVICE", "gpu", "auto, cpu or cuda")]
     [InlineData("WAA_SCRATCH_MAX_MB", "10", "WAA_SCRATCH_MAX_MB")]
     [InlineData("WAA_ENRICHMENT", "maybe", "on or off")]
     [InlineData("WAA_ANALYSIS_PREFERENCE", "c", "recorder 'c'")]
@@ -398,6 +438,14 @@ namespace WebAudioArchive.Analysis.Settings;
 /// <summary>One recorder whose closed segments are analysed: its id (a, b) and its data root, mounted read-only.</summary>
 public sealed record RecorderRoot(string Id, string Root);
 
+/// <summary>Where whisper runs (D18): Auto tries the CUDA runtime and falls back to the CPU.</summary>
+public enum WhisperDevice
+{
+    Auto,
+    Cpu,
+    Cuda,
+}
+
 public sealed class AnalysisSettingsException(string message) : Exception(message);
 
 /// <summary>
@@ -412,8 +460,10 @@ public sealed partial record AnalysisSettings(
     string ScratchDir,
     long ScratchMaxBytes,
     long MinFreeBytes,
-    Uri WhisperUrl,
-    string WhisperModel,
+    string WhisperModelPath,
+    WhisperDevice WhisperDevice,
+    int WhisperThreads,
+    bool WhisperDtw,
     Uri OllamaUrl,
     string OllamaModel,
     bool EnrichmentEnabled,
@@ -421,10 +471,12 @@ public sealed partial record AnalysisSettings(
     string? StationsConfigPath,
     string? ScheduleFile,
     DateTimeOffset? Since,
-    string Ffmpeg,
     TimeSpan LagAlarm,
     int Port)
 {
+    /// <summary>The model label recorded in transcripts: the model file name without its extension.</summary>
+    public string WhisperModel => Path.GetFileNameWithoutExtension(WhisperModelPath);
+
     [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]
     private static partial Regex IdPattern();
 
@@ -477,7 +529,19 @@ public sealed partial record AnalysisSettings(
         foreach (var r in recorders.Where(r => !preference.Contains(r.Id)))
             preference.Add(r.Id);
 
-        var whisper = HttpUrl("WAA_WHISPER_URL", Text("WAA_WHISPER_URL", "http://whisper:8080"));
+        var device = Text("WAA_WHISPER_DEVICE", "auto").ToLowerInvariant() switch
+        {
+            "auto" => WhisperDevice.Auto,
+            "cpu" => WhisperDevice.Cpu,
+            "cuda" => WhisperDevice.Cuda,
+            var v => throw new AnalysisSettingsException($"WAA_WHISPER_DEVICE: '{v}' must be auto, cpu or cuda."),
+        };
+        var dtw = Text("WAA_WHISPER_DTW", "off").ToLowerInvariant() switch
+        {
+            "on" => true,
+            "off" => false,
+            var v => throw new AnalysisSettingsException($"WAA_WHISPER_DTW: '{v}' must be on or off."),
+        };
         var ollama = HttpUrl("WAA_OLLAMA_URL", Text("WAA_OLLAMA_URL", "http://host.docker.internal:11434"));
         var allowRemote = string.Equals(Optional("WAA_OLLAMA_ALLOW_REMOTE"), "true", StringComparison.OrdinalIgnoreCase);
         if (!allowRemote && !IsLocalOrPrivate(ollama))
@@ -511,8 +575,10 @@ public sealed partial record AnalysisSettings(
             Text("WAA_SCRATCH", "/scratch"),
             (long)Number("WAA_SCRATCH_MAX_MB", 2048, 64, 1_048_576) * 1024 * 1024,
             (long)(Number("WAA_MIN_FREE_GB", 20, 0, 1_000_000) * 1024 * 1024 * 1024),
-            whisper,
-            Text("WAA_WHISPER_MODEL", "ggml-large-v3-turbo-q8_0"),
+            Text("WAA_WHISPER_MODEL_PATH", "/models/ggml-large-v3-turbo-q8_0.bin"),
+            device,
+            (int)Number("WAA_WHISPER_THREADS", 4, 1, 64),
+            dtw,
             ollama,
             model,
             enrichment,
@@ -520,7 +586,6 @@ public sealed partial record AnalysisSettings(
             Optional("WAA_STATIONS_CONFIG"),
             Optional("WAA_SCHEDULE_FILE"),
             since,
-            Text("WAA_FFMPEG", "ffmpeg"),
             TimeSpan.FromHours(Number("WAA_LAG_ALARM_HOURS", 6, 0.1, 24 * 365)),
             (int)Number("WAA_PORT", 8080, 1, 65535));
     }
@@ -1127,7 +1192,7 @@ These records are the contract between the analysis service and every reader (we
   - `static class AnalysisJson { JsonSerializerOptions Options; void Write<T>(string path, T value); T? Read<T>(string path) where T : class; T? TryRead<T>(string path, out string? error) where T : class; }`
   - `sealed class AnalysisPaths(string root, string station)` with constants `TranscriptFile`, `EventsFile`, `FeaturesFile`, `StateFile`, `PartialFile`, `ShowAnalysisFile`, `EnrichmentFile` and `string SegmentDir(string jobId)`, `string SegmentsDir`, `string DayEvents(DateOnly utcDate)`, `string EventsDir`, `string ShowDir(string showId, DateTimeOffset startUtc)`, `string ShowsDir`.
   - `sealed record TimelineAnchor(double AudioOffset, DateTimeOffset Utc)`; `static class SegmentTimeline { IReadOnlyList<TimelineAnchor> Anchors(SegmentMeta); DateTimeOffset ToUtc(IReadOnlyList<TimelineAnchor>, double); double ToOffset(IReadOnlyList<TimelineAnchor>, DateTimeOffset); IReadOnlyList<(DateTimeOffset From, DateTimeOffset To)> Pieces(IReadOnlyList<TimelineAnchor>, double audioSeconds); }`
-  - `sealed record TranscriptWord(string Text, double Start, double End, double Probability)`; `sealed record TranscriptSegment(double Start, double End, string Text, double NoSpeechProb, double AvgLogProb, string? Suppressed, IReadOnlyList<TranscriptWord> Words)`; `sealed record TranscriptDocument(int Schema, string Station, string Recorder, string Instance, string JobId, string SourceFile, DateTimeOffset SegmentStartUtc, DateTimeOffset SegmentEndUtc, double AudioSeconds, IReadOnlyList<TimelineAnchor> Timeline, string Engine, string Model, string Language, string TranscriptVersion, string Ffmpeg, DateTimeOffset CreatedUtc, double TranscribeSeconds, IReadOnlyList<TranscriptSegment> Segments)` with `const int CurrentSchema = 1`, `ToUtc(double)`, `AudioFromUtc`, `AudioToUtc`.
+  - `sealed record TranscriptWord(string Text, double Start, double End, double Probability)`; `sealed record TranscriptSegment(double Start, double End, string Text, double NoSpeechProb, double AvgLogProb, string? Suppressed, IReadOnlyList<TranscriptWord> Words)`; `sealed record TranscriptDocument(int Schema, string Station, string Recorder, string Instance, string JobId, string SourceFile, DateTimeOffset SegmentStartUtc, DateTimeOffset SegmentEndUtc, double AudioSeconds, IReadOnlyList<TimelineAnchor> Timeline, string Engine, string Model, string Language, string TranscriptVersion, string Decoder, DateTimeOffset CreatedUtc, double TranscribeSeconds, IReadOnlyList<TranscriptSegment> Segments)` with `const int CurrentSchema = 1`, `ToUtc(double)`, `AudioFromUtc`, `AudioToUtc`.
   - `static class EventTypes { Swear = "swear", Clipping = "clipping", Filler = "filler", DeadAir = "dead-air", Song = "song" }`, `static class Severities { Info, Low, Medium, High }`, `static class EventSources { Audio, Transcript, Llm }`.
   - `sealed record AnalysisEvent(string Id, string Type, DateTimeOffset StartUtc, DateTimeOffset EndUtc, string Severity, double Confidence, string Detector, string DetectorVersion, string Source, string Recorder, string JobId, double AudioOffset, double AudioSeconds, string? Label, IReadOnlyDictionary<string, string>? Evidence)` with `string Link` and `static string MakeId(...)`.
   - `sealed record SourceSpan(string Recorder, DateTimeOffset FromUtc, DateTimeOffset ToUtc)`; `sealed record EventsDocument(int Schema, string Station, string Scope, DateTimeOffset FromUtc, DateTimeOffset ToUtc, DateTimeOffset BuiltUtc, IReadOnlyDictionary<string, string> Versions, IReadOnlyList<SourceSpan> Coverage, IReadOnlyDictionary<string, double>? Stats, IReadOnlyList<AnalysisEvent> Events)` with `const int CurrentSchema = 1`.
@@ -1199,7 +1264,7 @@ public sealed class AnalysisContractsTests : IDisposable
     {
         var path = Path.Combine(_dir, "x", AnalysisPaths.TranscriptFile);
         var doc = new TranscriptDocument(TranscriptDocument.CurrentSchema, "burst", "a", "home-a", "a/2026/10-16/080000", "080000.mp3",
-            T, T.AddHours(1), 3600, [new TimelineAnchor(0, T)], "whisper.cpp", "ggml-large-v3-turbo-q8_0", "en", "tv", "ffmpeg 6.1.1",
+            T, T.AddHours(1), 3600, [new TimelineAnchor(0, T)], "whisper.net 1.9.1 (cuda)", "ggml-large-v3-turbo-q8_0", "en", "tv", "NLayer 3.0.0 frame decoder, NAudio.Core 3.1.0 WDL sinc resampler",
             T.AddHours(1), 120,
             [new TranscriptSegment(1, 2, "Hello there.", 0.01, -0.2, null, [new TranscriptWord("Hello", 1, 1.4, 0.9), new TranscriptWord("there.", 1.5, 1.9, 0.8)])]);
 
@@ -1266,7 +1331,7 @@ public sealed class AnalysisContractsTests : IDisposable
     {
         TranscriptDocument Doc(string recorder, DateTimeOffset start, params (double At, string Text, string? Suppressed)[] lines) => new(
             1, "burst", recorder, "home-" + recorder, $"{recorder}/2026/10-16/{start:HHmmss}", $"{start:HHmmss}.mp3", start, start.AddHours(1), 3600,
-            [new TimelineAnchor(0, start)], "fake", "fake", "en", "tv", "ffmpeg", start, 1,
+            [new TimelineAnchor(0, start)], "fake", "fake", "en", "tv", "decoder", start, 1,
             lines.Select(l => new TranscriptSegment(l.At, l.At + 2, l.Text, 0, 0, l.Suppressed, [new TranscriptWord(l.Text, l.At, l.At + 1, 1)])).ToList());
 
         var a = Doc("a", T, (60, "from a", null), (120, "music noise", "repetition"), (3500, "late a", null));
@@ -1521,7 +1586,7 @@ public sealed record TranscriptDocument(
     string Model,
     string Language,
     string TranscriptVersion,
-    string Ffmpeg,
+    string Decoder,
     DateTimeOffset CreatedUtc,
     double TranscribeSeconds,
     IReadOnlyList<TranscriptSegment> Segments)
@@ -2269,7 +2334,7 @@ public sealed record AudioFeatures(
 }
 
 /// <summary>
-/// Streams interleaved float PCM (as ffmpeg writes it with -f f32le) into window levels and clip runs. Reads may split
+/// Streams interleaved float PCM (from the decoder, or as little-endian f32 bytes) into window levels and clip runs. Reads may split
 /// a sample, a frame or a run at any byte; the result is the same as for one read.
 /// </summary>
 public sealed class FeatureExtractor
@@ -2711,7 +2776,7 @@ public static class TranscriptFixtures
         }
 
         return new TranscriptDocument(TranscriptDocument.CurrentSchema, "burst", "a", "home-a", "a/2026/10-16/190000", "190000.mp3",
-            start, start.AddHours(1), 3600, [new TimelineAnchor(0, start)], "fake", "fake-model", "en", "tv1", "ffmpeg test",
+            start, start.AddHours(1), 3600, [new TimelineAnchor(0, start)], "fake", "fake-model", "en", "tv1", "decoder test",
             start.AddHours(1), 1, segments);
     }
 }
@@ -3225,57 +3290,86 @@ git commit -m "Analysis: filler detector (um, uh, er, erm, ah, hmm), labelled an
 
 ---
 
-### Task 9: Scratch space and ffmpeg decode of a scratch copy
+### Task 9: Scratch space and managed decode of a scratch copy
 
 **Files:**
-- Create: `src/WebAudioArchive.Analysis/Decode/ScratchSpace.cs`, `src/WebAudioArchive.Analysis/Decode/Ffmpeg.cs`, `src/WebAudioArchive.Analysis/Decode/SegmentDecoder.cs`
-- Create: `tests/WebAudioArchive.Tests/Support/TestFfmpeg.cs`
-- Modify: `.github/workflows/ci.yml` (install ffmpeg before the tests)
+- Create: `src/WebAudioArchive.Analysis/Decode/ScratchSpace.cs`, `src/WebAudioArchive.Analysis/Decode/Mp3FrameReader.cs`, `src/WebAudioArchive.Analysis/Decode/SpeechResampler.cs`, `src/WebAudioArchive.Analysis/Decode/SegmentDecoder.cs`
+- Create: `tests/WebAudioArchive.Tests/Support/TestMp3.cs`
 - Test: `tests/WebAudioArchive.Tests/SegmentDecoderTests.cs`
+
+Decision D18: no ffmpeg. The decoder is managed code from NuGet (`NLayer` 3.0.0 frame decoder, `NAudio.Core` 3.1.0 resampler, referenced in Task 1), and test MP3s are made by `GroovyMp3` 0.1.3 in the test process. Nothing to install, nothing to add to CI.
 
 **Interfaces:**
 - Consumes: `FeatureExtractor`, `AudioFeatures` (Task 5), `WavFile` (Task 4), `DeadAirDetector`, `ClippingDetector` (Tasks 5, 6), `Signals`.
 - Produces:
   - `sealed class ScratchFullException(string message)`; `sealed class ScratchSpace(string root, long maxBytes) { string Root; long MaxBytes; long UsedBytes(); int SweepStale(); ScratchLease Acquire(string jobName, long expectedBytes); }`; `sealed class ScratchLease : IDisposable { string Dir; string PathFor(string fileName); }`
-  - `sealed class DecodeException(string message)`; `sealed class Ffmpeg(string executable) { string Executable; static string? Locate(string setting); Task RunAsync(IReadOnlyList<string> args, CancellationToken ct); Task RunAsync(IReadOnlyList<string> args, Func<Stream, CancellationToken, Task>? readStdout, CancellationToken ct); Task<string> VersionAsync(CancellationToken ct); }`
-  - `sealed record DecodedSegment(string SpeechWavPath, AudioFeatures Features, string FfmpegVersion)`; `sealed class SegmentDecoder(Ffmpeg ffmpeg) { const int SpeechRate = 16000; static long ScratchBytesFor(long mp3Bytes, double audioSeconds); Task<DecodedSegment> DecodeAsync(string sourceAudio, long expectedBytes, int sampleRate, int channels, ScratchLease lease, CancellationToken ct); }`
-  - Test helper `TestFfmpeg { static string Executable; static Task EncodeMp3Async(string mp3Path, float[] interleaved, int channels, int rate = 44100); }`
+  - `sealed class Mp3FrameReader(Stream source) { const int SamplesPerFrame = 1152; const int MaxFloatsPerFrame = 2304; int SampleRate; int Channels; long Frames; int SilencedFrames; int RecoveredFrames; long SkippedBytes; int ReadFrame(float[] interleaved); }`
+  - `sealed class SpeechResampler(int inputRate, int channels, int outputRate) { long Produced; ReadOnlySpan<float> Push(ReadOnlySpan<float> interleaved); ReadOnlySpan<float> Flush(long total); }`
+  - `sealed class DecodeException(string message)`; `sealed record DecodedSegment(string SpeechWavPath, AudioFeatures Features, string Decoder, long Frames, int SilencedFrames, int RecoveredFrames)`; `sealed class SegmentDecoder { const int SpeechRate = 16000; static readonly string DecoderName; static long ScratchBytesFor(long mp3Bytes, double audioSeconds); Task<DecodedSegment> DecodeAsync(string sourceAudio, long expectedBytes, int sampleRate, int channels, ScratchLease lease, CancellationToken ct); }`
+  - Test helper `TestMp3 { static Task EncodeMp3Async(string mp3Path, float[] interleaved, int channels, int rate = 44100); static byte[] Encode(float[] interleaved, int channels, int rate = 44100); }`
 
-- [ ] **Step 1: Write the ffmpeg test helper**
+- [ ] **Step 1: Write the MP3 test helper**
 
-`tests/WebAudioArchive.Tests/Support/TestFfmpeg.cs`:
+`tests/WebAudioArchive.Tests/Support/TestMp3.cs`:
 ```csharp
-using WebAudioArchive.Analysis.Audio;
-using WebAudioArchive.Analysis.Decode;
+using System.Buffers.Binary;
+using System.Reflection;
+using GroovyCodecs.Mp3;
+using GroovyCodecs.Types;
 
 namespace WebAudioArchive.Tests.Support;
 
 /// <summary>
-/// ffmpeg for tests that decode real MP3. Missing ffmpeg fails the test with what to install (tests are never skipped).
-/// MP3 test files are made here from synthetic signals, in a temp folder, and are never committed.
+/// 128 kbps MP3 files made from synthetic signals with GroovyMp3 (a managed port of LAME, test project only), in a temp
+/// folder, never committed. Nothing to install. LAME's default input scale of 0.95 is set to 1.0 so a planted full-scale
+/// run stays at full scale (measured: with 0.95 a hard-clipped tone decodes at a peak of 0.968 and no sample reaches 0.98).
 /// </summary>
-public static class TestFfmpeg
+public static class TestMp3
 {
-    public static string Executable
+    public static Task EncodeMp3Async(string mp3Path, float[] interleaved, int channels, int rate = 44100)
     {
-        get
-        {
-            var found = Ffmpeg.Locate(Environment.GetEnvironmentVariable("WAA_FFMPEG") ?? "ffmpeg");
-            Assert.True(found is not null,
-                "ffmpeg is required for this test and was not found. Install it (Windows: winget install --id Gyan.FFmpeg -e, then open a new terminal; Linux: sudo apt-get install -y ffmpeg) or set WAA_FFMPEG to its full path.");
-            return found!;
-        }
+        File.WriteAllBytes(mp3Path, Encode(interleaved, channels, rate));
+        return Task.CompletedTask;
     }
 
-    /// <summary>Encodes interleaved float samples as a 128 kbps LAME MP3, like the Burst stream.</summary>
-    public static async Task EncodeMp3Async(string mp3Path, float[] interleaved, int channels, int rate = 44100)
+    public static byte[] Encode(float[] interleaved, int channels, int rate = 44100)
     {
-        var wav = mp3Path + ".src.wav";
-        WavFile.WritePcm16(wav, rate, channels, interleaved);
-        await new Ffmpeg(Executable).RunAsync(
-            ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", wav, "-c:a", "libmp3lame", "-b:a", "128k", "-y", mp3Path],
-            CancellationToken.None);
-        File.Delete(wav);
+        var format = new AudioFormat
+        {
+            SampleRate = rate,
+            Channels = (short)channels,
+            BitsPerSample = 16,
+            BlockAlign = (short)(channels * 2),
+            AverageBytesPerSecond = rate * channels * 2,
+            BigEndian = false,
+            IsFloatingPoint = false,
+        };
+        var encoder = new Mp3Encoder(format, 128, channels == 1 ? Mp3Encoder.CHANNEL_MODE_MONO : Mp3Encoder.CHANNEL_MODE_JOINT_STEREO, Mp3Encoder.QUALITY_MIDDLE, false);
+        SetFullScale(encoder);
+
+        var pcm = new byte[interleaved.Length * 2];
+        for (var i = 0; i < interleaved.Length; i++)
+            BinaryPrimitives.WriteInt16LittleEndian(pcm.AsSpan(i * 2), (short)Math.Round(Math.Clamp(interleaved[i], -1f, 1f) * 32767));
+
+        using var mp3 = new MemoryStream();
+        var buffer = new byte[encoder.MP3BufferSize];
+        for (var offset = 0; offset < pcm.Length; offset += encoder.PCMBufferSize)
+        {
+            var n = encoder.EncodeBuffer(pcm, offset, Math.Min(encoder.PCMBufferSize, pcm.Length - offset), buffer);
+            mp3.Write(buffer, 0, n);
+        }
+
+        mp3.Write(buffer, 0, encoder.EncodeFinish(buffer));
+        encoder.Close();
+        return mp3.ToArray();
+    }
+
+    static void SetFullScale(Mp3Encoder encoder)
+    {
+        var flags = typeof(Mp3Encoder).GetField("gfp", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(encoder);
+        var scale = flags?.GetType().GetField("scale", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.True(scale is not null, "GroovyMp3's internal LAME flags (gfp.scale) were not found; this helper is written for GroovyMp3 0.1.3.");
+        scale!.SetValue(flags, 1f);
     }
 }
 ```
@@ -3300,11 +3394,25 @@ public sealed class SegmentDecoderTests : IDisposable
 
     string ScratchRoot => Path.Combine(_dir, "scratch");
 
-    async Task<string> Mp3(float[] stereo)
+    async Task<string> Mp3(float[] stereo, string name = "080000.mp3")
     {
-        var p = Path.Combine(_dir, "080000.mp3");
-        await TestFfmpeg.EncodeMp3Async(p, stereo, 2);
+        var p = Path.Combine(_dir, name);
+        await TestMp3.EncodeMp3Async(p, stereo, 2);
         return p;
+    }
+
+    async Task<string> Write(string name, byte[] bytes)
+    {
+        var p = Path.Combine(_dir, name);
+        await File.WriteAllBytesAsync(p, bytes);
+        return p;
+    }
+
+    static async Task<DecodedSegment> DecodeAsync(ScratchSpace scratch, string mp3, double seconds)
+    {
+        var length = new FileInfo(mp3).Length;
+        using var lease = scratch.Acquire(Path.GetFileNameWithoutExtension(mp3), SegmentDecoder.ScratchBytesFor(length, seconds));
+        return await new SegmentDecoder().DecodeAsync(mp3, length, 44100, 2, lease, CancellationToken.None);
     }
 
     [Fact]
@@ -3314,7 +3422,7 @@ public sealed class SegmentDecoderTests : IDisposable
         var before = await File.ReadAllBytesAsync(mp3);
         var written = File.GetLastWriteTimeUtc(mp3);
         var scratch = new ScratchSpace(ScratchRoot, 512L * 1024 * 1024);
-        var decoder = new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable));
+        var decoder = new SegmentDecoder();
 
         DecodedSegment decoded;
         using (var lease = scratch.Acquire("a/2026/10-16/080000", SegmentDecoder.ScratchBytesFor(before.Length, 10)))
@@ -3324,15 +3432,17 @@ public sealed class SegmentDecoderTests : IDisposable
             Assert.Equal(16000, info.SampleRate);
             Assert.Equal(1, info.Channels);
             Assert.InRange(info.Seconds, 9.9, 10.1);
+            Assert.Equal(decoded.Features.Seconds, info.Seconds, 3);
             Assert.StartsWith(scratch.Root, decoded.SpeechWavPath);
         }
 
         Assert.InRange(decoded.Features.Seconds, 9.9, 10.1);
         Assert.Equal(2, decoded.Features.Channels);
+        Assert.Equal(decoded.Frames * Mp3FrameReader.SamplesPerFrame, decoded.Features.Frames);
         var dead = Assert.Single(DeadAirDetector.Detect(decoded.Features, new DeadAirOptions { MinSeconds = 3 }));
         Assert.InRange(dead.StartSeconds, 2.9, 3.15);
         Assert.InRange(dead.EndSeconds, 6.85, 7.1);
-        Assert.StartsWith("ffmpeg version", decoded.FfmpegVersion);
+        Assert.StartsWith("NLayer 3.0.0", decoded.Decoder);
 
         Assert.Equal(before, await File.ReadAllBytesAsync(mp3));
         Assert.Equal(written, File.GetLastWriteTimeUtc(mp3));
@@ -3345,10 +3455,8 @@ public sealed class SegmentDecoderTests : IDisposable
         var quiet = Signals.Sine(5, amp: 0.3);
         var loud = Signals.Sine(0.5, amp: 1.4).Select(x => Math.Clamp(x, -1f, 1f)).ToArray();
         var mp3 = await Mp3(Signals.Stereo(Signals.Concat(quiet, loud, Signals.Sine(4.5, amp: 0.3))));
-        var scratch = new ScratchSpace(ScratchRoot, 512L * 1024 * 1024);
 
-        using var lease = scratch.Acquire("clip", SegmentDecoder.ScratchBytesFor(new FileInfo(mp3).Length, 10));
-        var decoded = await new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable)).DecodeAsync(mp3, new FileInfo(mp3).Length, 44100, 2, lease, CancellationToken.None);
+        var decoded = await DecodeAsync(new ScratchSpace(ScratchRoot, 512L * 1024 * 1024), mp3, 10);
         var events = ClippingDetector.Detect(decoded.Features, new ClippingOptions { Threshold = 0.98 }).Events;
 
         Assert.NotEmpty(events);
@@ -3363,11 +3471,12 @@ public sealed class SegmentDecoderTests : IDisposable
         await File.WriteAllTextAsync(bad, string.Concat(Enumerable.Repeat("this is not audio. ", 300)));
         var scratch = new ScratchSpace(ScratchRoot, 64L * 1024 * 1024);
 
-        await Assert.ThrowsAsync<DecodeException>(async () =>
+        var ex = await Assert.ThrowsAsync<DecodeException>(async () =>
         {
             using var lease = scratch.Acquire("bad", 1_000_000);
-            await new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable)).DecodeAsync(bad, new FileInfo(bad).Length, 44100, 2, lease, CancellationToken.None);
+            await new SegmentDecoder().DecodeAsync(bad, new FileInfo(bad).Length, 44100, 2, lease, CancellationToken.None);
         });
+        Assert.Contains("no MPEG audio frames", ex.Message);
         Assert.Empty(Directory.EnumerateFileSystemEntries(scratch.Root));
     }
 
@@ -3379,7 +3488,7 @@ public sealed class SegmentDecoderTests : IDisposable
         using var lease = scratch.Acquire("size", 1_000_000);
 
         var ex = await Assert.ThrowsAsync<DecodeException>(() =>
-            new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable)).DecodeAsync(mp3, new FileInfo(mp3).Length + 1, 44100, 2, lease, CancellationToken.None));
+            new SegmentDecoder().DecodeAsync(mp3, new FileInfo(mp3).Length + 1, 44100, 2, lease, CancellationToken.None));
         Assert.Contains("sidecar says", ex.Message);
     }
 
@@ -3410,11 +3519,47 @@ public sealed class SegmentDecoderTests : IDisposable
     }
 
     [Fact]
-    public async Task Missing_ffmpeg_is_a_clear_error()
+    public async Task A_long_stream_keeps_every_frame_through_the_reservoir_wrap()
     {
-        Assert.Null(Ffmpeg.Locate("definitely-not-ffmpeg-waa"));
-        var ex = await Assert.ThrowsAsync<DecodeException>(() => new Ffmpeg(Path.Combine(_dir, "no-such-ffmpeg")).RunAsync(["-version"], CancellationToken.None));
-        Assert.Contains("could not be started", ex.Message);
+        // 330 s of the signal that, in the D18 spike, made NLayer's 8 KiB bit-reservoir ring wrap at frame boundaries
+        // where the next frame needs the reservoir (NLayer's own MpegFile dropped 3 of its 12,635 frames).
+        var random = new Random(7);
+        var mono = new float[330 * Signals.Rate];
+        for (var i = 0; i < mono.Length; i++)
+        {
+            var t = i / (double)Signals.Rate;
+            var envelope = 0.5 + 0.5 * Math.Sin(2 * Math.PI * 3 * t);
+            mono[i] = (float)(0.25 * envelope * (Math.Sin(2 * Math.PI * 180 * t) + 0.5 * Math.Sin(2 * Math.PI * 1300 * t)) + 0.05 * (random.NextDouble() - 0.5));
+        }
+
+        var mp3 = await Mp3(Signals.Stereo(mono), "long.mp3");
+        var decoded = await DecodeAsync(new ScratchSpace(ScratchRoot, 512L * 1024 * 1024), mp3, 330);
+
+        Assert.True(decoded.RecoveredFrames >= 1, "the stream never hit NLayer's reservoir wrap, so the recovery path was not exercised");
+        Assert.Equal(0, decoded.SilencedFrames);
+        Assert.Equal(decoded.Frames * Mp3FrameReader.SamplesPerFrame, decoded.Features.Frames);
+        Assert.InRange(decoded.Features.Seconds, 330, 330.1);
+    }
+
+    [Fact]
+    public async Task Stray_bytes_and_a_corrupt_frame_keep_the_timeline()
+    {
+        var clean = await File.ReadAllBytesAsync(await Mp3(Signals.Stereo(Signals.SpeechLike(10, 4)), "clean.mp3"));
+        var scratch = new ScratchSpace(ScratchRoot, 512L * 1024 * 1024);
+        var reference = await DecodeAsync(scratch, await Write("reference.mp3", clean), 10);
+
+        // 1000 bytes of false frame headers (FF FB 90 00) in front: no second header follows any of them, so all are skipped.
+        var junk = Enumerable.Repeat(new byte[] { 0xFF, 0xFB, 0x90, 0x00 }, 250).SelectMany(b => b).ToArray();
+        var damaged = junk.Concat(clean).ToArray();
+        // and the audio data of the 101st frame zeroed, its header and side information kept (128 kbps frames are 417 or 418 bytes)
+        var at = 0;
+        for (var k = 0; k < 100; k++) at += 417 + ((clean[at + 2] >> 1) & 1);
+        Array.Clear(damaged, junk.Length + at + 40, 300);
+
+        var decoded = await DecodeAsync(scratch, await Write("damaged.mp3", damaged), 10);
+
+        Assert.Equal(reference.Frames, decoded.Frames);
+        Assert.Equal(reference.Features.Frames, decoded.Features.Frames);
     }
 }
 ```
@@ -3422,9 +3567,9 @@ public sealed class SegmentDecoderTests : IDisposable
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~SegmentDecoderTests`
-Expected: build FAILS with `CS0246` for `ScratchSpace`, `Ffmpeg`, `SegmentDecoder`.
+Expected: build FAILS with `CS0246` for `ScratchSpace`, `Mp3FrameReader`, `SegmentDecoder`, `DecodedSegment`.
 
-- [ ] **Step 4: Implement scratch, ffmpeg and the decoder**
+- [ ] **Step 4: Implement scratch, the frame reader, the resampler and the decoder**
 
 `src/WebAudioArchive.Analysis/Decode/ScratchSpace.cs`:
 ```csharp
@@ -3557,142 +3702,347 @@ public sealed class ScratchLease : IDisposable
 }
 ```
 
-`src/WebAudioArchive.Analysis/Decode/Ffmpeg.cs`:
+`src/WebAudioArchive.Analysis/Decode/Mp3FrameReader.cs`:
 ```csharp
-using System.ComponentModel;
-using System.Diagnostics;
-using System.Text;
+using NLayer;
 
 namespace WebAudioArchive.Analysis.Decode;
 
-public sealed class DecodeException(string message) : Exception(message);
-
-/// <summary>Runs ffmpeg as a child process. It inherits the container's nice level, so it never outranks a recorder.</summary>
-public sealed class Ffmpeg(string executable)
+/// <summary>
+/// Reads an MPEG-1 Layer III stream (the recorders' format) one frame at a time and decodes each frame with NLayer's
+/// managed frame decoder. Every frame header found gives exactly 1152 samples per channel, so the decoded length is
+/// always frames x 1152, the count the sidecar records. A frame that cannot be decoded is written as silence (its
+/// place on the timeline is kept). NLayer 3.0.0's bit reservoir refuses a frame when its 8 KiB ring buffer wraps
+/// exactly at a frame boundary (about once every 4.7 minutes at 128 kbps, measured on a real Burst hour); such a frame
+/// is decoded exactly by a fresh decoder primed with the previous frames, whose output is thrown away.
+/// NLayer's own MpegFile is not used: it skips those frames, shortening an hour by about 0.47 s.
+/// </summary>
+public sealed class Mp3FrameReader
 {
-    public string Executable => executable;
+    public const int SamplesPerFrame = 1152;
 
-    /// <summary>The full path for a setting that is a path, or a name found on PATH; null when ffmpeg is not there.</summary>
-    public static string? Locate(string setting)
+    /// <summary>The largest frame NLayer can return: 1152 stereo samples.</summary>
+    public const int MaxFloatsPerFrame = SamplesPerFrame * 2;
+
+    const int MaxFrameBytes = 1441 + 4;
+    const int KeepFrames = 4;
+
+    readonly Stream _source;
+    readonly byte[] _buffer = new byte[1 << 16];
+    readonly Queue<byte[]> _recent = new();
+    readonly RawFrame _frame = new();
+    int _have;
+    int _pos;
+    bool _eof;
+    bool _inSync;
+    MpegFrameDecoder _decoder = new();
+
+    public Mp3FrameReader(Stream source) => _source = source;
+
+    public int SampleRate { get; private set; }
+
+    public int Channels { get; private set; }
+
+    public long Frames { get; private set; }
+
+    /// <summary>Frames NLayer could not decode, written as silence (usually only the first, whose bit reservoir is in the previous file).</summary>
+    public int SilencedFrames { get; private set; }
+
+    /// <summary>Frames refused by NLayer's ring-buffer wrap and decoded by a primed fresh decoder.</summary>
+    public int RecoveredFrames { get; private set; }
+
+    public long SkippedBytes { get; private set; }
+
+    /// <summary>Decodes the next frame into <paramref name="interleaved"/> (at least MaxFloatsPerFrame long). Returns the floats written, 0 at the end.</summary>
+    public int ReadFrame(float[] interleaved)
     {
-        if (Path.IsPathRooted(setting) || setting.Contains('/') || setting.Contains('\\'))
-            return File.Exists(setting) ? Path.GetFullPath(setting) : null;
-        var names = OperatingSystem.IsWindows() ? new[] { setting + ".exe", setting } : new[] { setting };
-        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        ArgumentOutOfRangeException.ThrowIfLessThan(interleaved.Length, MaxFloatsPerFrame);
+        while (true)
         {
-            foreach (var name in names)
+            Fill();
+            var available = _have - _pos;
+            if (available < 4) return 0;
+            var span = _buffer.AsSpan(_pos, available);
+            var length = RawFrame.LengthAt(span);
+            // Out of sync, a header counts only when another header follows it (or the file ends), so stray 0xFFF bytes are skipped.
+            var fits = length > 0 && length <= available;
+            if (!fits || !(_inSync || (length + 4 <= available ? RawFrame.LengthAt(span[length..]) > 0 : _eof)))
             {
-                var candidate = Path.Combine(dir.Trim('"'), name);
-                if (File.Exists(candidate)) return candidate;
+                if (fits || length == 0 || !_eof)
+                {
+                    _pos++;
+                    SkippedBytes++;
+                    _inSync = false;
+                    continue;
+                }
+
+                return 0;
             }
-        }
 
-        return null;
+            var bytes = span[..length].ToArray();
+            _pos += length;
+            _inSync = true;
+            return Decode(bytes, interleaved);
+        }
     }
 
-    public Task RunAsync(IReadOnlyList<string> args, CancellationToken ct) => RunAsync(args, null, ct);
-
-    /// <summary>Runs to completion. Stdout goes to <paramref name="readStdout"/> (or is discarded); a non-zero exit throws with the end of stderr.</summary>
-    public async Task RunAsync(IReadOnlyList<string> args, Func<Stream, CancellationToken, Task>? readStdout, CancellationToken ct)
+    int Decode(byte[] bytes, float[] interleaved)
     {
-        var psi = new ProcessStartInfo(executable)
+        _frame.Load(bytes);
+        var channels = _frame.ChannelMode == MpegChannelMode.Mono ? 1 : 2;
+        if (Frames == 0)
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        foreach (var a in args) psi.ArgumentList.Add(a);
-
-        using var p = new Process { StartInfo = psi };
-        try
-        {
-            if (!p.Start()) throw new DecodeException($"ffmpeg could not be started ({executable})");
-        }
-        catch (Win32Exception ex)
-        {
-            throw new DecodeException($"ffmpeg could not be started ({executable}): {ex.Message}. Install ffmpeg or set WAA_FFMPEG.");
+            SampleRate = _frame.SampleRate;
+            Channels = channels;
         }
 
-        var stderr = ReadTailAsync(p.StandardError, 4096);
-        try
+        var expected = SamplesPerFrame * Channels;
+        var got = channels == Channels ? TryDecode(_decoder, _frame, interleaved) : 0;
+        if (got != expected && channels == Channels && _recent.Count > 0)
         {
-            if (readStdout is not null) await readStdout(p.StandardOutput.BaseStream, ct);
-            else await p.StandardOutput.BaseStream.CopyToAsync(Stream.Null, ct);
-            await p.WaitForExitAsync(ct);
-        }
-        catch
-        {
-            Kill(p);
-            throw;
+            for (var prime = 2; prime <= KeepFrames && got != expected; prime++)
+            {
+                _decoder = new MpegFrameDecoder();
+                var discard = new float[MaxFloatsPerFrame];
+                foreach (var previous in _recent.Skip(Math.Max(0, _recent.Count - prime)))
+                {
+                    var p = new RawFrame();
+                    p.Load(previous);
+                    TryDecode(_decoder, p, discard);
+                }
+
+                _frame.Load(bytes);
+                got = TryDecode(_decoder, _frame, interleaved);
+            }
+
+            if (got == expected) RecoveredFrames++;
         }
 
-        var tail = await stderr;
-        if (p.ExitCode != 0) throw new DecodeException($"ffmpeg exited with code {p.ExitCode}: {tail.Trim()}");
+        _recent.Enqueue(bytes);
+        if (_recent.Count > KeepFrames) _recent.Dequeue();
+        if (got != expected)
+        {
+            Array.Clear(interleaved, 0, expected);
+            SilencedFrames++;
+        }
+
+        Frames++;
+        return expected;
     }
 
-    /// <summary>The first line of ffmpeg -version, recorded in every transcript.</summary>
-    public async Task<string> VersionAsync(CancellationToken ct)
-    {
-        var first = "";
-        await RunAsync(["-hide_banner", "-version"], async (s, token) =>
-        {
-            using var reader = new StreamReader(s);
-            first = await reader.ReadLineAsync(token) ?? "";
-            await reader.ReadToEndAsync(token);
-        }, ct);
-        return first.Trim();
-    }
-
-    static async Task<string> ReadTailAsync(StreamReader reader, int max)
-    {
-        var sb = new StringBuilder();
-        var buffer = new char[1024];
-        int n;
-        while ((n = await reader.ReadAsync(buffer, 0, buffer.Length)) > 0)
-        {
-            sb.Append(buffer, 0, n);
-            if (sb.Length > max * 2) sb.Remove(0, sb.Length - max);
-        }
-
-        return sb.Length > max ? sb.ToString(sb.Length - max, max) : sb.ToString();
-    }
-
-    static void Kill(Process p)
+    static int TryDecode(MpegFrameDecoder decoder, RawFrame frame, float[] dest)
     {
         try
         {
-            if (!p.HasExited) p.Kill(entireProcessTree: true);
+            return decoder.DecodeFrame(frame, dest, 0);
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
+            return 0;
         }
-        catch (Win32Exception)
+    }
+
+    void Fill()
+    {
+        if (_eof || _have - _pos >= 2 * MaxFrameBytes) return;
+        Buffer.BlockCopy(_buffer, _pos, _buffer, 0, _have - _pos);
+        _have -= _pos;
+        _pos = 0;
+        while (_have < _buffer.Length)
         {
+            var n = _source.Read(_buffer, _have, _buffer.Length - _have);
+            if (n == 0)
+            {
+                _eof = true;
+                break;
+            }
+
+            _have += n;
         }
+    }
+
+    /// <summary>One frame's bytes as NLayer's IMpegFrame: header fields, and the bits after the header and CRC.</summary>
+    sealed class RawFrame : IMpegFrame
+    {
+        static readonly int[] Kbps = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+        static readonly int[] Rates = [44100, 48000, 32000, 0];
+        byte[] _data = [];
+        int _offset;
+        int _bits;
+        ulong _bucket;
+
+        /// <summary>The frame length for an MPEG-1 Layer III header at the start of <paramref name="b"/>, or 0.</summary>
+        public static int LengthAt(ReadOnlySpan<byte> b)
+        {
+            if (b.Length < 4 || b[0] != 0xFF || (b[1] & 0xFE) != 0xFA) return 0;
+            var kbps = Kbps[b[2] >> 4];
+            var rate = Rates[(b[2] >> 2) & 3];
+            if (kbps == 0 || rate == 0) return 0;
+            return 144 * kbps * 1000 / rate + ((b[2] >> 1) & 1);
+        }
+
+        public void Load(byte[] data)
+        {
+            _data = data;
+            FrameLength = data.Length;
+            BitRateIndex = data[2] >> 4;
+            BitRate = Kbps[BitRateIndex] * 1000;
+            SampleRateIndex = (data[2] >> 2) & 3;
+            SampleRate = Rates[SampleRateIndex];
+            HasCrc = (data[1] & 1) == 0;
+            ChannelMode = (MpegChannelMode)(data[3] >> 6);
+            ChannelModeExtension = (data[3] >> 4) & 3;
+            IsCopyrighted = (data[3] & 8) != 0;
+            Reset();
+        }
+
+        public int SampleRate { get; private set; }
+
+        public int SampleRateIndex { get; private set; }
+
+        public int FrameLength { get; private set; }
+
+        public int BitRate { get; private set; }
+
+        public MpegVersion Version => MpegVersion.Version1;
+
+        public MpegLayer Layer => MpegLayer.LayerIII;
+
+        public MpegChannelMode ChannelMode { get; private set; }
+
+        public int ChannelModeExtension { get; private set; }
+
+        public int SampleCount => SamplesPerFrame;
+
+        public int BitRateIndex { get; private set; }
+
+        public bool IsCopyrighted { get; private set; }
+
+        public bool HasCrc { get; private set; }
+
+        public bool IsCorrupted => false;
+
+        public void Reset()
+        {
+            _offset = HasCrc ? 6 : 4;
+            _bucket = 0;
+            _bits = 0;
+        }
+
+        public int ReadBits(int bitCount)
+        {
+            while (_bits < bitCount)
+            {
+                if (_offset >= FrameLength) return -1;
+                _bucket = (_bucket << 8) | _data[_offset++];
+                _bits += 8;
+            }
+
+            var value = (int)((_bucket >> (_bits - bitCount)) & ((1UL << bitCount) - 1));
+            _bits -= bitCount;
+            return value;
+        }
+    }
+}
+```
+
+`src/WebAudioArchive.Analysis/Decode/SpeechResampler.cs`:
+```csharp
+using NAudio.Dsp;
+
+namespace WebAudioArchive.Analysis.Decode;
+
+/// <summary>
+/// Interleaved full-rate float PCM to 16 kHz mono for whisper: channels averaged, then NAudio's WDL resampler in sinc
+/// mode (64 taps). Measured: level within 0.1 dB up to 6 kHz, -1.5 dB at 7 kHz, and tones that would alias attenuated
+/// by 67 dB at 10 kHz and 114 dB at 12 kHz. (WdlResamplingSampleProvider's default, linear interpolation with IIR
+/// filters, loses 8 dB at 6 kHz and lets a 10 kHz tone through at -27 dB, so it is not used.)
+/// </summary>
+public sealed class SpeechResampler
+{
+    readonly WdlResampler _wdl = new();
+    readonly int _channels;
+    readonly double _ratio;
+    float[] _out = new float[4096];
+
+    public SpeechResampler(int inputRate, int channels, int outputRate)
+    {
+        _channels = channels;
+        _ratio = (double)outputRate / inputRate;
+        _wdl.SetMode(true, 0, true, 64, 32);
+        _wdl.SetFeedMode(true);
+        _wdl.SetRates(inputRate, outputRate);
+    }
+
+    /// <summary>Samples returned so far.</summary>
+    public long Produced { get; private set; }
+
+    /// <summary>Takes interleaved frames and returns the mono output they produced (valid until the next call).</summary>
+    public ReadOnlySpan<float> Push(ReadOnlySpan<float> interleaved)
+    {
+        var frames = interleaved.Length / _channels;
+        if (frames == 0) return [];
+        var wanted = _wdl.ResamplePrepare(frames, 1, out var input);
+        for (var i = 0; i < wanted; i++)
+        {
+            var sum = 0f;
+            for (var c = 0; c < _channels; c++) sum += interleaved[i * _channels + c];
+            input[i] = sum / _channels;
+        }
+
+        var capacity = (int)(frames * _ratio) + 64;
+        if (_out.Length < capacity) _out = new float[capacity * 2];
+        var got = _wdl.ResampleOut(_out, wanted, capacity, 1);
+        Produced += got;
+        return _out.AsSpan(0, got);
+    }
+
+    /// <summary>Feeds silence until <paramref name="total"/> samples exist (the filter delay), returning only the samples still owed.</summary>
+    public ReadOnlySpan<float> Flush(long total)
+    {
+        var owed = new List<float>();
+        var silence = new float[256 * _channels];
+        while (Produced < total)
+        {
+            var before = Produced;
+            var chunk = Push(silence);
+            var keep = (int)Math.Min(chunk.Length, total - before);
+            for (var i = 0; i < keep; i++) owed.Add(chunk[i]);
+            if (Produced >= total) Produced = total;
+        }
+
+        return owed.ToArray();
     }
 }
 ```
 
 `src/WebAudioArchive.Analysis/Decode/SegmentDecoder.cs`:
 ```csharp
-using System.Globalization;
+using System.Buffers.Binary;
+using System.Reflection;
+using NAudio.Dsp;
+using NLayer;
 using WebAudioArchive.Analysis.Audio;
 
 namespace WebAudioArchive.Analysis.Decode;
 
-public sealed record DecodedSegment(string SpeechWavPath, AudioFeatures Features, string FfmpegVersion);
+public sealed class DecodeException(string message) : Exception(message);
+
+/// <summary>What one decode produced. <see cref="Decoder"/> (library versions) is recorded in every transcript.</summary>
+public sealed record DecodedSegment(string SpeechWavPath, AudioFeatures Features, string Decoder, long Frames, int SilencedFrames, int RecoveredFrames);
 
 /// <summary>
 /// Copies a closed master segment into the job's scratch folder (the archive file is only ever opened for reading,
 /// sharing read and write so nothing else is blocked), checks the copy against the sidecar's byte count, then decodes
-/// the copy twice: to 16 kHz mono 16-bit WAV in scratch for whisper, and to full-rate float PCM streamed (not written)
-/// into the feature extractor for the audio detectors.
+/// the copy once, in managed code (decision D18): each frame's full-rate float PCM goes into the feature extractor for
+/// the audio detectors (never written), and its 16 kHz mono resampling into a 16-bit WAV in scratch for whisper.
 /// </summary>
-public sealed class SegmentDecoder(Ffmpeg ffmpeg)
+public sealed class SegmentDecoder
 {
     public const int SpeechRate = 16000;
-    string? _version;
+
+    public static readonly string DecoderName =
+        $"NLayer {Version(typeof(MpegFrameDecoder))} frame decoder, NAudio.Core {Version(typeof(WdlResampler))} WDL sinc resampler";
 
     /// <summary>Scratch needed for one segment: the copy, the speech WAV (32000 bytes a second) and 1 MB to spare.</summary>
     public static long ScratchBytesFor(long mp3Bytes, double audioSeconds) =>
@@ -3712,67 +4062,95 @@ public sealed class SegmentDecoder(Ffmpeg ffmpeg)
             throw new DecodeException($"{sourceAudio} is {length} bytes but its sidecar says {expectedBytes}; it is retried when they agree");
 
         var wav = lease.PathFor("speech.wav");
-        await ffmpeg.RunAsync(
-            ["-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "2", "-i", copy, "-map", "0:a:0",
-             "-ac", "1", "-ar", SpeechRate.ToString(CultureInfo.InvariantCulture), "-c:a", "pcm_s16le",
-             "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact", "-y", wav],
-            ct);
-
-        AudioFeatures? features = null;
-        await ffmpeg.RunAsync(
-            ["-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "2", "-i", copy, "-map", "0:a:0",
-             "-ac", channels.ToString(CultureInfo.InvariantCulture), "-ar", sampleRate.ToString(CultureInfo.InvariantCulture),
-             "-f", "f32le", "-c:a", "pcm_f32le", "pipe:1"],
-            async (stdout, token) =>
-            {
-                var fx = new FeatureExtractor(sampleRate, channels);
-                var buffer = new byte[1 << 16];
-                int n;
-                while ((n = await stdout.ReadAsync(buffer, token)) > 0) fx.PushBytes(buffer.AsSpan(0, n));
-                features = fx.Complete();
-            },
-            ct);
-
-        _version ??= await ffmpeg.VersionAsync(ct);
-        return new DecodedSegment(wav, features ?? throw new DecodeException($"ffmpeg produced no audio for {sourceAudio}"), _version);
+        return await Task.Run(() => Decode(sourceAudio, copy, wav, sampleRate, channels, ct), ct);
     }
-}
-```
 
-In `.github/workflows/ci.yml`, in the `test` job, add before `- run: dotnet build -c Release`:
-```yaml
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+    static DecodedSegment Decode(string sourceAudio, string copy, string wav, int sampleRate, int channels, CancellationToken ct)
+    {
+        using var input = new FileStream(copy, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+        using var output = new FileStream(wav, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16);
+        output.Write(WavFile.Build(SpeechRate, 1, []));
+
+        var reader = new Mp3FrameReader(input);
+        var features = new FeatureExtractor(sampleRate, channels);
+        var resampler = new SpeechResampler(sampleRate, channels, SpeechRate);
+        var pcm = new float[Mp3FrameReader.MaxFloatsPerFrame];
+        var bytes = new byte[8192];
+        long written = 0;
+        int n;
+        while ((n = reader.ReadFrame(pcm)) > 0)
+        {
+            if (reader.Frames == 1 && (reader.SampleRate != sampleRate || reader.Channels != channels))
+                throw new DecodeException($"{sourceAudio} is {reader.SampleRate} Hz with {reader.Channels} channel(s) but its sidecar says {sampleRate} Hz with {channels}");
+            if (reader.Frames % 256 == 0) ct.ThrowIfCancellationRequested();
+            features.Push(pcm.AsSpan(0, n));
+            written += WritePcm16(output, resampler.Push(pcm.AsSpan(0, n)), bytes);
+        }
+
+        if (reader.Frames == 0) throw new DecodeException($"{sourceAudio}: no MPEG audio frames found (not an MP3, or empty)");
+        var total = (long)Math.Round(reader.Frames * (double)Mp3FrameReader.SamplesPerFrame * SpeechRate / sampleRate);
+        written += WritePcm16(output, resampler.Flush(total), bytes);
+
+        var header = new byte[4];
+        output.Position = 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(header, (uint)(36 + written * 2));
+        output.Write(header);
+        output.Position = 40;
+        BinaryPrimitives.WriteUInt32LittleEndian(header, (uint)(written * 2));
+        output.Write(header);
+
+        return new DecodedSegment(wav, features.Complete(), DecoderName, reader.Frames, reader.SilencedFrames, reader.RecoveredFrames);
+    }
+
+    static long WritePcm16(Stream output, ReadOnlySpan<float> mono, byte[] bytes)
+    {
+        for (var start = 0; start < mono.Length; start += bytes.Length / 2)
+        {
+            var count = Math.Min(mono.Length - start, bytes.Length / 2);
+            for (var i = 0; i < count; i++)
+                BinaryPrimitives.WriteInt16LittleEndian(bytes.AsSpan(i * 2), (short)Math.Round(Math.Clamp(mono[start + i], -1f, 1f) * 32767));
+            output.Write(bytes, 0, count * 2);
+        }
+
+        return mono.Length;
+    }
+
+    static string Version(Type t) =>
+        (t.Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? t.Assembly.GetName().Version?.ToString() ?? "?").Split('+')[0];
+}
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `ffmpeg -version` (expect a first line starting `ffmpeg version`; if it is not found, do owner action 1 first), then `dotnet test --filter FullyQualifiedName~SegmentDecoderTests`
-Expected: PASS, 7 tests. If `Hard_clipping_survives...` finds no event, print `decoded.Features.Clips` counts per level: at 0.98 the flattened 1.4-amplitude tone must leave thousands of runs; zero runs means the decode was not full rate (check the `-ar` and `-ac` arguments).
+Run: `dotnet test --filter FullyQualifiedName~SegmentDecoderTests`
+Expected: PASS, 8 tests, in about 15 s (encoding the 330 s stream is most of it). These are the files the D18 spike ran: the same 8 tests passed there against the same code. If `Hard_clipping_survives...` finds no event, print `decoded.Features.Clips` counts per level: at 0.98 the flattened 1.4-amplitude tone must leave hundreds of runs (882 in the spike); none means the test helper's full-scale setting did not apply (GroovyMp3 then scales by 0.95 and the peak stays near 0.968). If `A_long_stream...` reports no recovered frame, check that `Mp3FrameReader` is used and not NLayer's `MpegFile`.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add src/WebAudioArchive.Analysis/Decode tests/WebAudioArchive.Tests/Support/TestFfmpeg.cs tests/WebAudioArchive.Tests/SegmentDecoderTests.cs .github/workflows/ci.yml
-git commit -m "Analysis: bounded scratch space and ffmpeg decode of a scratch copy only (#76)"
+git add src/WebAudioArchive.Analysis/Decode tests/WebAudioArchive.Tests/Support/TestMp3.cs tests/WebAudioArchive.Tests/SegmentDecoderTests.cs
+git commit -m "Analysis: bounded scratch space and managed decode (NLayer, NAudio) of a scratch copy only (#76)"
 ```
 
 ---
 
-### Task 10: Transcriber interface, whisper.cpp client, hallucination filter, chunks and prompt
+### Task 10: Transcriber interface, Whisper.net transcriber, hallucination filter, chunks and prompt
 
 **Files:**
-- Create: `src/WebAudioArchive.Analysis/Transcription/ITranscriber.cs`, `WhisperResponse.cs`, `WhisperCppTranscriber.cs`, `TranscriptFilter.cs`, `ChunkPlanner.cs`, `PromptBuilder.cs` (all under `src/WebAudioArchive.Analysis/Transcription/`)
+- Create: `src/WebAudioArchive.Analysis/Transcription/ITranscriber.cs`, `WhisperResponse.cs`, `WhisperNetTranscriber.cs`, `TranscriptFilter.cs`, `ChunkPlanner.cs`, `PromptBuilder.cs` (all under `src/WebAudioArchive.Analysis/Transcription/`)
+
+Decision D18: whisper.cpp runs in this process through `Whisper.net` 1.9.1 (referenced in Task 1); the native CPU and CUDA runtimes are referenced by the service project only, so these tests never load native code or need a model.
 - Create: `tests/WebAudioArchive.Tests/Support/FakeTranscriber.cs`
 - Test: `tests/WebAudioArchive.Tests/TranscriptionTests.cs`
 
 **Interfaces:**
-- Consumes: `TranscriptWord` (Task 3), `TranscriptionOptions` (Task 2), `WordNormaliser` (Task 7), `AudioFeatures` (Task 5).
+- Consumes: `TranscriptWord` (Task 3), `TranscriptionOptions` (Task 2), `WordNormaliser` (Task 7), `AudioFeatures` (Task 5), `WhisperDevice` (Task 1).
 - Produces:
   - `sealed record TranscriptionRequest(byte[] Wav, string Prompt, string Language)`; `sealed record RawSegment(double Start, double End, string Text, double NoSpeechProb, double AvgLogProb, IReadOnlyList<TranscriptWord> Words)` with `RawSegment Shift(double seconds)`.
   - `interface ITranscriber { string Engine { get; } string Model { get; } Task<bool> IsReadyAsync(CancellationToken ct); Task<IReadOnlyList<RawSegment>> TranscribeAsync(TranscriptionRequest request, CancellationToken ct); }`
   - `sealed class TranscriberUnavailableException(string message, Exception? inner = null)` (retry later, not a job failure); `sealed class TranscriptionFailedException(string message)` (this input failed).
-  - `static class WhisperResponse { IReadOnlyList<RawSegment> Parse(string json); readonly record struct Token(string Text, double Start, double End, double Dtw, double Probability); IReadOnlyList<TranscriptWord> MergeTokens(IEnumerable<Token>); }`
-  - `sealed class WhisperCppTranscriber(HttpClient http, Uri baseUrl, string model) : ITranscriber` (Engine `whisper.cpp`).
+  - `static class WhisperResponse { RawSegment FromSegment(Whisper.net.SegmentData s); readonly record struct Token(string Text, double Start, double End, double Dtw, double Probability); IReadOnlyList<TranscriptWord> MergeTokens(IEnumerable<Token>); }` (token `Start` and `End` in seconds, `Dtw` in centiseconds or -1).
+  - `sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device, int threads, bool dtw) : ITranscriber, IDisposable { string? LastError; static IReadOnlyList<RuntimeLibrary> RuntimeOrder(WhisperDevice); static WhisperAlignmentHeadsPreset? HeadsFor(string model); }` (Engine `whisper.net 1.9.1 (cuda)` or `(cpu)` once loaded; Model is the model file name without extension).
   - `static class TranscriptFilter { const string NonSpeech, NoSpeech, KnownHallucination, Repetition; string?[] Reasons(IReadOnlyList<(string Text, double NoSpeechProb, double AvgLogProb)> segments, TranscriptionOptions o); string Key(string text); }`
   - `sealed record AudioChunk(int Index, double Start, double End)`; `static class ChunkPlanner { IReadOnlyList<AudioChunk> Plan(AudioFeatures f, double chunkSeconds, double searchSeconds); }`
   - `static class PromptBuilder { const int MaxChars = 600; string Build(TranscriptionOptions o, string? showTitle); }`
@@ -3819,7 +4197,7 @@ public sealed class FakeTranscriber : ITranscriber
 
 `tests/WebAudioArchive.Tests/TranscriptionTests.cs`:
 ```csharp
-using System.Net;
+using Whisper.net;
 using WebAudioArchive.Analysis.Audio;
 using WebAudioArchive.Analysis.Settings;
 using WebAudioArchive.Analysis.Transcription;
@@ -3828,42 +4206,27 @@ namespace WebAudioArchive.Tests;
 
 public class TranscriptionTests
 {
-    const string Verbose = """
-        {"task":"transcribe","language":"english","duration":4.0,"text":" Um, welcome to Burst.","segments":[
-         {"id":0,"text":" Um, welcome to Burst.","start":0.0,"end":2.4,"tokens":[1,2,3,4,5,6],
-          "words":[
-            {"word":" Um","start":0.10,"end":0.30,"t_dtw":12,"probability":0.80},
-            {"word":",","start":0.30,"end":0.32,"t_dtw":-1,"probability":0.95},
-            {"word":" wel","start":0.50,"end":0.70,"t_dtw":-1,"probability":0.90},
-            {"word":"come","start":0.70,"end":0.90,"t_dtw":-1,"probability":0.70},
-            {"word":" to","start":1.00,"end":1.10,"t_dtw":-1,"probability":0.99},
-            {"word":" Burst.","start":1.20,"end":1.60,"t_dtw":-1,"probability":0.97}],
-          "temperature":0.0,"avg_logprob":-0.25,"no_speech_prob":0.02}]}
-        """;
-
-    sealed class CaptureHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
-    {
-        public List<(Uri Uri, string Body)> Requests { get; } = [];
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-        {
-            var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(ct);
-            Requests.Add((request.RequestUri!, body));
-            return respond(request);
-        }
-    }
-
-    static WhisperCppTranscriber Client(HttpMessageHandler handler) =>
-        new(new HttpClient(handler), new Uri("http://whisper:8080"), "ggml-large-v3-turbo-q8_0");
-
-    static HttpResponseMessage Json(HttpStatusCode code, string body) => new(code) { Content = new StringContent(body) };
-
     static TranscriptionRequest Request => new(WavFile.Build(16000, 1, new byte[3200]), "Um, er, Burst Radio.", "en");
+
+    /// <summary>A Whisper.net segment as the library returns it (built without the native library). Token times are centiseconds.</summary>
+    static SegmentData Segment(double start, double end, string text, float noSpeech, params WhisperToken[] tokens) =>
+        new(text, TimeSpan.FromSeconds(start), TimeSpan.FromSeconds(end), 0.1f, 1f, 0.9f, noSpeech, "en", tokens);
+
+    static WhisperToken Token(string text, long startCs, long endCs, long dtwCs, float p, float logP) =>
+        new() { Text = text, Start = startCs, End = endCs, DtwTimestamp = dtwCs, Probability = p, ProbabilityLog = logP };
 
     [Fact]
     public void Tokens_merge_into_words_with_dtw_start_punctuation_and_lowest_probability()
     {
-        var seg = Assert.Single(WhisperResponse.Parse(Verbose));
+        var seg = WhisperResponse.FromSegment(Segment(0.0, 2.4, " Um, welcome to Burst.", 0.02f,
+            Token("[_BEG_]", 0, 0, -1, 0.8f, -0.22f),
+            Token(" Um", 10, 30, 12, 0.80f, -0.22f),
+            Token(",", 30, 32, -1, 0.95f, -0.05f),
+            Token(" wel", 50, 70, -1, 0.90f, -0.11f),
+            Token("come", 70, 90, -1, 0.70f, -0.36f),
+            Token(" to", 100, 110, -1, 0.99f, -0.01f),
+            Token(" Burst.", 120, 160, -1, 0.97f, -0.03f),
+            Token("[_TT_120]", 160, 160, -1, 0.1f, -2.3f)));
 
         Assert.Equal("Um, welcome to Burst.", seg.Text);
         Assert.Equal(new[] { "Um,", "welcome", "to", "Burst." }, seg.Words.Select(w => w.Text));
@@ -3871,7 +4234,7 @@ public class TranscriptionTests
         Assert.Equal(0.32, seg.Words[0].End, 6);
         Assert.Equal(0.70, seg.Words[1].Probability, 6);
         Assert.Equal(0.02, seg.NoSpeechProb, 6);
-        Assert.Equal(-0.25, seg.AvgLogProb, 6);
+        Assert.Equal(-0.13, seg.AvgLogProb, 4);
     }
 
     [Fact]
@@ -3887,54 +4250,31 @@ public class TranscriptionTests
     }
 
     [Fact]
-    public async Task Sends_the_chunk_as_verbose_json_with_prompt_and_language()
+    public async Task A_missing_model_is_not_ready_and_transcribing_waits_instead_of_failing()
     {
-        var handler = new CaptureHandler(_ => Json(HttpStatusCode.OK, Verbose));
+        using var t = new WhisperNetTranscriber(Path.Combine(Path.GetTempPath(), "no-such-model-waa.bin"), WhisperDevice.Auto, 4, dtw: false);
 
-        var segments = await Client(handler).TranscribeAsync(Request, CancellationToken.None);
-
-        var (uri, body) = Assert.Single(handler.Requests);
-        Assert.Equal("http://whisper:8080/inference", uri.ToString());
-        Assert.Contains("response_format", body);
-        Assert.Contains("verbose_json", body);
-        Assert.Contains("token_timestamps", body);
-        Assert.Contains("Um, er, Burst Radio.", body);
-        Assert.Contains("chunk.wav", body);
-        Assert.Equal(4, segments[0].Words.Count);
+        Assert.False(await t.IsReadyAsync(CancellationToken.None));
+        Assert.Contains("WAA_WHISPER_MODEL_PATH", t.LastError);
+        await Assert.ThrowsAsync<TranscriberUnavailableException>(() => t.TranscribeAsync(Request, CancellationToken.None));
+        Assert.Equal("no-such-model-waa", t.Model);
+        Assert.StartsWith("whisper.net 1.9.1", t.Engine);
     }
 
     [Theory]
-    [InlineData(HttpStatusCode.ServiceUnavailable, true)]
-    [InlineData(HttpStatusCode.BadGateway, true)]
-    [InlineData(HttpStatusCode.InternalServerError, false)]
-    [InlineData(HttpStatusCode.BadRequest, false)]
-    public async Task Status_codes_map_to_retry_later_or_failed(HttpStatusCode code, bool unavailable)
-    {
-        var client = Client(new CaptureHandler(_ => Json(code, "{\"error\":\"x\"}")));
-        var ex = await Record.ExceptionAsync(() => client.TranscribeAsync(Request, CancellationToken.None));
-        Assert.IsType(unavailable ? typeof(TranscriberUnavailableException) : typeof(TranscriptionFailedException), ex);
-    }
+    [InlineData(WhisperDevice.Auto, "Cuda,Cpu")]
+    [InlineData(WhisperDevice.Cpu, "Cpu")]
+    [InlineData(WhisperDevice.Cuda, "Cuda")]
+    public void Runtime_order_follows_the_device_setting(WhisperDevice device, string expected) =>
+        Assert.Equal(expected, string.Join(',', WhisperNetTranscriber.RuntimeOrder(device)));
 
-    [Fact]
-    public async Task A_refused_connection_is_unavailable_and_an_error_body_is_a_failure()
-    {
-        var down = Client(new CaptureHandler(_ => throw new HttpRequestException("Connection refused (whisper:8080)")));
-        await Assert.ThrowsAsync<TranscriberUnavailableException>(() => down.TranscribeAsync(Request, CancellationToken.None));
-
-        var error = Client(new CaptureHandler(_ => Json(HttpStatusCode.OK, "{\"error\":\"failed to read audio\"}")));
-        Assert.Contains("failed to read audio", (await Assert.ThrowsAsync<TranscriptionFailedException>(() => error.TranscribeAsync(Request, CancellationToken.None))).Message);
-
-        var garbage = Client(new CaptureHandler(_ => Json(HttpStatusCode.OK, "<html>")));
-        await Assert.ThrowsAsync<TranscriptionFailedException>(() => garbage.TranscribeAsync(Request, CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task Readiness_comes_from_health()
-    {
-        Assert.True(await Client(new CaptureHandler(_ => Json(HttpStatusCode.OK, "{\"status\":\"ok\"}"))).IsReadyAsync(CancellationToken.None));
-        Assert.False(await Client(new CaptureHandler(_ => Json(HttpStatusCode.ServiceUnavailable, "{\"status\":\"loading model\"}"))).IsReadyAsync(CancellationToken.None));
-        Assert.False(await Client(new CaptureHandler(_ => throw new HttpRequestException("refused"))).IsReadyAsync(CancellationToken.None));
-    }
+    [Theory]
+    [InlineData("ggml-large-v3-turbo-q8_0", "LargeV3Turbo")]
+    [InlineData("ggml-small.en", "SmallEn")]
+    [InlineData("ggml-base.en", "BaseEn")]
+    [InlineData("ggml-medium", null)]
+    public void Dtw_heads_follow_the_model_file(string model, string? expected) =>
+        Assert.Equal(expected, WhisperNetTranscriber.HeadsFor(model)?.ToString());
 
     [Fact]
     public void Known_hallucinations_annotations_and_repeats_are_suppressed()
@@ -4009,7 +4349,7 @@ public class TranscriptionTests
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~TranscriptionTests`
-Expected: build FAILS with `CS0246` for `WhisperResponse`, `WhisperCppTranscriber`, `TranscriptFilter`, `ChunkPlanner`, `PromptBuilder`, `ITranscriber`.
+Expected: build FAILS with `CS0246` for `WhisperResponse`, `WhisperNetTranscriber`, `TranscriptFilter`, `ChunkPlanner`, `PromptBuilder`, `ITranscriber`.
 
 - [ ] **Step 4: Implement the transcription pieces**
 
@@ -4034,7 +4374,7 @@ public sealed record RawSegment(double Start, double End, string Text, double No
 }
 
 /// <summary>
-/// Speech to text, kept behind this interface so the engine can change (whisper.cpp today) and tests use a fake.
+/// Speech to text, kept behind this interface so the engine can change (whisper.cpp through Whisper.net today) and tests use a fake.
 /// TranscribeAsync throws <see cref="TranscriberUnavailableException"/> when the engine cannot be reached (the job waits
 /// and retries, it is not failed) and <see cref="TranscriptionFailedException"/> when this input cannot be transcribed.
 /// </summary>
@@ -4056,57 +4396,29 @@ public sealed class TranscriptionFailedException(string message) : Exception(mes
 
 `src/WebAudioArchive.Analysis/Transcription/WhisperResponse.cs`:
 ```csharp
-using System.Text.Json;
+using Whisper.net;
 using WebAudioArchive.Core.Analysis;
 
 namespace WebAudioArchive.Analysis.Transcription;
 
 /// <summary>
-/// Reads whisper.cpp's verbose_json (examples/server/server.cpp at v1.9.5): segments with text, start, end (seconds),
-/// avg_logprob, no_speech_prob and a "words" array that actually holds tokens (word, start, end, t_dtw in centiseconds
-/// or -1, probability).
+/// Turns Whisper.net's segments into <see cref="RawSegment"/>s. Whisper.net gives per token the text, start and end in
+/// centiseconds, the DTW time in centiseconds (-1 when DTW is off), the probability and its log; per segment the
+/// no-speech probability. avg_logprob is the mean log probability of the segment's text tokens, as whisper.cpp's
+/// server computes it.
 /// </summary>
 public static class WhisperResponse
 {
     public readonly record struct Token(string Text, double Start, double End, double Dtw, double Probability);
 
-    public static IReadOnlyList<RawSegment> Parse(string json)
+    public static RawSegment FromSegment(SegmentData s)
     {
-        JsonDocument doc;
-        try
-        {
-            doc = JsonDocument.Parse(json);
-        }
-        catch (JsonException ex)
-        {
-            throw new TranscriptionFailedException($"whisper returned something that is not JSON: {ex.Message}");
-        }
-
-        using (doc)
-        {
-            var root = doc.RootElement;
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var error))
-                throw new TranscriptionFailedException($"whisper reported an error: {error}");
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("segments", out var segments) || segments.ValueKind != JsonValueKind.Array)
-                throw new TranscriptionFailedException("whisper's answer has no segments array (is response_format verbose_json?)");
-
-            var list = new List<RawSegment>();
-            foreach (var s in segments.EnumerateArray())
-            {
-                var start = Number(s, "start", 0);
-                var end = Number(s, "end", start);
-                var tokens = new List<Token>();
-                if (s.TryGetProperty("words", out var words) && words.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var w in words.EnumerateArray())
-                        tokens.Add(new Token(Text(w, "word"), Number(w, "start", start), Number(w, "end", start), Number(w, "t_dtw", -1), Number(w, "probability", 0)));
-                }
-
-                list.Add(new RawSegment(start, Math.Max(start, end), Text(s, "text").Trim(), Number(s, "no_speech_prob", 0), Number(s, "avg_logprob", 0), MergeTokens(tokens)));
-            }
-
-            return list;
-        }
+        var start = s.Start.TotalSeconds;
+        var end = Math.Max(start, s.End.TotalSeconds);
+        var tokens = (s.Tokens ?? []).Select(t => new Token(t.Text ?? "", t.Start / 100.0, t.End / 100.0, t.DtwTimestamp, t.Probability)).ToList();
+        var logs = (s.Tokens ?? []).Where(t => !IsSpecial((t.Text ?? "").Trim())).Select(t => (double)t.ProbabilityLog).ToList();
+        var avgLogProb = logs.Count == 0 ? 0 : Math.Round(logs.Average(), 4);
+        return new RawSegment(start, end, (s.Text ?? "").Trim(), Math.Round(s.NoSpeechProbability, 4), avgLogProb, MergeTokens(tokens));
     }
 
     /// <summary>A token that starts with a space starts a new word; others continue it ("wel" "come" ","). A known DTW time (centiseconds) gives the word's start.</summary>
@@ -4139,87 +4451,151 @@ public static class WhisperResponse
 
     static bool IsSpecial(string s) =>
         (s.StartsWith("[_", StringComparison.Ordinal) && s.EndsWith(']')) || (s.StartsWith("<|", StringComparison.Ordinal) && s.EndsWith("|>", StringComparison.Ordinal));
-
-    static string Text(JsonElement e, string name) =>
-        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-
-    static double Number(JsonElement e, string name, double fallback) =>
-        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : fallback;
 }
 ```
 
-`src/WebAudioArchive.Analysis/Transcription/WhisperCppTranscriber.cs`:
+`src/WebAudioArchive.Analysis/Transcription/WhisperNetTranscriber.cs`:
 ```csharp
-using System.Net.Http.Headers;
+using System.Reflection;
+using Whisper.net;
+using Whisper.net.LibraryLoader;
+using WebAudioArchive.Analysis.Settings;
 
 namespace WebAudioArchive.Analysis.Transcription;
 
 /// <summary>
-/// whisper.cpp's whisper-server over HTTP (POST /inference, GET /health). The server holds the model on the GPU and
-/// serialises requests, so one chunk is sent at a time. Unreachable, timed out, 502, 503 (still loading the model) and
-/// 504 mean "try later"; any other non-success or an error body means this chunk failed.
+/// whisper.cpp in this process through Whisper.net (decision D18). The model is loaded once, on the first readiness
+/// check, onto the GPU (CUDA runtime) or the CPU; one chunk is transcribed at a time (the service has one work lane).
+/// Each chunk is decoded without the previous window's text as context (it feeds repetition loops over music) and with
+/// the priming prompt carried into every 30 s window, so fillers are kept throughout the chunk. A missing model or a
+/// native library that does not load means "try later" (the backlog and lag show it); an error on one chunk fails
+/// that chunk.
 /// </summary>
-public sealed class WhisperCppTranscriber(HttpClient http, Uri baseUrl, string model) : ITranscriber
+public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device, int threads, bool dtw) : ITranscriber, IDisposable
 {
-    public string Engine => "whisper.cpp";
+    static readonly string LibraryVersion =
+        (typeof(WhisperFactory).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "?").Split('+')[0];
 
-    public string Model => model;
+    readonly SemaphoreSlim _gate = new(1, 1);
+    WhisperFactory? _factory;
+
+    public string Engine => RuntimeOptions.LoadedLibrary is { } lib
+        ? $"whisper.net {LibraryVersion} ({lib.ToString().ToLowerInvariant()})"
+        : $"whisper.net {LibraryVersion}";
+
+    public string Model => Path.GetFileNameWithoutExtension(modelPath);
+
+    /// <summary>Why the last readiness check failed, for the log; null when ready.</summary>
+    public string? LastError { get; private set; }
+
+    /// <summary>Native runtimes to try, in order. Auto tries CUDA and falls back to the CPU when no GPU or CUDA library is there.</summary>
+    public static IReadOnlyList<RuntimeLibrary> RuntimeOrder(WhisperDevice d) => d switch
+    {
+        WhisperDevice.Cpu => [RuntimeLibrary.Cpu],
+        WhisperDevice.Cuda => [RuntimeLibrary.Cuda],
+        _ => [RuntimeLibrary.Cuda, RuntimeLibrary.Cpu],
+    };
+
+    /// <summary>The DTW alignment heads for a model file name, or null when the model has no preset here.</summary>
+    public static WhisperAlignmentHeadsPreset? HeadsFor(string model)
+    {
+        var m = model.ToLowerInvariant();
+        if (m.Contains("large-v3-turbo", StringComparison.Ordinal)) return WhisperAlignmentHeadsPreset.LargeV3Turbo;
+        if (m.Contains("small.en", StringComparison.Ordinal)) return WhisperAlignmentHeadsPreset.SmallEn;
+        if (m.Contains("base.en", StringComparison.Ordinal)) return WhisperAlignmentHeadsPreset.BaseEn;
+        return null;
+    }
 
     public async Task<bool> IsReadyAsync(CancellationToken ct)
     {
         try
         {
-            using var response = await http.GetAsync(new Uri(baseUrl, "health"), ct);
-            return response.IsSuccessStatusCode;
+            await FactoryAsync(ct);
+            LastError = null;
+            return true;
         }
-        catch (HttpRequestException)
+        catch (TranscriberUnavailableException ex)
         {
-            return false;
-        }
-        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
-        {
+            LastError = ex.Message;
             return false;
         }
     }
 
     public async Task<IReadOnlyList<RawSegment>> TranscribeAsync(TranscriptionRequest request, CancellationToken ct)
     {
-        using var form = new MultipartFormDataContent();
-        var file = new ByteArrayContent(request.Wav);
-        file.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
-        form.Add(file, "file", "chunk.wav");
-        form.Add(new StringContent("verbose_json"), "response_format");
-        form.Add(new StringContent("0.0"), "temperature");
-        form.Add(new StringContent("0.2"), "temperature_inc");
-        form.Add(new StringContent(request.Language), "language");
-        form.Add(new StringContent("true"), "token_timestamps");
-        if (request.Prompt.Length > 0) form.Add(new StringContent(request.Prompt), "prompt");
+        var factory = await FactoryAsync(ct);
+        var builder = factory.CreateBuilder()
+            .WithLanguage(request.Language)
+            .WithThreads(threads)
+            .WithTokenTimestamps()
+            .WithProbabilities()
+            .WithTemperature(0f)
+            .WithTemperatureInc(0.2f)
+            .WithNoContext();
+        if (request.Prompt.Length > 0) builder = builder.WithPrompt(request.Prompt).WithCarryInitialPrompt(true);
 
-        HttpResponseMessage response;
+        var segments = new List<RawSegment>();
         try
         {
-            response = await http.PostAsync(new Uri(baseUrl, "inference"), form, ct);
+            await using var processor = builder.Build();
+            await foreach (var s in processor.ProcessAsync(new MemoryStream(request.Wav, writable: false), ct))
+                segments.Add(WhisperResponse.FromSegment(s));
         }
-        catch (HttpRequestException ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            throw new TranscriberUnavailableException($"whisper at {baseUrl} is not reachable: {ex.Message}", ex);
+            throw;
         }
-        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            throw new TranscriberUnavailableException($"whisper at {baseUrl} did not answer in time", ex);
+            throw new TranscriptionFailedException($"whisper could not transcribe this chunk: {ex.GetType().Name}: {ex.Message}");
         }
 
-        using (response)
+        return segments;
+    }
+
+    async Task<WhisperFactory> FactoryAsync(CancellationToken ct)
+    {
+        if (_factory is { } ready) return ready;
+        await _gate.WaitAsync(ct);
+        try
         {
-            var body = await response.Content.ReadAsStringAsync(ct);
-            var code = (int)response.StatusCode;
-            if (code is 502 or 503 or 504) throw new TranscriberUnavailableException($"whisper at {baseUrl} answered {code}: {Short(body)}");
-            if (!response.IsSuccessStatusCode) throw new TranscriptionFailedException($"whisper answered {code}: {Short(body)}");
-            return WhisperResponse.Parse(body);
+            if (_factory is { } loaded) return loaded;
+            if (!File.Exists(modelPath))
+                throw new TranscriberUnavailableException($"whisper model {modelPath} was not found; download it into models/ (docs/analysis.md) or set WAA_WHISPER_MODEL_PATH");
+            var options = new WhisperFactoryOptions { UseGpu = device != WhisperDevice.Cpu, UseFlashAttention = !dtw, UseDtwTimeStamps = dtw };
+            if (dtw)
+                options.HeadsPreset = HeadsFor(Model) ?? throw new TranscriberUnavailableException($"WAA_WHISPER_DTW is on but {Model} has no DTW preset; use large-v3-turbo, small.en or base.en, or turn DTW off");
+
+            RuntimeOptions.RuntimeLibraryOrder = [.. RuntimeOrder(device)];
+            WhisperFactory? factory = null;
+            try
+            {
+                factory = WhisperFactory.FromPath(modelPath, options);
+                // Building a processor loads the native library and the model now, not in the middle of a job.
+                await using (factory.CreateBuilder().WithLanguage("en").Build())
+                {
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
+            {
+                factory?.Dispose();
+                throw new TranscriberUnavailableException($"whisper could not load {modelPath} ({device}): {ex.Message}", ex);
+            }
+
+            _factory = factory;
+            return factory;
+        }
+        finally
+        {
+            _gate.Release();
         }
     }
 
-    static string Short(string s) => s.Length <= 300 ? s : s[..300];
+    public void Dispose()
+    {
+        _factory?.Dispose();
+        _gate.Dispose();
+    }
 }
 ```
 
@@ -4367,13 +4743,13 @@ public static class PromptBuilder
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~TranscriptionTests`
-Expected: PASS, 13 tests.
+Expected: PASS, 14 tests. The Whisper.net mapping and the missing-model tests ran in the D18 spike against this code (10 tests, all passing); none of them loads the native library. Real transcription is measured in Task 19 (`--benchmark`).
 
 - [ ] **Step 6: Commit**
 
 ```powershell
 git add src/WebAudioArchive.Analysis/Transcription tests/WebAudioArchive.Tests/Support/FakeTranscriber.cs tests/WebAudioArchive.Tests/TranscriptionTests.cs
-git commit -m "Analysis: transcriber interface, whisper.cpp client, hallucination filter, chunking and prompt (#77)"
+git commit -m "Analysis: transcriber interface, Whisper.net transcriber, hallucination filter, chunking and prompt (#77)"
 ```
 
 ---
@@ -4919,7 +5295,7 @@ git commit -m "Analysis: discover closed segments, plan A first with B filling h
 - Consumes: everything from Tasks 2 to 11; `IClock` (Core); `ManualClock` (test support, plan 1).
 - Produces:
   - `sealed record PartialChunk(int Index, double Start, double End, IReadOnlyList<RawSegment> Segments)`; `sealed record TranscriptPartial(int Schema, string Fingerprint, string TranscriptVersion, int ChunkCount, double TranscribeSeconds, IReadOnlyList<PartialChunk> Chunks)`.
-  - `static class TranscriptAssembler { TranscriptDocument Build(SourceSegment s, string station, IReadOnlyList<TimelineAnchor> anchors, IEnumerable<RawSegment> segments, TranscriptionOptions o, string engine, string model, string transcriptVersion, string ffmpeg, DateTimeOffset now, double transcribeSeconds); TranscriptDocument Refilter(TranscriptDocument t, TranscriptionOptions o); }`
+  - `static class TranscriptAssembler { TranscriptDocument Build(SourceSegment s, string station, IReadOnlyList<TimelineAnchor> anchors, IEnumerable<RawSegment> segments, TranscriptionOptions o, string engine, string model, string transcriptVersion, string decoder, DateTimeOffset now, double transcribeSeconds); TranscriptDocument Refilter(TranscriptDocument t, TranscriptionOptions o); }`
   - `static class DetectorRunner { EventsDocument Run(TranscriptDocument t, AudioFeatures f, LoadedConfig config, Watershed watershed, DateTimeOffset now); }` (stats keys: `speechSeconds`, `fillers`, `swears`, `swearsBeforeWatershed`, `clippingEvents`, `clippedMs`, `clippingTruncated`, `deadAirEvents`, `deadAirSeconds`)
   - `sealed class DiskLowException(string message)`; `sealed record JobOutcome(string JobId, JobAction Action, string Status, string Reason, double AudioSeconds, double TranscribeSeconds, double WallSeconds)` with `double? RealtimeFactor`; `sealed class SegmentPipeline(AnalysisPaths paths, LoadedConfig config, ScratchSpace scratch, SegmentDecoder decoder, ITranscriber transcriber, DiskGuard disk, Watershed watershed, Func<DateTimeOffset, string?> showTitleAt, IClock clock, ILogger log) { string TranscriptVersion; JobDecision Decide(SegmentJob job); bool RebuildEvents(SegmentJob job); Task<JobOutcome> ProcessAsync(SegmentJob job, CancellationToken ct); }` (outcome `Status` is a `JobStatus` value or `paused-disk`)
   - Test helper `AnalysisFixtures.WriteDecodableSegmentAsync(string recorderRoot, string station, DateTimeOffset start, float[] mono, IReadOnlyList<SegmentGap>? gaps = null)` and `AnalysisFixtures.Said(double start, string text)` (a `RawSegment` with one word every 0.3 s).
@@ -4948,7 +5324,7 @@ public static class AnalysisFixtures
         Directory.CreateDirectory(dir);
         var name = utc.ToString("HHmmss", CultureInfo.InvariantCulture) + ".mp3";
         var mp3 = Path.Combine(dir, name);
-        await TestFfmpeg.EncodeMp3Async(mp3, Signals.Stereo(mono), 2);
+        await TestMp3.EncodeMp3Async(mp3, Signals.Stereo(mono), 2);
         var seconds = mono.Length / (double)Signals.Rate;
         SegmentMetaStore.Write(Path.ChangeExtension(mp3, ".json"), new SegmentMeta(
             1, "home-a", station, name, start, start.AddSeconds(seconds), new FileInfo(mp3).Length, (int)(seconds * 44100 / 1152), seconds,
@@ -4983,7 +5359,7 @@ using WebAudioArchive.Tests.Support;
 
 namespace WebAudioArchive.Tests;
 
-/// <summary>The whole segment job on a real (synthetic) MP3 with ffmpeg and a fake transcriber. 19:00 UTC on 16 October 2026 is 20:00 BST, before the watershed.</summary>
+/// <summary>The whole segment job on a real (synthetic) MP3 with the managed decoder and a fake transcriber. 19:00 UTC on 16 October 2026 is 20:00 BST, before the watershed.</summary>
 public sealed class SegmentPipelineTests : IAsyncLifetime
 {
     static readonly DateTimeOffset T = new(2026, 10, 16, 19, 0, 0, TimeSpan.Zero);
@@ -5027,7 +5403,7 @@ public sealed class SegmentPipelineTests : IAsyncLifetime
     }
 
     SegmentPipeline Pipeline(ITranscriber? transcriber = null, LoadedConfig? config = null) => new(
-        Paths, config ?? _config, new ScratchSpace(Scratch, 512L * 1024 * 1024), new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable)),
+        Paths, config ?? _config, new ScratchSpace(Scratch, 512L * 1024 * 1024), new SegmentDecoder(),
         transcriber ?? _whisper, new DiskGuard(Out, 1L << 30, _ => _free), Watershed.From(new SwearOptions(), London),
         _ => "Backseat Aux", _clock, NullLogger.Instance);
 
@@ -5052,7 +5428,7 @@ public sealed class SegmentPipelineTests : IAsyncLifetime
         Assert.Equal(1.0, transcript.Segments[0].Start, 3);
         Assert.InRange(transcript.Segments[1].Start, 29, 33);
         Assert.Equal(T.AddSeconds(1.0), transcript.ToUtc(transcript.Segments[0].Start));
-        Assert.StartsWith("ffmpeg version", transcript.Ffmpeg);
+        Assert.StartsWith("NLayer 3.0.0", transcript.Decoder);
 
         var events = AnalysisJson.Read<EventsDocument>(Path.Combine(SegmentDir, AnalysisPaths.EventsFile))!;
         var swear = Assert.Single(events.Events, e => e.Type == EventTypes.Swear);
@@ -5191,7 +5567,7 @@ public sealed class SegmentPipelineTests : IAsyncLifetime
         var state = JobStore.Read(SegmentDir)!;
         Assert.Equal(1, state.Attempts);
         Assert.Equal(_clock.UtcNow.AddMinutes(5), state.NextAttemptUtc);
-        Assert.Contains("ffmpeg", state.LastError);
+        Assert.Contains("no MPEG audio frames", state.LastError);
         Assert.Empty(Directory.EnumerateFileSystemEntries(Scratch));
     }
 }
@@ -5225,7 +5601,7 @@ public static class TranscriptAssembler
 {
     public static TranscriptDocument Build(
         SourceSegment s, string station, IReadOnlyList<TimelineAnchor> anchors, IEnumerable<RawSegment> segments, TranscriptionOptions o,
-        string engine, string model, string transcriptVersion, string ffmpeg, DateTimeOffset now, double transcribeSeconds)
+        string engine, string model, string transcriptVersion, string decoder, DateTimeOffset now, double transcribeSeconds)
     {
         var ordered = segments.OrderBy(x => x.Start).ToList();
         var reasons = TranscriptFilter.Reasons(ordered.Select(x => (x.Text, x.NoSpeechProb, x.AvgLogProb)).ToList(), o);
@@ -5234,7 +5610,7 @@ public static class TranscriptAssembler
                 x.Words.Select(w => w with { Start = Round(w.Start), End = Round(w.End) }).ToList()))
             .ToList();
         return new TranscriptDocument(TranscriptDocument.CurrentSchema, station, s.Recorder, s.Meta.Instance, s.JobId, s.Meta.File,
-            s.Meta.StartUtc, s.Meta.EndUtc, s.Meta.AudioSeconds, anchors, engine, model, o.Language, transcriptVersion, ffmpeg,
+            s.Meta.StartUtc, s.Meta.EndUtc, s.Meta.AudioSeconds, anchors, engine, model, o.Language, transcriptVersion, decoder,
             now, Math.Round(transcribeSeconds, 3), list);
     }
 
@@ -5490,7 +5866,7 @@ public sealed class SegmentPipeline(
             }
 
             var transcript = TranscriptAssembler.Build(s, paths.Station, anchors, partial.Chunks.OrderBy(c => c.Index).SelectMany(c => c.Segments),
-                o, transcriber.Engine, transcriber.Model, TranscriptVersion, decoded.FfmpegVersion, clock.UtcNow, partial.TranscribeSeconds);
+                o, transcriber.Engine, transcriber.Model, TranscriptVersion, decoded.Decoder, clock.UtcNow, partial.TranscribeSeconds);
             AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.TranscriptFile), transcript);
             AnalysisJson.Write(Path.Combine(dir, AnalysisPaths.EventsFile), DetectorRunner.Run(transcript, decoded.Features, config, watershed, clock.UtcNow));
             File.Delete(Path.Combine(dir, AnalysisPaths.PartialFile));
@@ -5569,7 +5945,7 @@ public sealed class SegmentPipeline(
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~SegmentPipelineTests`
-Expected: PASS, 8 tests. Each test encodes a 70 s MP3 once (about a second with ffmpeg). If the dead-air times are a few tens of milliseconds outside the ranges, check the LAME delay handling (ffmpeg trims encoder delay from the Xing/LAME header); do not widen the ranges by more than 0.1 s.
+Expected: PASS, 8 tests. Each test encodes a 70 s MP3 once (about 3 s with GroovyMp3). If the dead-air times are a few tens of milliseconds outside the ranges, remember the encoder delay: GroovyMp3 output decoded by the managed decoder starts about 25 ms late (no LAME-header trimming, measured in D18); do not widen the ranges by more than 0.1 s.
 
 Then run the whole suite: `dotnet test`. Expected: all tests pass.
 
@@ -7203,9 +7579,9 @@ git commit -m "Analysis: Ollama enricher with evidence quotes, validation, pendi
   - `sealed record MetricsSnapshot(DateTimeOffset StartedUtc, DateTimeOffset? LastPassUtc, int Backlog, int FailedSegments, DateTimeOffset? OldestPendingEndUtc, int JobsDone, int JobsFailed, double? LastRealtimeFactor, double? AverageRealtimeFactor, double AudioHoursLast24h, string? CurrentJob, string? Paused, bool? WhisperReady, int EnrichmentPending, int EnrichmentDone, int EnrichmentFailed, long FreeBytes, long ScratchBytes)`; `sealed class AnalysisMetrics(DateTimeOffset startedUtc)` with `Snapshot()`, `SetDisk`, `SetWhisper`, `SetPaused`, `SetCurrent`, `SetBacklog`, `SetEnrichment`, `JobFinished(JobOutcome, DateTimeOffset)`, `PassCompleted(DateTimeOffset)`.
   - `sealed record HealthResult(int StatusCode, object Body)`; `static class AnalysisHealth { static readonly TimeSpan StallAfter; HealthResult Build(MetricsSnapshot m, TimeSpan lagAlarm, DateTimeOffset now); }`
   - `sealed class AnalysisRunner(SegmentDiscovery, SegmentPipeline, ShowProcessor, Enricher?, ITranscriber, DiskGuard, ScratchSpace, AnalysisMetrics, IReadOnlyList<string> preference, DateTimeOffset? since, IClock, ILogger) { Task PassAsync(CancellationToken); int RebuildAll(); }`
-  - `sealed record AnalysisRuntime(AnalysisRunner Runner, AnalysisMetrics Metrics, ScratchSpace Scratch, SegmentDecoder Decoder, ITranscriber Transcriber)`; `static class AnalysisComposition { static readonly TimeSpan ShowMargin; AnalysisRuntime Build(AnalysisSettings, LoadedConfig, string ffmpeg, ILoggerFactory, IClock); }`
+  - `sealed record AnalysisRuntime(AnalysisRunner Runner, AnalysisMetrics Metrics, ScratchSpace Scratch, SegmentDecoder Decoder, ITranscriber Transcriber)`; `static class AnalysisComposition { static readonly TimeSpan ShowMargin; AnalysisRuntime Build(AnalysisSettings, LoadedConfig, ILoggerFactory, IClock); }`
   - `static class Benchmark { Task<int> RunAsync(string mp3, double seconds, SegmentDecoder decoder, ScratchSpace scratch, ITranscriber transcriber, TranscriptionOptions o, TextWriter output, CancellationToken ct); }`
-  - Service: `public sealed class AnalysisEntryPoint` (namespace `WebAudioArchive.Analysis.Service`); `AnalysisWorker : BackgroundService`; command line `--healthcheck`, `--benchmark <file.mp3> [seconds]`, `--rebuild`; exit codes 2 (config), 4 (no ffmpeg).
+  - Service: `public sealed class AnalysisEntryPoint` (namespace `WebAudioArchive.Analysis.Service`); `AnalysisWorker : BackgroundService`; command line `--healthcheck`, `--benchmark <file.mp3> [seconds]`, `--rebuild`; exit code 2 (config). A missing whisper model is not an exit: whisper reports not ready, the backlog and lag grow and `/healthz` says so (D18).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -7266,7 +7642,7 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         var scratch = new ScratchSpace(Path.Combine(_root, "scratch"), 512L * 1024 * 1024);
         var disk = new DiskGuard(Paths.Root, 1L << 30, _ => _free);
         var schedule = new ScheduleProvider(Path.Combine(_root, "schedule.json"), null, "burst", NullLogger.Instance);
-        var pipeline = new SegmentPipeline(Paths, config, scratch, new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable)), _whisper, disk,
+        var pipeline = new SegmentPipeline(Paths, config, scratch, new SegmentDecoder(), _whisper, disk,
             Watershed.From(config.Config.Swearing, schedule.Zone), schedule.TitleAt, _clock, NullLogger.Instance);
         var shows = new ShowProcessor(Paths, schedule, ["a"], AnalysisComposition.ShowMargin, _clock, NullLogger.Instance);
         var enricher = new Enricher(Paths, _llm, EnrichmentPrompt.Load(config.ConfigDir, config.Config.Enrichment), config.Config.Enrichment,
@@ -7377,10 +7753,10 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
     public async Task The_benchmark_prints_the_realtime_factor()
     {
         var mp3 = Path.Combine(_root, "bench.mp3");
-        await TestFfmpeg.EncodeMp3Async(mp3, Signals.Stereo(Signals.SpeechLike(40, 9)), 2);
+        await TestMp3.EncodeMp3Async(mp3, Signals.Stereo(Signals.SpeechLike(40, 9)), 2);
         var output = new StringWriter();
 
-        var code = await Benchmark.RunAsync(mp3, 35, new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable)), new ScratchSpace(Path.Combine(_root, "bscratch"), 512L << 20),
+        var code = await Benchmark.RunAsync(mp3, 35, new SegmentDecoder(), new ScratchSpace(Path.Combine(_root, "bscratch"), 512L << 20),
             _whisper, new TranscriptionOptions(), output, CancellationToken.None);
 
         Assert.Equal(0, code);
@@ -7395,10 +7771,9 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         b.UseSetting("WAA_ANALYSIS_OUT", Path.Combine(_root, "host-out"));
         b.UseSetting("WAA_SCRATCH", Path.Combine(_root, "host-scratch"));
         b.UseSetting("WAA_ANALYSIS_CONFIG", ConfigPath);
-        b.UseSetting("WAA_WHISPER_URL", "http://127.0.0.1:9");
+        b.UseSetting("WAA_WHISPER_MODEL_PATH", Path.Combine(_root, "no-model.bin"));
         b.UseSetting("WAA_ENRICHMENT", "off");
         b.UseSetting("WAA_MIN_FREE_GB", "0");
-        b.UseSetting("WAA_FFMPEG", TestFfmpeg.Executable);
         // Nothing is planned (the test segment is older), so the lag, and with it the status code, does not depend on today's date.
         b.UseSetting("WAA_ANALYSIS_SINCE", "2100-01-01T00:00:00Z");
         foreach (var (name, value) in extra) b.UseSetting(name, value);
@@ -7738,18 +8113,18 @@ namespace WebAudioArchive.Analysis;
 
 public sealed record AnalysisRuntime(AnalysisRunner Runner, AnalysisMetrics Metrics, ScratchSpace Scratch, SegmentDecoder Decoder, ITranscriber Transcriber);
 
-/// <summary>Builds the service from its settings and config: whisper over HTTP (30 minute timeout), Ollama over HTTP (20 minutes), the saved schedule, the 5 minute show margin.</summary>
+/// <summary>Builds the service from its settings and config: whisper in process (Whisper.net, D18), Ollama over HTTP (20 minutes), the saved schedule, the 5 minute show margin.</summary>
 public static class AnalysisComposition
 {
     public static readonly TimeSpan ShowMargin = TimeSpan.FromMinutes(5);
 
-    public static AnalysisRuntime Build(AnalysisSettings s, LoadedConfig c, string ffmpeg, ILoggerFactory loggers, IClock clock)
+    public static AnalysisRuntime Build(AnalysisSettings s, LoadedConfig c, ILoggerFactory loggers, IClock clock)
     {
         var log = loggers.CreateLogger("WebAudioArchive.Analysis");
         var paths = new AnalysisPaths(s.OutputDir, s.Station);
         var scratch = new ScratchSpace(s.ScratchDir, s.ScratchMaxBytes);
-        var decoder = new SegmentDecoder(new Ffmpeg(ffmpeg));
-        var transcriber = new WhisperCppTranscriber(new HttpClient { Timeout = TimeSpan.FromMinutes(30) }, s.WhisperUrl, s.WhisperModel);
+        var decoder = new SegmentDecoder();
+        var transcriber = new WhisperNetTranscriber(s.WhisperModelPath, s.WhisperDevice, s.WhisperThreads, s.WhisperDtw);
         var disk = new DiskGuard(s.OutputDir, s.MinFreeBytes);
         var schedule = new ScheduleProvider(s.ScheduleFile, s.StationsConfigPath, s.Station, log);
         var watershed = Watershed.From(c.Config.Swearing, schedule.Zone);
@@ -7877,7 +8252,6 @@ public sealed class AnalysisWorker(AnalysisRuntime runtime, ILogger<AnalysisWork
 ```csharp
 using System.Globalization;
 using WebAudioArchive.Analysis;
-using WebAudioArchive.Analysis.Decode;
 using WebAudioArchive.Analysis.Service;
 using WebAudioArchive.Analysis.Settings;
 using WebAudioArchive.Core.Recording;
@@ -7918,13 +8292,6 @@ catch (AnalysisConfigException ex)
     return 2;
 }
 
-var ffmpeg = Ffmpeg.Locate(settings.Ffmpeg);
-if (ffmpeg is null)
-{
-    Console.Error.WriteLine($"ffmpeg was not found ('{settings.Ffmpeg}'). It is in the analysis image; elsewhere install it or set WAA_FFMPEG.");
-    return 4;
-}
-
 builder.Logging.AddSimpleConsole(o =>
 {
     o.UseUtcTimestamp = true;
@@ -7939,7 +8306,7 @@ using var loggers = LoggerFactory.Create(l => l.AddSimpleConsole(o =>
 AnalysisRuntime runtime;
 try
 {
-    runtime = AnalysisComposition.Build(settings, config, ffmpeg, loggers, new SystemClock());
+    runtime = AnalysisComposition.Build(settings, config, loggers, new SystemClock());
 }
 catch (AnalysisConfigException ex)
 {
@@ -7975,9 +8342,9 @@ builder.Services.AddHostedService<AnalysisWorker>();
 
 var app = builder.Build();
 app.Logger.LogInformation(
-    "Analysing {Station} from recorders {Recorders} (preference {Preference}) into {Out}; whisper {Whisper} ({Model}); enrichment {Enrichment}",
+    "Analysing {Station} from recorders {Recorders} (preference {Preference}) into {Out}; whisper {Model} on {Device} (DTW {Dtw}); enrichment {Enrichment}",
     settings.Station, string.Join(", ", settings.Recorders.Select(r => $"{r.Id}={r.Root}")), string.Join(",", settings.Preference), settings.OutputDir,
-    settings.WhisperUrl, settings.WhisperModel, settings.EnrichmentEnabled ? $"{settings.OllamaModel} at {settings.OllamaUrl}" : "off");
+    settings.WhisperModelPath, settings.WhisperDevice, settings.WhisperDtw ? "on" : "off", settings.EnrichmentEnabled ? $"{settings.OllamaModel} at {settings.OllamaUrl}" : "off");
 
 app.MapGet("/healthz", (AnalysisRuntime rt, AnalysisSettings s) =>
 {
@@ -8003,17 +8370,19 @@ git commit -m "Analysis service: single work lane, lag and realtime factor in /h
 
 ---
 
-### Task 16: Containers: the analysis image, whisper (CPU and CUDA), compose, the GPU override and CI
+### Task 16: Containers: the analysis image (CPU and CUDA targets, whisper in process), compose, the GPU override and CI
 
 **Files:**
-- Create: `docker/Dockerfile.analysis`, `docker/Dockerfile.whisper`, `docker/docker-compose.gpu.yml`, `.github/workflows/whisper-cuda.yml`
-- Modify: `docker/docker-compose.yml` (add `analysis` and `whisper`; the recorder and web services are not changed), `.github/workflows/ci.yml`
+- Create: `docker/Dockerfile.analysis`, `docker/docker-compose.gpu.yml`
+- Modify: `docker/docker-compose.yml` (add `analysis`; the recorder and web services are not changed), `.github/workflows/ci.yml`
+
+Decision D18: there is no whisper container, no `Dockerfile.whisper` and no CUDA build workflow; whisper.cpp comes as prebuilt native libraries in the Whisper.net runtime packages, and the GPU image only adds NVIDIA's CUDA 13.0 runtime and cuBLAS packages.
 - Create: `tests/WebAudioArchive.Tests/Support/RepoFiles.cs`
 - Test: `tests/WebAudioArchive.Tests/DeploymentFilesTests.cs`
 
 **Interfaces:**
 - Consumes: the service from Task 15 (`--healthcheck`, port 8080, settings names).
-- Produces: images `webaudioarchive-analysis:local`, `webaudioarchive-whisper:cpu`, `webaudioarchive-whisper:cuda`; containers `waa-analysis` (health on `http://127.0.0.1:8095/healthz`) and `waa-whisper` (not published; `http://whisper:8080` inside the compose network); host folders `data/analysis` (output) and `models/` (whisper models, read-only in the container). Test helper `RepoFiles.Root` and `RepoFiles.ComposeServices(string relativePath)` (service name to its YAML block).
+- Produces: images `webaudioarchive-analysis:local` (target `cpu`) and `webaudioarchive-analysis:cuda` (target `cuda`); container `waa-analysis` (health on `http://127.0.0.1:8095/healthz`); host folders `data/analysis` (output) and `models/` (whisper models, read-only in the container at `/models`). Test helper `RepoFiles.Root` and `RepoFiles.ComposeServices(string relativePath)` (service name to its YAML block).
 
 - [ ] **Step 1: Download the whisper models (owner action, about 1 GB, not committed)**
 
@@ -8114,21 +8483,22 @@ public class DeploymentFilesTests
         Assert.Contains("/analysis:/analysis", a);
         Assert.Contains("web-cache:/web-cache:ro", a);
         Assert.Contains("../config:/config:ro", a);
+        Assert.Contains("/models:/models:ro", a);
         foreach (var mount in a.Split('\n').Where(l => l.Contains(":/data", StringComparison.Ordinal)))
             Assert.EndsWith(":ro", mount.Trim());
         Assert.Contains("/scratch:size=2g", a);
     }
 
     [Fact]
-    public void Analysis_and_whisper_run_below_the_recorders()
+    public void Analysis_runs_below_the_recorders_and_whisper_has_no_container_of_its_own()
     {
-        foreach (var name in new[] { "analysis", "whisper" })
-        {
-            Assert.Contains("cpu_shares: 256", Compose[name]);
-            Assert.Contains("oom_score_adj: 800", Compose[name]);
-            Assert.Contains("mem_limit:", Compose[name]);
-            Assert.Contains("cpus:", Compose[name]);
-        }
+        var a = Compose["analysis"];
+        Assert.Contains("cpu_shares: 256", a);
+        Assert.Contains("oom_score_adj: 800", a);
+        Assert.Contains("mem_limit:", a);
+        Assert.Contains("cpus:", a);
+        Assert.DoesNotContain("depends_on", a);
+        Assert.False(Compose.ContainsKey("whisper"), "whisper runs inside the analysis process since decision D18");
 
         Assert.Contains("\"nice\", \"-n\", \"10\"", RepoFiles.Read("docker/Dockerfile.analysis"));
     }
@@ -8145,32 +8515,31 @@ public class DeploymentFilesTests
     }
 
     [Fact]
-    public void The_gpu_override_changes_only_whisper_and_analysis()
+    public void The_gpu_override_changes_only_analysis()
     {
         var gpu = RepoFiles.ComposeServices("docker/docker-compose.gpu.yml");
 
-        Assert.Equal(new[] { "analysis", "whisper" }, gpu.Keys.Order(StringComparer.Ordinal));
-        Assert.Contains("capabilities: [gpu]", gpu["whisper"]);
-        Assert.Contains("ggml-large-v3-turbo-q8_0.bin", gpu["whisper"]);
-        Assert.Contains("--dtw", gpu["whisper"]);
-        Assert.Contains("WAA_WHISPER_MODEL: ggml-large-v3-turbo-q8_0", gpu["analysis"]);
+        Assert.Equal(new[] { "analysis" }, gpu.Keys.Order(StringComparer.Ordinal));
+        Assert.Contains("capabilities: [gpu]", gpu["analysis"]);
+        Assert.Contains("target: cuda", gpu["analysis"]);
+        Assert.Contains("WAA_WHISPER_DEVICE: cuda", gpu["analysis"]);
+        Assert.Contains("ggml-large-v3-turbo-q8_0.bin", gpu["analysis"]);
     }
 
     [Fact]
-    public void Images_are_pinned_non_root_and_carry_what_they_need()
+    public void The_image_is_non_root_with_cpu_and_cuda_targets_and_no_native_build()
     {
         var analysis = RepoFiles.Read("docker/Dockerfile.analysis");
-        Assert.Contains("ffmpeg", analysis);
         Assert.Contains("USER $APP_UID", analysis);
         Assert.Contains("--healthcheck", analysis);
-
-        var whisper = RepoFiles.Read("docker/Dockerfile.whisper");
-        Assert.Contains("ARG WHISPER_VERSION=v1.9.5", whisper);
-        Assert.Contains("ARG WHISPER_COMMIT=d2a764c648779feb36d44363f212a29b00aad1af", whisper);
-        Assert.Contains("rev-parse HEAD", whisper);
-        Assert.Contains("nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS cuda", whisper);
-        Assert.Contains("AS cpu", whisper);
-        Assert.Contains("USER whisper", whisper);
+        Assert.Contains("AS cpu", analysis);
+        Assert.Contains("FROM cpu AS cuda", analysis);
+        Assert.Contains("libgomp1", analysis);
+        Assert.Contains("cuda-cudart-13-0", analysis);
+        Assert.Contains("libcublas-13-0", analysis);
+        Assert.DoesNotContain("ffmpeg", analysis);
+        Assert.DoesNotContain("cmake", analysis);
+        Assert.False(File.Exists(Path.Combine(RepoFiles.Root, "docker", "Dockerfile.whisper")));
     }
 
     [Fact]
@@ -8186,13 +8555,18 @@ public class DeploymentFilesTests
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~DeploymentFilesTests`
-Expected: FAIL: `KeyNotFoundException` for `analysis` (the compose file has no such service yet) and file-not-found for the new Dockerfiles; `Models_and_data_are_never_committed` and `Recorders_are_untouched_by_analysis` pass.
+Expected: FAIL: `KeyNotFoundException` for `analysis` (the compose file has no such service yet) and file-not-found for the new Dockerfile and override; `Models_and_data_are_never_committed` and `Recorders_are_untouched_by_analysis` pass.
 
-- [ ] **Step 4: Write the images, the compose services, the override and CI**
+- [ ] **Step 4: Write the image, the compose service, the override and CI**
 
 `docker/Dockerfile.analysis`:
 ```dockerfile
 # The analysis service (plan 3). Its own image and container: it never shares a process or an image with a recorder.
+# Decision D18: MP3 decoding is managed code and whisper.cpp runs in process through Whisper.net, so nothing is compiled
+# here beyond the .NET publish.
+#   target cpu  (docker-compose.yml): the aspnet image plus the OpenMP runtime that whisper.cpp's CPU library links.
+#   target cuda (docker-compose.gpu.yml): adds the CUDA 13.0 runtime and cuBLAS from NVIDIA's Ubuntu 24.04 repository
+#               (the two libraries Whisper.net's CUDA runtime links); the NVIDIA container toolkit supplies the driver.
 # Build and restart only it: docker compose -f docker/docker-compose.yml up -d --build analysis
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
@@ -8200,12 +8574,15 @@ COPY global.json Directory.Build.props ./
 COPY src/WebAudioArchive.Core/ src/WebAudioArchive.Core/
 COPY src/WebAudioArchive.Analysis/ src/WebAudioArchive.Analysis/
 COPY src/WebAudioArchive.Analysis.Service/ src/WebAudioArchive.Analysis.Service/
-RUN dotnet publish src/WebAudioArchive.Analysis.Service -c Release -o /app
+# Keep only the linux-x64 native libraries; the CUDA ones go to /cuda for the cuda target.
+RUN dotnet publish src/WebAudioArchive.Analysis.Service -c Release -o /app \
+    && find /app/runtimes -mindepth 1 -maxdepth 1 ! -name linux-x64 ! -name cuda -exec rm -rf {} + \
+    && find /app/runtimes/cuda -mindepth 1 -maxdepth 1 ! -name linux-x64 -exec rm -rf {} + \
+    && mkdir /cuda && mv /app/runtimes/cuda /cuda/cuda
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0
-# ffmpeg from Ubuntu 24.04 (6.1.x); its exact version is recorded in every transcript (decision D14).
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS cpu
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg tzdata ca-certificates \
+    && apt-get install -y --no-install-recommends libgomp1 tzdata ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app .
@@ -8220,79 +8597,41 @@ EXPOSE 8080
 USER $APP_UID
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
     CMD ["dotnet", "WebAudioArchive.Analysis.Service.dll", "--healthcheck"]
-# nice 10: the service and the ffmpeg processes it starts always run below the recorders.
+# nice 10: the service, and the whisper.cpp threads inside it, always run below the recorders.
 ENTRYPOINT ["nice", "-n", "10", "dotnet", "WebAudioArchive.Analysis.Service.dll"]
+
+FROM cpu AS cuda
+USER root
+ADD https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb /tmp/cuda-keyring.deb
+RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends cuda-cudart-13-0 libcublas-13-0 \
+    && rm -rf /var/lib/apt/lists/*
+ENV LD_LIBRARY_PATH=/usr/local/cuda-13.0/targets/x86_64-linux/lib \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+COPY --from=build /cuda/cuda /app/runtimes/cuda
+USER $APP_UID
 ```
 
-`docker/Dockerfile.whisper`:
-```dockerfile
-# whisper.cpp's whisper-server, built from the v1.9.5 release (MIT licence), checked against the release commit.
-#   target cpu  (docker-compose.yml): runs anywhere; use a small model (base.en). Slow: for machines without a GPU.
-#   target cuda (docker-compose.gpu.yml): CUDA 13.0.1 for NVIDIA GPUs; CUDA_ARCHITECTURES 86 is the RTX 30 series.
-ARG WHISPER_VERSION=v1.9.5
-ARG WHISPER_COMMIT=d2a764c648779feb36d44363f212a29b00aad1af
-
-FROM ubuntu:24.04 AS source
-ARG WHISPER_VERSION
-ARG WHISPER_COMMIT
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 --branch ${WHISPER_VERSION} https://github.com/ggml-org/whisper.cpp /src \
-    && test "$(git -C /src rev-parse HEAD)" = "${WHISPER_COMMIT}"
-
-FROM ubuntu:24.04 AS build-cpu
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake && rm -rf /var/lib/apt/lists/*
-COPY --from=source /src /src
-RUN cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF \
-    && cmake --build /build -j --target whisper-server
-
-FROM nvidia/cuda:13.0.1-devel-ubuntu24.04 AS build-cuda
-ARG CUDA_ARCHITECTURES=86
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake && rm -rf /var/lib/apt/lists/*
-COPY --from=source /src /src
-# The build has no GPU or driver: link against the driver stub, as whisper.cpp's own CUDA Dockerfile does.
-ENV LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64/stubs
-RUN cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DWHISPER_BUILD_TESTS=OFF \
-        -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} \
-    && cmake --build /build -j --target whisper-server
-
-FROM ubuntu:24.04 AS cpu
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1655 --no-create-home --shell /usr/sbin/nologin whisper
-COPY --from=build-cpu /build/bin/whisper-server /usr/local/bin/whisper-server
-USER whisper
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 CMD ["curl", "-fsS", "http://127.0.0.1:8080/health"]
-ENTRYPOINT ["whisper-server", "--host", "0.0.0.0", "--port", "8080"]
-
-FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS cuda
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates libgomp1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1655 --no-create-home --shell /usr/sbin/nologin whisper
-COPY --from=build-cuda /build/bin/whisper-server /usr/local/bin/whisper-server
-USER whisper
-EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 CMD ["curl", "-fsS", "http://127.0.0.1:8080/health"]
-ENTRYPOINT ["whisper-server", "--host", "0.0.0.0", "--port", "8080"]
-```
-
-In `docker/docker-compose.yml`, add these two services after the `web` service and before the top-level `volumes:` key (leave every existing line as it is):
+In `docker/docker-compose.yml`, add this service after the `web` service and before the top-level `volumes:` key (leave every existing line as it is):
 ```yaml
 
   # Analysis (plan 3): transcripts, detectors, events and show enrichment. Its own image and container, below the
   # recorders' priority (nice 10, low CPU shares, capped CPU and memory, killed first under memory pressure). It reads
   # the recorders' folders read-only, writes only data/analysis and a 2 GiB tmpfs scratch, and stops first when free
-  # disk falls below WAA_MIN_FREE_GB. Health: http://127.0.0.1:8095/healthz. Always name the service:
+  # disk falls below WAA_MIN_FREE_GB. whisper.cpp runs inside it (Whisper.net, decision D18): here the CPU build with
+  # base.en; docker-compose.gpu.yml switches to the CUDA target and large-v3-turbo. Models come from models/ (see
+  # docs/analysis.md). Health: http://127.0.0.1:8095/healthz. Always name the service:
   #   docker compose -f docker/docker-compose.yml up -d --build analysis
   analysis:
     build:
       context: ..
       dockerfile: docker/Dockerfile.analysis
+      target: cpu
     image: webaudioarchive-analysis:local
     container_name: waa-analysis
     restart: unless-stopped
-    depends_on:
-      - whisper
     environment:
       WAA_STATION: burst
       WAA_RECORDERS: a=/data/a,b=/data/b
@@ -8301,8 +8640,9 @@ In `docker/docker-compose.yml`, add these two services after the `web` service a
       WAA_SCRATCH: /scratch
       WAA_SCRATCH_MAX_MB: "2048"
       WAA_MIN_FREE_GB: ${WAA_MIN_FREE_GB:-20}
-      WAA_WHISPER_URL: http://whisper:8080
-      WAA_WHISPER_MODEL: ${WAA_WHISPER_MODEL:-ggml-base.en}
+      WAA_WHISPER_MODEL_PATH: ${WAA_WHISPER_MODEL_PATH:-/models/ggml-base.en.bin}
+      WAA_WHISPER_DEVICE: cpu
+      WAA_WHISPER_THREADS: "4"
       WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://host.docker.internal:11434}
       WAA_OLLAMA_MODEL: ${WAA_OLLAMA_MODEL:-qwen3.6:latest}
       WAA_ENRICHMENT: ${WAA_ENRICHMENT:-on}
@@ -8314,6 +8654,7 @@ In `docker/docker-compose.yml`, add these two services after the `web` service a
       - ${WAA_DATA_DIR:-../data}/a:/data/a:ro
       - ${WAA_DATA_DIR:-../data}/b:/data/b:ro
       - ${WAA_DATA_DIR:-../data}/analysis:/analysis
+      - ${WAA_MODELS_DIR:-../models}:/models:ro
       - ../config:/config:ro
       - web-cache:/web-cache:ro
     tmpfs:
@@ -8327,41 +8668,23 @@ In `docker/docker-compose.yml`, add these two services after the `web` service a
     pids_limit: 512
     ports:
       - "127.0.0.1:8095:8080"
-
-  # whisper.cpp server for the analysis service. CPU build and base.en here; docker-compose.gpu.yml switches it to the
-  # CUDA build and large-v3-turbo. Models come from models/ (see docs/analysis.md). Not published outside compose.
-  whisper:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.whisper
-      target: cpu
-    image: webaudioarchive-whisper:cpu
-    container_name: waa-whisper
-    restart: unless-stopped
-    command: ["-m", "/models/ggml-base.en.bin", "-l", "en", "-t", "4"]
-    volumes:
-      - ${WAA_MODELS_DIR:-../models}:/models:ro
-    cpus: 4
-    cpu_shares: 256
-    mem_limit: 4g
-    oom_score_adj: 800
 ```
 
 `docker/docker-compose.gpu.yml`:
 ```yaml
-# GPU override (spec 5, decisions D1 to D4): whisper on the NVIDIA GPU with large-v3-turbo (q8_0), DTW word times,
-# flash attention off (whisper.cpp turns DTW off when flash attention is on). It changes only whisper and analysis:
-#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build whisper analysis
-# Never run it without naming the services, so the recorders are never rebuilt or restarted by it.
+# GPU override (spec 5, decisions D1 to D4 and D18): the analysis image's cuda target with whisper.cpp on the NVIDIA GPU,
+# large-v3-turbo (q8_0), flash attention on and DTW off (D18: DTW cut 300 s requests short in the spike). It changes
+# only analysis:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+# Never run it without naming the service, so the recorders are never rebuilt or restarted by it.
 services:
-  whisper:
+  analysis:
     build:
       target: cuda
-      args:
-        CUDA_ARCHITECTURES: "86"
-    image: webaudioarchive-whisper:cuda
-    command: ["-m", "/models/ggml-large-v3-turbo-q8_0.bin", "-l", "en", "-t", "4", "-nfa", "--dtw", "large.v3.turbo"]
-    mem_limit: 6g
+    image: webaudioarchive-analysis:cuda
+    environment:
+      WAA_WHISPER_MODEL_PATH: /models/ggml-large-v3-turbo-q8_0.bin
+      WAA_WHISPER_DEVICE: cuda
     deploy:
       resources:
         reservations:
@@ -8369,41 +8692,18 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-
-  analysis:
-    environment:
-      WAA_WHISPER_MODEL: ggml-large-v3-turbo-q8_0
 ```
 
-In `.github/workflows/ci.yml`, in the `docker` job, add after the existing two `docker build` lines:
+In `.github/workflows/ci.yml`, in the `docker` job, add after the existing two `docker build` lines (the `ldd` checks prove the images carry the libraries whisper.cpp links; `libcuda` itself comes from the driver at run time, so it is not checked):
 ```yaml
-      - run: docker build -f docker/Dockerfile.analysis -t webaudioarchive-analysis:ci .
-      - run: docker run --rm --entrypoint ffmpeg webaudioarchive-analysis:ci -hide_banner -version
-      - run: docker build -f docker/Dockerfile.whisper --target cpu -t webaudioarchive-whisper:ci .
+      - run: docker build -f docker/Dockerfile.analysis --target cpu -t webaudioarchive-analysis:ci .
+      - run: docker run --rm --entrypoint sh webaudioarchive-analysis:ci -c "! ldd /app/runtimes/linux-x64/libggml-cpu-whisper.so | grep -E 'libgomp[^ ]* => not found'"
+      - run: docker build -f docker/Dockerfile.analysis --target cuda -t webaudioarchive-analysis:ci-cuda .
+      - run: docker run --rm --entrypoint sh webaudioarchive-analysis:ci-cuda -c "! ldd /app/runtimes/cuda/linux-x64/libggml-cuda-whisper.so | grep -E 'lib(cudart|cublas)[^ ]* => not found'"
       - run: docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml config --quiet
 ```
 
-`.github/workflows/whisper-cuda.yml`:
-```yaml
-# The CUDA whisper image is large (CUDA devel image, nvcc), so it is built only when its Dockerfile changes or by hand.
-name: whisper-cuda
-on:
-  workflow_dispatch:
-  push:
-    branches: [master, main]
-    paths: [docker/Dockerfile.whisper, .github/workflows/whisper-cuda.yml]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - name: Free disk space for the CUDA image
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - run: docker build -f docker/Dockerfile.whisper --target cuda -t webaudioarchive-whisper:cuda .
-```
-
-- [ ] **Step 5: Run the tests, then build and start the CPU stack locally**
+- [ ] **Step 5: Run the tests, then build both targets locally**
 
 Run: `dotnet test --filter FullyQualifiedName~DeploymentFilesTests`
 Expected: PASS, 6 tests.
@@ -8412,17 +8712,20 @@ Run:
 ```powershell
 docker compose -f docker/docker-compose.yml config --quiet
 docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml config --quiet
-docker build -f docker/Dockerfile.analysis -t webaudioarchive-analysis:local .
-docker run --rm --entrypoint ffmpeg webaudioarchive-analysis:local -hide_banner -version
+docker build -f docker/Dockerfile.analysis --target cpu -t webaudioarchive-analysis:local .
+docker build -f docker/Dockerfile.analysis --target cuda -t webaudioarchive-analysis:cuda .
+docker run --rm --entrypoint sh webaudioarchive-analysis:local -c "ls /app/runtimes; ! ldd /app/runtimes/linux-x64/libggml-cpu-whisper.so | grep -E 'libgomp[^ ]* => not found'"
+docker run --rm --entrypoint sh webaudioarchive-analysis:cuda -c "! ldd /app/runtimes/cuda/linux-x64/libggml-cuda-whisper.so | grep -E 'lib(cudart|cublas)[^ ]* => not found'"
+docker images webaudioarchive-analysis --format "{{.Tag}} {{.Size}}"
 docker compose -f docker/docker-compose.yml ps
 ```
-Expected: both `config` commands print nothing (valid); the build succeeds; the ffmpeg line starts `ffmpeg version 6.1`; `ps` still shows `waa-recorder-a`, `waa-recorder-b` and `waa-web` with their original uptime (nothing above restarted them). Starting the services is Task 19.
+Expected: both `config` commands print nothing (valid); both builds succeed (the cuda build downloads about 1.3 GB from NVIDIA the first time); `ls` prints `linux-x64` only in the cpu image; the `ldd` checks exit 0; sizes about 380 MB (`local`) and about 1.9 GB (`cuda`), as measured for D18; `ps` still shows `waa-recorder-a`, `waa-recorder-b` and `waa-web` with their original uptime (nothing above restarted them). Starting the service is Task 19.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add docker/Dockerfile.analysis docker/Dockerfile.whisper docker/docker-compose.yml docker/docker-compose.gpu.yml .github/workflows/ci.yml .github/workflows/whisper-cuda.yml tests/WebAudioArchive.Tests/Support/RepoFiles.cs tests/WebAudioArchive.Tests/DeploymentFilesTests.cs
-git commit -m "Analysis and whisper containers, GPU override, resource limits below the recorders, CI image builds (#76, #77, #85)"
+git add docker/Dockerfile.analysis docker/docker-compose.yml docker/docker-compose.gpu.yml .github/workflows/ci.yml tests/WebAudioArchive.Tests/Support/RepoFiles.cs tests/WebAudioArchive.Tests/DeploymentFilesTests.cs
+git commit -m "Analysis container (cpu and cuda targets, whisper in process), GPU override, resource limits below the recorders, CI image builds (#76, #77, #85)"
 ```
 
 ---
@@ -8887,7 +9190,7 @@ git commit -m "Web: read-only analysis API (events, transcript, shows) and PDMed
 - Test: `tests/WebAudioArchive.Tests/DetectorValidationTests.cs`
 
 **Interfaces:**
-- Consumes: detectors (Tasks 5 to 8), `DetectorRunner` (Task 12), `SegmentDecoder` (Task 9), `AnalysisStore.DayEvents` (Task 17), `TestFfmpeg`, `Signals`, `TranscriptFixtures`.
+- Consumes: detectors (Tasks 5 to 8), `DetectorRunner` (Task 12), `SegmentDecoder` (Task 9), `AnalysisStore.DayEvents` (Task 17), `TestMp3`, `Signals`, `TranscriptFixtures`.
 - Produces:
   - `sealed record Labelled(string Type, DateTimeOffset StartUtc, DateTimeOffset EndUtc, string? Note)`; `sealed record Score(string Type, int TruePositives, int FalsePositives, int FalseNegatives)` with `double? Precision`, `double? Recall`; `static class DetectorScore { IReadOnlyList<Score> Compare(IReadOnlyList<Labelled> labels, IReadOnlyList<AnalysisEvent> detected, TimeSpan tolerance); IReadOnlyList<Labelled> ReadCsv(string path); string Table(IReadOnlyList<Score> scores); }`
   - CLI: `--validate <labels.csv> <fromUtc> <toUtc>` prints the markdown table for the analysed events in that range.
@@ -9088,10 +9391,10 @@ public sealed class DetectorValidationTests(ITestOutputHelper output) : IDisposa
     {
         var (mono, labels) = ValidationCorpus.Audio(seed: 11, T);
         var mp3 = Path.Combine(_dir, "corpus.mp3");
-        await TestFfmpeg.EncodeMp3Async(mp3, Signals.Stereo(mono), 2);
+        await TestMp3.EncodeMp3Async(mp3, Signals.Stereo(mono), 2);
         var scratch = new ScratchSpace(Path.Combine(_dir, "scratch"), 512L << 20);
         using var lease = scratch.Acquire("validation", SegmentDecoder.ScratchBytesFor(new FileInfo(mp3).Length, 180));
-        var features = (await new SegmentDecoder(new Ffmpeg(TestFfmpeg.Executable)).DecodeAsync(mp3, new FileInfo(mp3).Length, 44100, 2, lease, CancellationToken.None)).Features;
+        var features = (await new SegmentDecoder().DecodeAsync(mp3, new FileInfo(mp3).Length, 44100, 2, lease, CancellationToken.None)).Features;
 
         var configured = DetectorScore.Compare(labels, AudioEvents(features, Config), TimeSpan.FromSeconds(0.25));
         var lenient = Config with { Config = Config.Config with { Clipping = Config.Config.Clipping with { Threshold = 0.98, MinRunSamples = 2 } } };
@@ -9302,17 +9605,17 @@ git commit -m "Detector validation: labelled synthetic sample in CI, --validate 
 - Create: `docs/analysis.md`
 - Modify: `docs/operations.md`, `README.md`, `docs/superpowers/specs/2026-10-15-webaudioarchive-design.md`, `docs/analysis-validation.md`
 
-- [ ] **Step 1: Start whisper and analysis on the GPU without touching the recorders**
+- [ ] **Step 1: Start analysis on the GPU without touching the recorders**
 
 Run:
 ```powershell
 docker compose -f docker/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}"
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build whisper analysis
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
 docker compose -f docker/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}"
-docker logs waa-whisper 2>&1 | Select-String -Pattern "CUDA|RTX|model|listening" | Select-Object -First 15
+docker exec waa-analysis nvidia-smi --query-gpu=name,driver_version,memory.used --format=csv
 curl.exe -s http://127.0.0.1:8095/healthz
 ```
-Expected: the first and second `ps` show `waa-recorder-a`, `waa-recorder-b` and `waa-web` with the same "Up ..." durations (not restarted); `waa-whisper` and `waa-analysis` are new. The whisper log names `NVIDIA GeForce RTX 3060` and the turbo model. `/healthz` returns JSON with `"whisperReady":true` within a few minutes (the CUDA build takes 10 to 30 minutes the first time). If the whisper log says no CUDA device, rerun the D4 check (`docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi`).
+Expected: the first and second `ps` show `waa-recorder-a`, `waa-recorder-b` and `waa-web` with the same "Up ..." durations (not restarted); `waa-analysis` is new. `nvidia-smi` inside the container names `NVIDIA GeForce RTX 3060` (the toolkit injects it with the driver). `/healthz` returns JSON with `"whisperReady":true` within a few minutes of the first pass (the first cuda build downloads about 1.3 GB of CUDA libraries; the model loads in a few seconds). If `nvidia-smi` fails, rerun the D4 check (`docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi`); if whisper stays not ready, `docker logs waa-analysis` shows `LastError` from the transcriber (model path, or the CUDA library that did not load).
 
 - [ ] **Step 2: Measure the realtime factor**
 
@@ -9323,7 +9626,7 @@ $rel = $seg.FullName.Substring((Resolve-Path data/a).Path.Length).Replace('\', '
 docker compose -f docker/docker-compose.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --benchmark "/data/a$rel" 600
 nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv
 ```
-Expected: a line `benchmark: whisper.cpp ggml-large-v3-turbo-q8_0: 600.0 s of audio in 2 chunks, decode ... s, transcribe ... s, realtime factor 0.0xx (...)`. Record the figure. Pass: realtime factor at most 0.2 (5 times faster than real time, so a day of audio takes under 5 hours). If it is above 0.2, change the override's whisper command to `-fa` without `--dtw`, rebuild whisper only, measure again and record both. Run the benchmark a second time while Ollama is enriching (watch `docker logs -f waa-analysis` for "Enriched") and record that figure too: it shows the cost of sharing the GPU.
+Expected: a line `benchmark: whisper.net 1.9.1 (cuda) ggml-large-v3-turbo-q8_0: 600.0 s of audio in 2 chunks, decode ... s, transcribe ... s, realtime factor 0.0xx (...)`. The engine must say `(cuda)`; `(cpu)` means the CUDA runtime did not load (see Step 1). Record the figure. Pass: realtime factor at most 0.2 (5 times faster than real time, so a day of audio takes under 5 hours); the D18 spike measured 0.035 (28x) for speech in a container. If it is above 0.2, check that the host CPU is not saturated (whisper.cpp's threads starve under full load, D18) and try `WAA_WHISPER_THREADS` 2 or 6; record each figure. Run the benchmark a second time while Ollama is enriching (watch `docker logs -f waa-analysis` for "Enriched") and record that figure too: it shows the cost of sharing the GPU.
 
 - [ ] **Step 3: Watch it catch up and check the recorders are unaffected**
 
@@ -9365,18 +9668,20 @@ In `docs/analysis-validation.md` add the realtime factors from Step 2 (alone and
 # Analysis (plan 3)
 
 The analysis service turns the archive into transcripts, detected events and per-show facts. It is a separate
-container (`waa-analysis`) with its own image, below the recorders' priority, and a whisper.cpp server (`waa-whisper`)
-on the GPU. It never writes to the recordings: it reads closed segments read-only, copies each one into a 2 GiB tmpfs
+container (`waa-analysis`) with its own image, below the recorders' priority, that runs whisper.cpp in process on the
+GPU (Whisper.net). It never writes to the recordings: it reads closed segments read-only, copies each one into a 2 GiB tmpfs
 scratch, decodes the copy, and writes only under `data/analysis`. All times are UTC.
 
 ## Run
 
-First time, or after a change to analysis or whisper (always name the services; never touch the recorders):
+First time, or after a change to analysis (always name the service; never touch the recorders):
 
-    docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build whisper analysis
+    docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
 
-Without an NVIDIA GPU leave out the second `-f` file: whisper then runs on the CPU with `base.en`, which is far slower
-(a day of audio can take longer than a day; the lag in `/healthz` shows it).
+Without an NVIDIA GPU leave out the second `-f` file: the image is then the cpu target and whisper runs on the CPU with
+`base.en`, which is far slower and needs a host that is not otherwise busy (a day of audio can take longer than a day;
+the lag in `/healthz` shows it). Nothing in the image needs ffmpeg or a compiler: decoding is managed code (NLayer,
+NAudio) and whisper.cpp comes prebuilt in the Whisper.net runtime packages.
 
 Models are not in git. Download them into `models/` once (sizes and hashes in plan 3, Task 16):
 `ggml-large-v3-turbo-q8_0.bin` (GPU) and `ggml-base.en.bin` (CPU).
@@ -9390,8 +9695,8 @@ finished for 15 minutes; `docker ps` then shows the container unhealthy; it is n
    so the recorders keep the space.
 2. Finds closed segments (a `.json` sidecar beside its `.mp3`, sizes agreeing). Recorder A is analysed; recorder B only
    where A covers less than 98% of the span (`WAA_ANALYSIS_PREFERENCE`). Newest first.
-3. Per segment (a job, idempotent and resumable through `state.json`): copy into scratch, decode with ffmpeg to 16 kHz
-   mono WAV (for whisper) and to full-rate float PCM (streamed into the level and clipping features), split into about
+3. Per segment (a job, idempotent and resumable through `state.json`): copy into scratch, decode once in managed code to
+   16 kHz mono WAV (for whisper) and full-rate float PCM (streamed into the level and clipping features), split into about
    5 minute chunks at quiet moments, transcribe each chunk (progress saved after each), assemble `transcript.json`, run
    the detectors into `events.json`. A job runs again only when the segment, the transcriber or its options change;
    detector changes rebuild events from the stored transcript and features without whisper or audio.
@@ -9433,11 +9738,11 @@ The player markers and segments are built from these in plan 4.
 ## Settings (environment)
 
 `WAA_STATION`, `WAA_RECORDERS` (required), `WAA_ANALYSIS_PREFERENCE`, `WAA_ANALYSIS_OUT`, `WAA_SCRATCH`,
-`WAA_SCRATCH_MAX_MB` (2048), `WAA_MIN_FREE_GB` (20), `WAA_WHISPER_URL`, `WAA_WHISPER_MODEL` (a label recorded in
-transcripts; keep it equal to the model whisper serves), `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` (`qwen3.6:latest`; cloud
+`WAA_SCRATCH_MAX_MB` (2048), `WAA_MIN_FREE_GB` (20), `WAA_WHISPER_MODEL_PATH` (the ggml model file; its name is recorded
+in transcripts), `WAA_WHISPER_DEVICE` (`auto`, `cpu` or `cuda`), `WAA_WHISPER_THREADS` (4), `WAA_WHISPER_DTW` (`off`;
+turn on only with `chunkSeconds` 30, D18), `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` (`qwen3.6:latest`; cloud
 models are refused), `WAA_OLLAMA_ALLOW_REMOTE`, `WAA_ENRICHMENT` (on or off), `WAA_ANALYSIS_CONFIG`,
-`WAA_STATIONS_CONFIG`, `WAA_SCHEDULE_FILE`, `WAA_ANALYSIS_SINCE` (UTC), `WAA_LAG_ALARM_HOURS` (6), `WAA_FFMPEG`,
-`WAA_PORT`. Thresholds, word lists and prompts are in `config/analysis/` (versioned; a change rebuilds events or
+`WAA_STATIONS_CONFIG`, `WAA_SCHEDULE_FILE`, `WAA_ANALYSIS_SINCE` (UTC), `WAA_LAG_ALARM_HOURS` (6), `WAA_PORT`. Thresholds, word lists and prompts are in `config/analysis/` (versioned; a change rebuilds events or
 re-enriches shows as needed).
 
 ## Limits
@@ -9457,9 +9762,9 @@ In `docs/operations.md` append:
 
 ## Analysis (plan 3)
 
-Containers `waa-analysis` and `waa-whisper`, separate from the recorders and the web app. Start or upgrade only them:
+Container `waa-analysis` (whisper.cpp runs inside it), separate from the recorders and the web app. Start or upgrade only it:
 
-    docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build whisper analysis
+    docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
 
 They read `data/a` and `data/b` read-only and write only `data/analysis` (the web app reads it read-only through its
 `/data` mount, `WAA_ANALYSIS=/data/analysis`). Analysis runs at nice 10 with low CPU shares, at most 6 CPUs and 6 GB,
@@ -9473,7 +9778,7 @@ In `README.md`, after the Web app section, add:
 
 ## Analysis
 
-A separate analysis container transcribes the recordings locally (whisper.cpp on the GPU), detects swearing (with the
+A separate analysis container transcribes the recordings locally (whisper.cpp through Whisper.net on the GPU), detects swearing (with the
 21:00 watershed), clipping, filler words and dead air, keeps a UTC events timeline, and derives hosts, guests, topics,
 songs and artists for each show with a local LLM (Ollama), every claim backed by a quote. It reads the recordings
 read-only and never touches a recorder. See `docs/analysis.md`.
@@ -9483,9 +9788,9 @@ In `docs/superpowers/specs/2026-10-15-webaudioarchive-design.md`:
 - in 3.6, replace the bullet beginning `- **Decode once:**` with:
   `- **Decode once (built in plan 3, issue #76):** each closed master segment is copied into a size-bounded scratch and the copy decoded: 16 kHz mono WAV for whisper and full-rate float PCM, streamed, for the clipping and dead-air features. The live stream is not decoded: analysis is a separate container and never in the recorder's path (3.13).`
 - in 3.6, replace the bullet beginning `- **Transcriber:**` with:
-  `- **Transcriber (plan 3, decision D1 and D2):** whisper.cpp whisper-server v1.9.5 (CUDA) with ggml-large-v3-turbo-q8_0, English, DTW word timestamps, about 5 minute chunks cut at quiet moments. One transcript per master segment (recorder A, B only to fill A's holes), times as offsets into the segment's audio with a timeline to UTC; each show's transcript is a slice. The prompt is primed with fillers, the station glossary and the show title. Segments whisper invents over music or silence are kept but suppressed.`
+  `- **Transcriber (plan 3, decisions D2 and D18):** whisper.cpp in the analysis process through Whisper.net 1.9.1 (CUDA runtime on the GPU, CPU fallback) with ggml-large-v3-turbo-q8_0, English, token timestamps (DTW off by default), about 5 minute chunks cut at quiet moments. Decoding is managed code (NLayer, NAudio); there is no ffmpeg. One transcript per master segment (recorder A, B only to fill A's holes), times as offsets into the segment's audio with a timeline to UTC; each show's transcript is a slice. The prompt is primed with fillers, the station glossary and the show title. Segments whisper invents over music or silence are kept but suppressed.`
 - in 3.11, after the line `  events/<yyyy>/<MM-dd>.jsonl`, add `  (built in plan 3 as data/analysis/<station>/events/<yyyy>/<MM-dd>.json, with segments/ and shows/ beside it; see docs/analysis.md)`
-- in section 8, add the bullet: `- Analysis (plan 3, 2026-10-16): whisper.cpp v1.9.5 on the GPU with large-v3-turbo q8_0; qwen3.6:latest in Ollama for enrichment; recorder A analysed, B only for A's holes; watershed 21:00 to 05:30 local; analysis is its own container below the recorders' priority.`
+- in section 8, add the bullet: `- Analysis (plan 3, 2026-10-16): whisper.cpp through Whisper.net on the GPU with large-v3-turbo q8_0, managed MP3 decoding, no ffmpeg (decision D18); qwen3.6:latest in Ollama for enrichment; recorder A analysed, B only for A's holes; watershed 21:00 to 05:30 local; analysis is its own container below the recorders' priority.`
 
 - [ ] **Step 8: Check for em dashes, run everything, commit and push**
 
@@ -9499,7 +9804,7 @@ git commit -m "Analysis: deployed on the RTX 3060, realtime factor and detector 
 git pull --rebase
 git push
 ```
-Expected: the em dash count is 0; build and all tests pass; the push succeeds and CI is green (test, docker and, if the whisper Dockerfile changed, whisper-cuda).
+Expected: the em dash count is 0; build and all tests pass; the push succeeds and CI is green (test and docker, which builds both analysis targets).
 
 - [ ] **Step 9: Close the issues**
 
@@ -9512,7 +9817,7 @@ gh issue close 80 -c "Done in plan 3 (Task 8). Filler rate is labelled an estima
 gh issue close 81 -c "Done in plan 3 (Task 6)."
 gh issue close 82 -c "Done in plan 3 (Tasks 3, 12, 13): per-segment and per-day events.json, schema 1, rebuildable with --rebuild."
 gh issue close 83 -c "Done in plan 3 (Task 14): qwen3.6:latest, evidence quotes checked against the transcript, pending and retried when Ollama is down."
-gh issue close 77 -c "Done in plan 3: whisper.cpp v1.9.5, large-v3-turbo q8_0, realtime factor <measured> on the RTX 3060 (docs/analysis-validation.md)."
+gh issue close 77 -c "Done in plan 3: whisper.cpp in process through Whisper.net 1.9.1 (decision D18), large-v3-turbo q8_0, realtime factor <measured> on the RTX 3060 (docs/analysis-validation.md)."
 gh issue close 85 -c "Done in plan 3: realtime factor <measured>; lag, backlog and realtime factor in /healthz; 503 above WAA_LAG_ALARM_HOURS."
 ```
 Close #84 only when the real-sample figures are in `docs/analysis-validation.md`, and #9 when #76 to #85 are all closed: `gh issue close 9 -c "Plan 3 complete. The player UI for events and transcripts is plan 4 (#11)."`. In each `gh` command replace `<measured>` with the figure from Step 2 before running it.
@@ -9523,7 +9828,7 @@ Close #84 only when the real-sample figures are in `docs/analysis-validation.md`
 
 **Spec coverage (plan 3 scope):**
 - 3.5 disk guard for analysis: Task 11 (`DiskGuard`), Task 12 (stops between chunks), Task 15 (stops a pass), Task 19 (proved live). The recorder-side guard stays plan 5.
-- 3.6 decode on a scratch copy (Task 9), transcriber with word timestamps on the stream timeline (Tasks 3, 10, 12), clipping (Task 5), swearing with tiers, inflections and the watershed (Task 7), fillers with the verbatim prompt and the "like" exclusion (Tasks 8, 10), events timeline (Tasks 3, 12, 13), dead air (Task 6).
+- 3.6 decode on a scratch copy (Task 9, managed decoder instead of the spec's ffmpeg, D18), transcriber with word timestamps on the stream timeline (Tasks 3, 10, 12), clipping (Task 5), swearing with tiers, inflections and the watershed (Task 7), fillers with the verbatim prompt and the "like" exclusion (Tasks 8, 10), events timeline (Tasks 3, 12, 13), dead air (Task 6).
 - 3.7 enricher: fields, evidence quotes, drops invented claims, `derived` with model, prompt version and date, pending and retried (Task 14); derived hosts never grant access (stated in the records and docs).
 - 3.8 web integration: read-only data API and marker mapping (Task 17); UI is plan 4.
 - 3.9 songs: `song` event type reserved (Task 3); spoken songs and artists from the enricher (Task 14).
@@ -9532,8 +9837,10 @@ Close #84 only when the real-sample figures are in `docs/analysis-validation.md`
 - 5 deployment: compose, GPU opt-in override, non-root, health check, analysis lag in `/healthz` (Tasks 15, 16).
 - 6 testing: synthetic clipped audio with exact times (Task 5), transcript fixtures with near misses (Tasks 7, 18), filler precision and recall on a labelled sample (Task 18, real sample by the owner), enricher with a hallucinated name dropped (Task 14), end to end with whisper and Ollama stubbed (Tasks 12, 15).
 
-**Known gaps left deliberately:** speaker diarisation; song fingerprinting (#2, #3); presenter access rules on the analysis API (plan 4, with sign-in); a VAD model; the LLM schedule fallback of 3.2 (plan 2); per-station margins from config (5 minutes is a constant until plan 2 adds `marginBefore`/`marginAfter`); retention of analysis output (plan 5 covers retention).
+**Known gaps left deliberately:** DTW word times (off by default until whisper.cpp keeps DTW over long requests, D18); speaker diarisation; song fingerprinting (#2, #3); presenter access rules on the analysis API (plan 4, with sign-in); a VAD model; the LLM schedule fallback of 3.2 (plan 2); per-station margins from config (5 minutes is a constant until plan 2 adds `marginBefore`/`marginAfter`); retention of analysis output (plan 5 covers retention).
 
 **Type consistency:** `TranscriptDocument`, `TranscriptSegment`, `TranscriptWord`, `TimelineAnchor`, `AnalysisEvent`, `EventsDocument`, `SourceSpan`, `TimedLine` (Task 3) are used unchanged in Tasks 7, 8, 12, 13, 14, 17 and 18. `RawSegment` (Task 10) feeds `TranscriptPartial` and `TranscriptAssembler` (Task 12). `SegmentJob`, `SourceSegment`, `JobState`, `JobRules`, `JobAction` (Task 11) are used by `SegmentPipeline` (Task 12) and `AnalysisRunner` (Task 15). `ShowAnalysis` (Task 13) is the input of `Enricher` (Task 14) and the output read by the web (Task 17). `LoadedConfig` positional order (Config, Swears, ConfigDir, DetectorVersion) is the same everywhere it is built with `with`.
 
-**Review Focus check:** each of the seven items has its named test in the owning task (Tasks 5, 7, 8, 10, 11, 12, 14).
+**Review Focus check:** each of the eight items has its named test in the owning task (Tasks 5, 7, 8, 9, 10, 11, 12, 14).
+
+**D18 consistency (NuGet stack):** no task starts a process or needs a native tool: `Ffmpeg`, `TestFfmpeg`, `WhisperCppTranscriber`, `Dockerfile.whisper`, the whisper service and the CUDA workflow are gone, and every caller of `SegmentDecoder` uses the parameterless constructor (Tasks 9, 12, 15, 18). `DecodedSegment.Decoder` feeds `TranscriptDocument.Decoder` (Task 3, renamed from `Ffmpeg`) through `TranscriptAssembler` (Task 12). `AnalysisSettings` (Task 1) carries `WhisperModelPath`, `WhisperDevice`, `WhisperThreads` and `WhisperDtw`, used only by `AnalysisComposition` (Task 15) and set by compose and the GPU override (Task 16). `ITranscriber` is unchanged, so the pipeline, runner and their tests (Tasks 12, 15) keep the fake. The Task 9 and Task 10 code and tests were compiled with `TreatWarningsAsErrors` and run in the spike (18 tests passing); the Dockerfile follows the throwaway images the spike built and ran.
