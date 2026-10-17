@@ -7953,34 +7953,48 @@ git commit -m "Analysis: Ollama enricher with evidence quotes, validation, pendi
 
 ---
 
-### Task 15: The service: one work lane, lag metrics in /healthz, benchmark and rebuild
+### Task 15: The service: one work lane, lag metrics in /healthz, benchmark, rebuild and un-park
 
 **Files:**
 - Create: `src/WebAudioArchive.Analysis/AnalysisMetrics.cs`, `src/WebAudioArchive.Analysis/AnalysisHealth.cs`, `src/WebAudioArchive.Analysis/AnalysisRunner.cs`, `src/WebAudioArchive.Analysis/AnalysisComposition.cs`, `src/WebAudioArchive.Analysis/Benchmark.cs`
 - Modify (replace): `src/WebAudioArchive.Analysis.Service/Program.cs`
 - Create: `src/WebAudioArchive.Analysis.Service/AnalysisWorker.cs`
+- Modify (small, after the review rounds): `Work/SegmentPipeline.cs` (`NeedsParking`, `Unpark`), `Transcription/ITranscriber.cs` (default `Device` member) and `WhisperNetTranscriber.cs` (its `Device`), `Enrichment/OllamaClient.cs` (`MinTimeout`, `CreateHttpClient`), `Settings/AnalysisSettings.cs` (`OllamaTimeout`, `WAA_OLLAMA_TIMEOUT_MINUTES`), `tests/.../Support/FakeTranscriber.cs` (`Device`)
 - Test: `tests/WebAudioArchive.Tests/AnalysisServiceTests.cs`
+
+**What changed from the first draft of this task (review rounds, binding):**
+- **Ollama transport:** `OllamaClient.CreateHttpClient(timeout)` is the only way the service builds the client: `AllowAutoRedirect = false` (a 307 or 308 would resend the POST body, the transcript, to another host), `UseProxy = false`, and a timeout of at least 10 minutes (default 20, `WAA_OLLAMA_TIMEOUT_MINUTES` from 10 to 240) instead of the 100 s default. Tests: a redirecting server is not followed (307 and 308) and the configured timeout is applied.
+- **Per-job isolation:** an exception in one job, one show update or one enrichment is recorded against its class in the metrics and the lane carries on. A segment whose decision cannot be worked out (a sidecar named with unsafe characters) is skipped as failed and no longer breaks the whole plan.
+- **Readiness first:** `IsReadyAsync` is called before the first `Decide`.
+- **Graceful stop:** cancellation ends the pass quietly; `SegmentPipeline` has already left the job waiting with its attempt not counted. The host waits 50 s for the worker; the analysis compose service needs `stop_grace_period` of at least 60 s (Task 16 sets it). The transcriber, decoder and Ollama client all take the token, so a stop abandons the chunk in hand within seconds.
+- **Parking and un-parking:** the runner calls `ProcessAsync` once for a job left running or waiting with all its attempts used (`SegmentPipeline.NeedsParking`) so it is marked failed and stops counting as backlog (before, a `Skip` decision never reached the pipeline's parking code). `--unpark` (`AnalysisRunner.UnparkAll`) puts every failed or parked segment back with its attempts reset.
+- **Stall rule:** the plan's "no pass for 15 minutes" would report a long backlog pass (or one slow CPU job) as stalled. Starting or finishing a job, a show update or an enrichment counts as a sign of life, and while a job runs the worker is called stalled only after 3 hours (`AnalysisHealth.JobStallAfter`).
+- **/healthz** also reports the queue length, the last success, the last error per segment class (the recorder id of the segment: `a` is the preferred copy, `b` fills its holes; plus `enrichment` and `show`), the device in use (`cuda`, `cpu`, `not loaded`), scratch used and limit, free disk and its threshold, and the last whole-pass error. 503 when the lag passes the alarm (6 hours) or the worker is stalled.
+- **Composition guards:** `ScratchSpace` gets the recorders' data roots and the output folder as protected roots, so a `WAA_SCRATCH` that equals or contains them refuses to start (exit 2, message names `WAA_SCRATCH`); an output folder inside a recorder's data is refused too (`WAA_ANALYSIS_OUT`).
+- **Suppressed swear events** (`evidence.suppressed` other than `no`) are review only. The service aggregates nothing from events itself (show counts are built in `ShowAnalysisBuilder`, which already excludes them); the web API in Task 17 excludes them by default.
+- **Benchmark** checks readiness first (exit 1) and refuses `.part` files (exit 2).
 
 **Interfaces:**
 - Consumes: everything from Tasks 1 to 14.
-- Produces:
-  - `sealed record MetricsSnapshot(DateTimeOffset StartedUtc, DateTimeOffset? LastPassUtc, int Backlog, int FailedSegments, DateTimeOffset? OldestPendingEndUtc, int JobsDone, int JobsFailed, double? LastRealtimeFactor, double? AverageRealtimeFactor, double AudioHoursLast24h, string? CurrentJob, string? Paused, bool? WhisperReady, int EnrichmentPending, int EnrichmentDone, int EnrichmentFailed, long FreeBytes, long ScratchBytes)`; `sealed class AnalysisMetrics(DateTimeOffset startedUtc)` with `Snapshot()`, `SetDisk`, `SetWhisper`, `SetPaused`, `SetCurrent`, `SetBacklog`, `SetEnrichment`, `JobFinished(JobOutcome, DateTimeOffset)`, `PassCompleted(DateTimeOffset)`.
-  - `sealed record HealthResult(int StatusCode, object Body)`; `static class AnalysisHealth { static readonly TimeSpan StallAfter; HealthResult Build(MetricsSnapshot m, TimeSpan lagAlarm, DateTimeOffset now); }`
-  - `sealed class AnalysisRunner(SegmentDiscovery, SegmentPipeline, ShowProcessor, Enricher?, ITranscriber, DiskGuard, ScratchSpace, AnalysisMetrics, IReadOnlyList<string> preference, DateTimeOffset? since, IClock, ILogger) { Task PassAsync(CancellationToken); int RebuildAll(); }`
-  - `sealed record AnalysisRuntime(AnalysisRunner Runner, AnalysisMetrics Metrics, ScratchSpace Scratch, SegmentDecoder Decoder, ITranscriber Transcriber)`; `static class AnalysisComposition { static readonly TimeSpan ShowMargin; AnalysisRuntime Build(AnalysisSettings, LoadedConfig, ILoggerFactory, IClock); }`
-  - `static class Benchmark { Task<int> RunAsync(string mp3, double seconds, SegmentDecoder decoder, ScratchSpace scratch, ITranscriber transcriber, TranscriptionOptions o, TextWriter output, CancellationToken ct); }`
-  - Service: `public sealed class AnalysisEntryPoint` (namespace `WebAudioArchive.Analysis.Service`); `AnalysisWorker : BackgroundService`; command line `--healthcheck`, `--benchmark <file.mp3> [seconds]`, `--rebuild`; exit code 2 (config). A missing whisper model is not an exit: whisper reports not ready, the backlog and lag grow and `/healthz` says so (D18).
+- Produces: see the code below (`MetricsSnapshot` keeps the plan's positional fields and appends optional ones; `AnalysisMetrics.JobFinished(outcome, now, segmentClass)`, `SetCurrent(job, now)`, `SetWhisper(ready, device)`, `SetDisk(free, scratch, scratchMax, minFree)`; `AnalysisHealth.StallAfter`, `JobStallAfter`; `AnalysisRunner.PassAsync`, `RebuildAll`, `UnparkAll`; `AnalysisComposition.Build`; `Benchmark.RunAsync`; `AnalysisEntryPoint`, `AnalysisWorker`). Command line: `--healthcheck`, `--benchmark <file.mp3> [seconds]`, `--rebuild`, `--unpark`; exit code 2 (config). A missing whisper model is not an exit: whisper reports not ready, the backlog and lag grow and `/healthz` says so (D18).
 
 - [ ] **Step 1: Write the failing tests**
 
-`tests/WebAudioArchive.Tests/AnalysisServiceTests.cs`:
+`tests/WebAudioArchive.Tests/AnalysisServiceTests.cs` (the committed file is the source of truth; 26 tests: runner, health, benchmark, composition guards, the Ollama transport and the host):
+
 ```csharp
 extern alias analysissvc;
 
 using System.Net;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using WebAudioArchive.Analysis;
 using WebAudioArchive.Analysis.Decode;
@@ -7988,8 +8002,10 @@ using WebAudioArchive.Analysis.Detectors;
 using WebAudioArchive.Analysis.Enrichment;
 using WebAudioArchive.Analysis.Settings;
 using WebAudioArchive.Analysis.Shows;
+using WebAudioArchive.Analysis.Transcription;
 using WebAudioArchive.Analysis.Work;
 using WebAudioArchive.Core.Analysis;
+using WebAudioArchive.Core.Recording;
 using WebAudioArchive.Tests.Support;
 using analysissvc::WebAudioArchive.Analysis.Service;
 
@@ -8024,20 +8040,21 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    (AnalysisRunner Runner, AnalysisMetrics Metrics) Runner()
+    (AnalysisRunner Runner, AnalysisMetrics Metrics) Runner(ITranscriber? transcriber = null)
     {
+        var whisper = transcriber ?? _whisper;
         var config = AnalysisConfigLoader.Load(ConfigPath);
         var scratch = new ScratchSpace(Path.Combine(_root, "scratch"), 512L * 1024 * 1024);
         var disk = new DiskGuard(Paths.Root, 1L << 30, _ => _free);
         var schedule = new ScheduleProvider(Path.Combine(_root, "schedule.json"), null, "burst", NullLogger.Instance);
-        var pipeline = new SegmentPipeline(Paths, config, scratch, new SegmentDecoder(), _whisper, disk,
+        var pipeline = new SegmentPipeline(Paths, config, scratch, new SegmentDecoder(), whisper, disk,
             Watershed.From(config.Config.Swearing, schedule.Zone), schedule.TitleAt, _clock, NullLogger.Instance);
         var shows = new ShowProcessor(Paths, schedule, ["a"], AnalysisComposition.ShowMargin, _clock, NullLogger.Instance);
         var enricher = new Enricher(Paths, _llm, EnrichmentPrompt.Load(config.ConfigDir, config.Config.Enrichment), config.Config.Enrichment,
             "qwen3.6:latest", ["a"], _clock, NullLogger.Instance);
         var metrics = new AnalysisMetrics(_clock.UtcNow);
         var runner = new AnalysisRunner(new SegmentDiscovery([new RecorderRoot("a", A)], "burst", NullLogger.Instance), pipeline, shows, enricher,
-            _whisper, disk, scratch, metrics, ["a"], null, _clock, NullLogger.Instance);
+            whisper, disk, scratch, metrics, ["a"], null, _clock, NullLogger.Instance);
         return (runner, metrics);
     }
 
@@ -8056,6 +8073,10 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         Assert.Null(m.Paused);
         Assert.True(m.WhisperReady);
         Assert.Equal(1, m.EnrichmentDone);
+        Assert.NotNull(m.LastSuccessUtc);
+        Assert.Equal(1, m.Classes!["a"].Done);
+        Assert.Null(m.Classes["a"].LastError);
+        Assert.Equal(512L * 1024 * 1024, m.ScratchMaxBytes);
         var showDir = Paths.ShowDir("burst-20261015T1900Z", Show);
         Assert.True(AnalysisJson.Read<ShowAnalysis>(Path.Combine(showDir, AnalysisPaths.ShowAnalysisFile))!.Complete);
         Assert.Equal(EnrichmentStatus.Done, AnalysisJson.Read<ShowEnrichment>(Path.Combine(showDir, AnalysisPaths.EnrichmentFile))!.Status);
@@ -8099,6 +8120,133 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Whisper_readiness_is_checked_before_anything_is_planned()
+    {
+        var order = new OrderTranscriber();
+        var (runner, _) = Runner(order);
+
+        await runner.PassAsync(CancellationToken.None);
+
+        Assert.Equal("ready", order.Log[0]);
+        Assert.Contains("transcribe", order.Log);
+    }
+
+    [Fact]
+    public async Task One_job_that_throws_does_not_stop_the_others_and_is_reported_per_class()
+    {
+        // The newest segment cannot write its state (a folder is in the way): ProcessAsync itself throws. The older one must still be analysed.
+        var older = Show.AddHours(-1);
+        await AnalysisFixtures.WriteDecodableSegmentAsync(A, "burst", older, Signals.SpeechLike(10, 5));
+        Directory.CreateDirectory(Path.Combine(Paths.SegmentDir("a/2026/10-15/190000"), AnalysisPaths.StateFile));
+        var (runner, metrics) = Runner();
+
+        await runner.PassAsync(CancellationToken.None);
+
+        var m = metrics.Snapshot();
+        Assert.Equal(1, m.JobsDone);
+        Assert.Equal(1, m.JobsFailed);
+        Assert.NotNull(m.LastPassUtc);
+        var status = m.Classes!["a"];
+        Assert.Equal(1, status.Done);
+        Assert.Equal(1, status.Failed);
+        Assert.Equal("a/2026/10-15/190000", status.LastErrorJob);
+        Assert.False(string.IsNullOrEmpty(status.LastError));
+        Assert.NotNull(status.LastSuccessUtc);
+        Assert.True(File.Exists(Path.Combine(Paths.SegmentDir("a/2026/10-15/180000"), AnalysisPaths.EventsFile)));
+        var json = JsonSerializer.Serialize(AnalysisHealth.Build(m, TimeSpan.FromHours(6), _clock.UtcNow).Body);
+        Assert.Contains("\"lastErrorBySegmentClass\"", json);
+        Assert.Contains("a/2026/10-15/190000", json);
+    }
+
+    [Fact]
+    public async Task A_graceful_stop_is_not_a_failure_and_does_not_burn_an_attempt()
+    {
+        using var stop = new CancellationTokenSource();
+        _whisper.Respond = (_, _) =>
+        {
+            stop.Cancel();
+            throw new OperationCanceledException(stop.Token);
+        };
+        var (runner, metrics) = Runner();
+
+        await runner.PassAsync(stop.Token);
+
+        var m = metrics.Snapshot();
+        Assert.Equal(0, m.JobsFailed);
+        Assert.Equal(0, m.JobsDone);
+        Assert.Null(m.CurrentJob);
+        var state = JobStore.Read(Paths.SegmentDir("a/2026/10-15/190000"))!;
+        Assert.Equal(JobStatus.Waiting, state.Status);
+        Assert.Equal(0, state.Attempts);
+
+        _whisper.Respond = (_, _) => [AnalysisFixtures.Said(1, "Hello again.")];
+        await runner.PassAsync(CancellationToken.None);
+        Assert.Equal(1, metrics.Snapshot().JobsDone);
+    }
+
+    [Fact]
+    public async Task A_job_killed_again_and_again_is_parked_by_the_runner_and_stops_blocking()
+    {
+        var dir = Paths.SegmentDir("a/2026/10-15/190000");
+        var segment = new SegmentDiscovery([new RecorderRoot("a", A)], "burst", NullLogger.Instance).Scan().Single();
+        var (runner, metrics) = Runner();
+        var version = $"{_whisper.Identity}|{AnalysisConfigLoader.Load(ConfigPath).Config.Transcription.TranscriptKey()}";
+        JobStore.Write(dir, new JobState(JobState.CurrentSchema, segment.JobId, segment.Fingerprint, version, AnalysisConfigLoader.Load(ConfigPath).DetectorVersion,
+            JobStatus.Running, JobRules.MaxAttempts, null, null, [], 0, _clock.UtcNow, 35, 0, 0));
+
+        await runner.PassAsync(CancellationToken.None);
+
+        Assert.Equal(JobStatus.Failed, JobStore.Read(dir)!.Status);
+        Assert.Equal(0, _whisper.Calls);
+        var m = metrics.Snapshot();
+        Assert.Equal(1, m.FailedSegments);
+        Assert.Equal(0, m.Backlog);
+        Assert.Null(m.OldestPendingEndUtc);
+    }
+
+    [Fact]
+    public async Task Unpark_puts_a_parked_segment_back_and_it_is_then_analysed()
+    {
+        var dir = Paths.SegmentDir("a/2026/10-15/190000");
+        var segment = new SegmentDiscovery([new RecorderRoot("a", A)], "burst", NullLogger.Instance).Scan().Single();
+        var (runner, metrics) = Runner();
+        var config = AnalysisConfigLoader.Load(ConfigPath);
+        JobStore.Write(dir, new JobState(JobState.CurrentSchema, segment.JobId, segment.Fingerprint, $"{_whisper.Identity}|{config.Config.Transcription.TranscriptKey()}",
+            config.DetectorVersion, JobStatus.Running, JobRules.MaxAttempts, null, null, [], 0, _clock.UtcNow, 35, 0, 0));
+        await runner.PassAsync(CancellationToken.None);
+        Assert.Equal(JobStatus.Failed, JobStore.Read(dir)!.Status);
+        Assert.Equal(0, _whisper.Calls);
+
+        Assert.Equal(1, runner.UnparkAll());
+
+        var state = JobStore.Read(dir)!;
+        Assert.Equal(0, state.Attempts);
+        Assert.Contains("un-parked", state.LastError);
+        Assert.Equal(0, runner.UnparkAll());
+        await runner.PassAsync(CancellationToken.None);
+        Assert.Equal(JobStatus.Done, JobStore.Read(dir)!.Status);
+        Assert.Equal(1, metrics.Snapshot().JobsDone);
+    }
+
+    [Fact]
+    public async Task A_sidecar_that_cannot_be_planned_is_reported_and_does_not_break_the_pass()
+    {
+        // A file name that is not a plain job id part: the plan must skip it, not throw for every pass.
+        var odd = Path.Combine(A, "burst", "master", "2026", "10-15", "19 00 00.mp3");
+        File.Copy(Path.Combine(A, "burst", "master", "2026", "10-15", "190000.mp3"), odd);
+        File.Copy(Path.Combine(A, "burst", "master", "2026", "10-15", "190000.json"), Path.ChangeExtension(odd, ".json"));
+        var meta = SegmentMetaStore.Read(Path.ChangeExtension(odd, ".json"))!;
+        SegmentMetaStore.Write(Path.ChangeExtension(odd, ".json"), meta with { File = "19 00 00.mp3" });
+        var (runner, metrics) = Runner();
+
+        await runner.PassAsync(CancellationToken.None);
+
+        var m = metrics.Snapshot();
+        Assert.Equal(1, m.JobsDone);
+        Assert.Equal(1, m.FailedSegments);
+    }
+
+    [Fact]
     public async Task Rebuild_redoes_events_without_whisper()
     {
         var (runner, _) = Runner();
@@ -8138,6 +8286,40 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public void Health_reports_queue_device_scratch_and_last_success()
+    {
+        var now = Show.AddHours(10);
+        var classes = new Dictionary<string, SegmentClassStatus>
+        {
+            ["a"] = new(5, 1, now.AddMinutes(-3), now.AddHours(-1), "decode failed", "a/2026/10-15/190000"),
+        };
+        var m = new MetricsSnapshot(now.AddHours(-2), now.AddMinutes(-1), 3, 1, now.AddHours(-1), 10, 1, 0.05, 0.06, 2, null, null, true, 0, 4, 0, 50L << 30, 1234,
+            Device: "cuda", Classes: classes, LastSuccessUtc: now.AddMinutes(-3), ScratchMaxBytes: 2L << 30, MinFreeBytes: 20L << 30);
+
+        var json = JsonSerializer.Serialize(AnalysisHealth.Build(m, TimeSpan.FromHours(6), now).Body);
+
+        Assert.Contains("\"queueSegments\":3", json);
+        Assert.Contains("\"device\":\"cuda\"", json);
+        Assert.Contains("\"scratchBytes\":1234", json);
+        Assert.Contains("\"scratchMaxBytes\":" + (2L << 30), json);
+        Assert.Contains("\"freeDiskBytes\":" + (50L << 30), json);
+        Assert.Contains("\"minFreeDiskBytes\":" + (20L << 30), json);
+        Assert.Contains("\"lastSuccessUtc\":", json);
+        Assert.Contains("\"decode failed\"", json);
+    }
+
+    [Fact]
+    public void A_long_running_job_is_not_a_stall_until_it_has_run_for_hours()
+    {
+        var now = Show.AddHours(10);
+        MetricsSnapshot Running(TimeSpan runningFor) => new(now.AddHours(-5), now.AddMinutes(-40), 1, 0, now.AddHours(-1), 0, 0, null, null, 0, "a/2026/10-15/190000", null, true, 0, 0, 0, 50L << 30, 0,
+            LastActivityUtc: now - runningFor);
+
+        Assert.Equal(200, AnalysisHealth.Build(Running(TimeSpan.FromMinutes(40)), TimeSpan.FromHours(6), now).StatusCode);
+        Assert.Equal(503, AnalysisHealth.Build(Running(AnalysisHealth.JobStallAfter + TimeSpan.FromMinutes(1)), TimeSpan.FromHours(6), now).StatusCode);
+    }
+
+    [Fact]
     public async Task The_benchmark_prints_the_realtime_factor()
     {
         var mp3 = Path.Combine(_root, "bench.mp3");
@@ -8152,6 +8334,163 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         Assert.Contains("realtime factor", output.ToString());
         Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(_root, "bscratch")));
     }
+
+    [Fact]
+    public async Task The_benchmark_refuses_open_recordings_and_a_transcriber_that_is_not_ready()
+    {
+        var output = new StringWriter();
+        var scratch = new ScratchSpace(Path.Combine(_root, "bscratch"), 512L << 20);
+        var part = Path.Combine(_root, "open.mp3.part");
+        File.WriteAllBytes(part, [1, 2, 3]);
+
+        Assert.Equal(2, await Benchmark.RunAsync(part, 35, new SegmentDecoder(), scratch, _whisper, new TranscriptionOptions(), output, CancellationToken.None));
+        Assert.Contains(".part", output.ToString());
+
+        var mp3 = Path.Combine(_root, "bench.mp3");
+        await TestMp3.EncodeMp3Async(mp3, Signals.Stereo(Signals.SpeechLike(5, 9)), 2);
+        _whisper.Ready = false;
+        Assert.Equal(1, await Benchmark.RunAsync(mp3, 5, new SegmentDecoder(), scratch, _whisper, new TranscriptionOptions(), output, CancellationToken.None));
+        Assert.Contains("not ready", output.ToString());
+        Assert.Equal(0, _whisper.Calls);
+    }
+
+    // ---- composition and the Ollama client's transport ----
+
+    Func<string, string?> Env(params (string Name, string Value)[] extra)
+    {
+        var d = new Dictionary<string, string>
+        {
+            ["WAA_RECORDERS"] = $"a={A}",
+            ["WAA_ANALYSIS_OUT"] = Path.Combine(_root, "comp-out"),
+            ["WAA_SCRATCH"] = Path.Combine(_root, "comp-scratch"),
+            ["WAA_ANALYSIS_CONFIG"] = ConfigPath,
+        };
+        foreach (var (n, v) in extra) d[n] = v;
+        return n => d.GetValueOrDefault(n);
+    }
+
+    [Fact]
+    public void Composition_refuses_a_scratch_root_that_holds_recordings_or_output()
+    {
+        foreach (var scratch in new[] { A, _root, Path.Combine(_root, "comp-out") })
+        {
+            var settings = AnalysisSettings.Load(Env(("WAA_SCRATCH", scratch)));
+            var ex = Assert.Throws<AnalysisSettingsException>(() =>
+                AnalysisComposition.Build(settings, AnalysisConfigLoader.Load(ConfigPath), NullLoggerFactory.Instance, _clock));
+            Assert.Contains("WAA_SCRATCH", ex.Message);
+        }
+
+        Assert.True(Directory.Exists(A));
+    }
+
+    [Fact]
+    public void Composition_refuses_an_output_folder_inside_a_recorders_data()
+    {
+        var settings = AnalysisSettings.Load(Env(("WAA_ANALYSIS_OUT", Path.Combine(A, "analysis"))));
+        var ex = Assert.Throws<AnalysisSettingsException>(() =>
+            AnalysisComposition.Build(settings, AnalysisConfigLoader.Load(ConfigPath), NullLoggerFactory.Instance, _clock));
+        Assert.Contains("WAA_ANALYSIS_OUT", ex.Message);
+        Assert.False(Directory.Exists(Path.Combine(A, "analysis")));
+    }
+
+    [Fact]
+    public void The_ollama_timeout_defaults_to_twenty_minutes_and_is_at_least_ten()
+    {
+        Assert.Equal(TimeSpan.FromMinutes(20), AnalysisSettings.Load(Env()).OllamaTimeout);
+        Assert.Equal(TimeSpan.FromMinutes(45), AnalysisSettings.Load(Env(("WAA_OLLAMA_TIMEOUT_MINUTES", "45"))).OllamaTimeout);
+        var ex = Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(Env(("WAA_OLLAMA_TIMEOUT_MINUTES", "2"))));
+        Assert.Contains("WAA_OLLAMA_TIMEOUT_MINUTES", ex.Message);
+        Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(Env(("WAA_OLLAMA_TIMEOUT_MINUTES", "soon"))));
+    }
+
+    [Fact]
+    public void The_ollama_http_client_has_the_configured_timeout_not_the_default_100_seconds()
+    {
+        using var http = OllamaClient.CreateHttpClient(TimeSpan.FromMinutes(33));
+        Assert.Equal(TimeSpan.FromMinutes(33), http.Timeout);
+        Assert.True(http.Timeout >= OllamaClient.MinTimeout);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => OllamaClient.CreateHttpClient(TimeSpan.FromSeconds(100)));
+
+        var settings = AnalysisSettings.Load(Env(("WAA_ENRICHMENT", "on"), ("WAA_OLLAMA_TIMEOUT_MINUTES", "30")));
+        Assert.Equal(TimeSpan.FromMinutes(30), settings.OllamaTimeout);
+    }
+
+    [Fact]
+    public async Task The_ollama_client_never_follows_a_redirect_so_the_transcript_stays_on_the_configured_host()
+    {
+        var elsewhere = 0;
+        await using var target = await StartAsync(app => app.MapPost("/api/chat", () =>
+        {
+            Interlocked.Increment(ref elsewhere);
+            return Results.Json(new { message = new { content = "{}" } });
+        }));
+        foreach (var status in new[] { 307, 308 })
+        {
+            await using var origin = await StartAsync(app => app.MapPost("/api/chat", (HttpContext c) =>
+            {
+                c.Response.StatusCode = status;
+                c.Response.Headers.Location = target.Url + "api/chat";
+                return Task.CompletedTask;
+            }));
+            using var http = OllamaClient.CreateHttpClient(TimeSpan.FromMinutes(10));
+            var client = new OllamaClient(http, new Uri(origin.Url));
+
+            await Assert.ThrowsAsync<EnrichmentInvalidException>(() => client.ChatAsync(
+                new LlmRequest("m", "system", "the whole transcript", JsonDocument.Parse("{}").RootElement, 0.1, 1, 1024, false, 100), CancellationToken.None));
+        }
+
+        Assert.Equal(0, elsewhere);
+    }
+
+    sealed record Started(WebApplication App, string Url) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync() => await App.DisposeAsync();
+    }
+
+    static async Task<Started> StartAsync(Action<WebApplication> map)
+    {
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        var app = builder.Build();
+        map(app);
+        await app.StartAsync();
+        var url = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
+        return new Started(app, url.TrimEnd('/') + "/");
+    }
+
+    sealed class OrderTranscriber : ITranscriber
+    {
+        public List<string> Log { get; } = [];
+
+        public string Engine => "order";
+
+        public string Identity
+        {
+            get
+            {
+                Log.Add("identity");
+                return "order|m";
+            }
+        }
+
+        public string Model => "m";
+
+        public Task<bool> IsReadyAsync(CancellationToken ct)
+        {
+            Log.Add("ready");
+            return Task.FromResult(true);
+        }
+
+        public Task<IReadOnlyList<RawSegment>> TranscribeAsync(TranscriptionRequest request, CancellationToken ct)
+        {
+            Log.Add("transcribe");
+            return Task.FromResult<IReadOnlyList<RawSegment>>([AnalysisFixtures.Said(1, "Hello there.")]);
+        }
+    }
+
+    // ---- the host ----
 
     WebApplicationFactory<AnalysisEntryPoint> Host(params (string Name, string Value)[] extra) => new WebApplicationFactory<AnalysisEntryPoint>().WithWebHostBuilder(b =>
     {
@@ -8177,6 +8516,9 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("\"status\"", body);
         Assert.Contains("\"lagSeconds\"", body);
+        Assert.Contains("\"queueSegments\"", body);
+        Assert.Contains("\"device\"", body);
+        Assert.Contains("\"scratchBytes\"", body);
     }
 
     [Fact]
@@ -8185,13 +8527,21 @@ public sealed class AnalysisServiceTests : IAsyncLifetime
         using var factory = Host(("WAA_OLLAMA_MODEL", "kimi-k2.6:cloud"), ("WAA_ENRICHMENT", "on"));
         Assert.ThrowsAny<Exception>(() => factory.CreateClient());
     }
+
+    [Fact]
+    public void The_host_refuses_to_start_when_scratch_would_swallow_the_recordings()
+    {
+        using var factory = Host(("WAA_SCRATCH", A));
+        Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+        Assert.True(File.Exists(Path.Combine(A, "burst", "master", "2026", "10-15", "190000.mp3")));
+    }
 }
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisServiceTests`
-Expected: build FAILS with `CS0246` for `AnalysisRunner`, `AnalysisMetrics`, `AnalysisHealth`, `Benchmark`, `AnalysisComposition`, and `CS0234` for `analysissvc::WebAudioArchive.Analysis.Service`.
+Expected: build FAILS with `CS0246` for `AnalysisRunner`, `AnalysisMetrics`, `AnalysisHealth`, `Benchmark`, `AnalysisComposition`, `AnalysisEntryPoint`, and `CS0234` for `analysissvc::WebAudioArchive.Analysis.Service`.
 
 - [ ] **Step 3: Implement metrics, health, the runner, composition and the benchmark**
 
@@ -8201,7 +8551,17 @@ using WebAudioArchive.Analysis.Work;
 
 namespace WebAudioArchive.Analysis;
 
-/// <summary>What /healthz reports. OldestPendingEndUtc is the end of the oldest closed segment not yet analysed: lag is now minus that.</summary>
+/// <summary>
+/// Figures for one segment class (the recorder the segment came from: "a" is the preferred copy, "b" fills its holes), or
+/// "enrichment" / "show" for the other work the lane does. LastError is the most recent failure, kept after later successes.
+/// </summary>
+public sealed record SegmentClassStatus(int Done, int Failed, DateTimeOffset? LastSuccessUtc, DateTimeOffset? LastErrorUtc, string? LastError, string? LastErrorJob);
+
+/// <summary>
+/// What /healthz reports. OldestPendingEndUtc is the end of the oldest closed segment not yet analysed: lag is now
+/// minus that. Backlog is the queue length. LastActivityUtc is the last sign of life inside a long pass (a job started or
+/// finished); CurrentJobStartedUtc is when CurrentJob began.
+/// </summary>
 public sealed record MetricsSnapshot(
     DateTimeOffset StartedUtc,
     DateTimeOffset? LastPassUtc,
@@ -8220,10 +8580,20 @@ public sealed record MetricsSnapshot(
     int EnrichmentDone,
     int EnrichmentFailed,
     long FreeBytes,
-    long ScratchBytes);
+    long ScratchBytes,
+    string? Device = null,
+    IReadOnlyDictionary<string, SegmentClassStatus>? Classes = null,
+    DateTimeOffset? LastSuccessUtc = null,
+    DateTimeOffset? LastActivityUtc = null,
+    long ScratchMaxBytes = 0,
+    long MinFreeBytes = 0,
+    string? LastPassError = null);
 
 public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
 {
+    public const string EnrichmentClass = "enrichment";
+    public const string ShowClass = "show";
+
     readonly object _gate = new();
     readonly Queue<(DateTimeOffset At, double Seconds)> _done = new();
     MetricsSnapshot _s = new(startedUtc, null, 0, 0, null, 0, 0, null, null, 0, null, null, null, 0, 0, 0, 0, 0);
@@ -8233,13 +8603,16 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
         lock (_gate) return _s;
     }
 
-    public void SetDisk(long free, long scratch) => Set(s => s with { FreeBytes = free, ScratchBytes = scratch });
+    public void SetDisk(long free, long scratch, long scratchMax, long minFree) =>
+        Set(s => s with { FreeBytes = free, ScratchBytes = scratch, ScratchMaxBytes = scratchMax, MinFreeBytes = minFree });
 
-    public void SetWhisper(bool ready) => Set(s => s with { WhisperReady = ready });
+    public void SetWhisper(bool ready, string? device) => Set(s => s with { WhisperReady = ready, Device = device });
 
     public void SetPaused(string? reason) => Set(s => s with { Paused = reason });
 
-    public void SetCurrent(string? job) => Set(s => s with { CurrentJob = job });
+    /// <summary>The job in progress (null when idle). Starting one counts as activity, so a long backlog pass is not mistaken for a stall.</summary>
+    public void SetCurrent(string? job, DateTimeOffset now) =>
+        Set(s => s with { CurrentJob = job, LastActivityUtc = now });
 
     public void SetBacklog(int backlog, DateTimeOffset? oldestPendingEnd, int failed) =>
         Set(s => s with { Backlog = backlog, OldestPendingEndUtc = oldestPendingEnd, FailedSegments = failed });
@@ -8247,16 +8620,36 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
     public void SetEnrichment(int pending, int done, int failed) =>
         Set(s => s with { EnrichmentPending = pending, EnrichmentDone = done, EnrichmentFailed = failed });
 
-    public void PassCompleted(DateTimeOffset now) => Set(s => s with { LastPassUtc = now });
+    public void PassCompleted(DateTimeOffset now) => Set(s => s with { LastPassUtc = now, LastActivityUtc = now, LastPassError = null });
 
-    /// <summary>Counts the job; for a full run, updates the realtime factor (last and a moving average) and the audio hours analysed in the last 24 hours.</summary>
-    public void JobFinished(JobOutcome o, DateTimeOffset now)
+    /// <summary>A whole pass failed (for example the folder could not be listed): it is retried, and healthz says why.</summary>
+    public void PassFailed(string error, DateTimeOffset now) => Set(s => s with { LastPassError = error, LastActivityUtc = now });
+
+    /// <summary>A failure outside a segment job (enrichment, a show update): kept under its own class beside the segment classes.</summary>
+    public void RecordFailure(string segmentClass, string? job, string error, DateTimeOffset now) =>
+        Set(s => With(s, segmentClass, c => c with { Failed = c.Failed + 1, LastErrorUtc = now, LastError = error, LastErrorJob = job }));
+
+    public void RecordSuccess(string segmentClass, DateTimeOffset now) =>
+        Set(s => With(s, segmentClass, c => c with { Done = c.Done + 1, LastSuccessUtc = now }) with { LastSuccessUtc = now });
+
+    /// <summary>
+    /// Counts the job under its class; for a full run, updates the realtime factor (last and a moving average) and the audio
+    /// hours analysed in the last 24 hours. A failed job records its reason as the class's last error.
+    /// </summary>
+    public void JobFinished(JobOutcome o, DateTimeOffset now, string segmentClass)
     {
         lock (_gate)
         {
-            if (o.Status == JobStatus.Failed) _s = _s with { JobsFailed = _s.JobsFailed + 1 };
+            _s = _s with { LastActivityUtc = now };
+            if (o.Status == JobStatus.Failed)
+            {
+                _s = _s with { JobsFailed = _s.JobsFailed + 1 };
+                _s = With(_s, segmentClass, c => c with { Failed = c.Failed + 1, LastErrorUtc = now, LastError = o.Reason, LastErrorJob = o.JobId });
+            }
+
             if (o.Status != JobStatus.Done) return;
-            _s = _s with { JobsDone = _s.JobsDone + 1 };
+            _s = _s with { JobsDone = _s.JobsDone + 1, LastSuccessUtc = now };
+            _s = With(_s, segmentClass, c => c with { Done = c.Done + 1, LastSuccessUtc = now });
             if (o.RealtimeFactor is not { } rtf) return;
             _done.Enqueue((now, o.AudioSeconds));
             while (_done.Count > 0 && _done.Peek().At < now.AddHours(-24)) _done.Dequeue();
@@ -8267,6 +8660,13 @@ public sealed class AnalysisMetrics(DateTimeOffset startedUtc)
                 AudioHoursLast24h = _done.Sum(d => d.Seconds) / 3600,
             };
         }
+    }
+
+    static MetricsSnapshot With(MetricsSnapshot s, string segmentClass, Func<SegmentClassStatus, SegmentClassStatus> change)
+    {
+        var classes = s.Classes is null ? new Dictionary<string, SegmentClassStatus>() : new Dictionary<string, SegmentClassStatus>(s.Classes);
+        classes[segmentClass] = change(classes.GetValueOrDefault(segmentClass) ?? new SegmentClassStatus(0, 0, null, null, null, null));
+        return s with { Classes = classes };
     }
 
     void Set(Func<MetricsSnapshot, MetricsSnapshot> change)
@@ -8283,30 +8683,49 @@ namespace WebAudioArchive.Analysis;
 public sealed record HealthResult(int StatusCode, object Body);
 
 /// <summary>
-/// /healthz for the analysis service (spec 5, D16): 503 when the lag passes the alarm or no pass has finished for 15
-/// minutes, so `docker ps` shows unhealthy. A pause (low disk, whisper not ready) is reported but is 200 until the lag
-/// it causes reaches the alarm. All times UTC.
+/// /healthz for the analysis service (spec 5, D16): 503 when the lag passes the alarm or the worker shows no sign of life
+/// for 15 minutes, so `docker ps` shows unhealthy. A pause (low disk, whisper not ready) is reported but is 200 until the
+/// lag it causes reaches the alarm. A job in progress counts as alive for up to <see cref="JobStallAfter"/> since the last
+/// sign of life (a one hour segment on a CPU can take longer than 15 minutes). All times UTC.
 /// </summary>
 public static class AnalysisHealth
 {
     public static readonly TimeSpan StallAfter = TimeSpan.FromMinutes(15);
 
+    /// <summary>How long one job may run without finishing before the worker is called stalled.</summary>
+    public static readonly TimeSpan JobStallAfter = TimeSpan.FromHours(3);
+
     public static HealthResult Build(MetricsSnapshot m, TimeSpan lagAlarm, DateTimeOffset now)
     {
         var lag = m.OldestPendingEndUtc is { } oldest && now > oldest ? now - oldest : TimeSpan.Zero;
-        var stalled = now - (m.LastPassUtc ?? m.StartedUtc) > StallAfter;
+        // Between jobs the last sign of life is the latest of the pass end and any activity; while a job runs it is when that job started.
+        var lastSign = m.CurrentJob is not null && m.LastActivityUtc is { } started ? started : new[] { m.LastPassUtc, m.LastActivityUtc, m.StartedUtc }.Max()!.Value;
+        var stalled = now - lastSign > (m.CurrentJob is null ? StallAfter : JobStallAfter);
         var lagging = lag > lagAlarm;
         var status = stalled ? "stalled" : lagging ? "lagging" : m.Paused is not null ? "paused" : "ok";
+        var classes = (m.Classes ?? new Dictionary<string, SegmentClassStatus>())
+            .OrderBy(c => c.Key, StringComparer.Ordinal)
+            .ToDictionary(c => c.Key, c => (object)new
+            {
+                done = c.Value.Done,
+                failed = c.Value.Failed,
+                lastSuccessUtc = c.Value.LastSuccessUtc,
+                lastErrorUtc = c.Value.LastErrorUtc,
+                lastError = c.Value.LastError,
+                lastErrorJob = c.Value.LastErrorJob,
+            });
         var body = new
         {
             status,
             lagSeconds = Math.Round(lag.TotalSeconds),
             lagAlarmSeconds = Math.Round(lagAlarm.TotalSeconds),
+            queueSegments = m.Backlog,
             backlogSegments = m.Backlog,
             failedSegments = m.FailedSegments,
             oldestPendingEndUtc = m.OldestPendingEndUtc,
             currentJob = m.CurrentJob,
             paused = m.Paused,
+            device = m.Device,
             realtimeFactor = new { last = m.LastRealtimeFactor, average = m.AverageRealtimeFactor },
             audioHoursAnalysedLast24h = Math.Round(m.AudioHoursLast24h, 2),
             jobsDone = m.JobsDone,
@@ -8314,7 +8733,12 @@ public static class AnalysisHealth
             whisperReady = m.WhisperReady,
             enrichment = new { pending = m.EnrichmentPending, done = m.EnrichmentDone, failed = m.EnrichmentFailed },
             freeDiskBytes = m.FreeBytes,
+            minFreeDiskBytes = m.MinFreeBytes,
             scratchBytes = m.ScratchBytes,
+            scratchMaxBytes = m.ScratchMaxBytes,
+            lastSuccessUtc = m.LastSuccessUtc,
+            lastErrorBySegmentClass = classes,
+            lastPassError = m.LastPassError,
             lastPassUtc = m.LastPassUtc,
             uptimeSeconds = Math.Round((now - m.StartedUtc).TotalSeconds),
         };
@@ -8337,9 +8761,13 @@ using WebAudioArchive.Core.Recording;
 namespace WebAudioArchive.Analysis;
 
 /// <summary>
-/// One pass of the single work lane (D17): stop at once if the disk is low; plan the jobs (A first, newest first);
-/// run segment jobs (only redetects when whisper is not ready); rebuild the day timelines and shows they touched
-/// (and the last 7 days once after start-up); then, only if no segment job is ready, enrich up to 2 finished shows.
+/// One pass of the single work lane (D17): stop at once if the disk is low; ask the transcriber whether it is ready
+/// (before anything is planned); plan the jobs (A first, newest first); run segment jobs (only redetects when whisper is
+/// not ready); rebuild the day timelines and shows they touched (and the last 7 days once after start-up); then, only if no
+/// segment job is ready, enrich up to 2 finished shows. An exception in one job, one show or one enrichment is recorded
+/// against its class in the metrics and the lane carries on with the next. A graceful stop (cancellation) ends the pass
+/// quietly: the job in progress is left waiting without using an attempt. The analysis container must be given a stop grace
+/// period of at least 60 s so that a stop abandons the chunk in hand cleanly before Docker kills the process.
 /// </summary>
 public sealed class AnalysisRunner(
     SegmentDiscovery discovery,
@@ -8362,8 +8790,21 @@ public sealed class AnalysisRunner(
 
     public async Task PassAsync(CancellationToken ct)
     {
+        try
+        {
+            await RunPassAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            metrics.SetCurrent(null, clock.UtcNow);
+            log.LogInformation("Analysis stopped: the work in hand is left to resume");
+        }
+    }
+
+    async Task RunPassAsync(CancellationToken ct)
+    {
         var now = clock.UtcNow;
-        metrics.SetDisk(disk.FreeBytes(), scratch.UsedBytes());
+        metrics.SetDisk(disk.FreeBytes(), scratch.UsedBytes(), scratch.MaxBytes, disk.MinFreeBytes);
         if (disk.IsLow())
         {
             metrics.SetPaused(LowDisk());
@@ -8372,26 +8813,41 @@ public sealed class AnalysisRunner(
             return;
         }
 
-        var ready = await transcriber.IsReadyAsync(ct);
-        metrics.SetWhisper(ready);
+        var ready = await ReadyAsync(ct);
         var plan = Decide();
         metrics.SetPaused(!ready && plan.Any(p => p.Decision.Action == JobAction.Run) ? "whisper is not ready (starting, loading the model, or not running)" : null);
 
         var touched = new List<(DateTimeOffset From, DateTimeOffset To)>();
         foreach (var (job, decision) in plan)
         {
-            if (decision.Action is JobAction.Skip or JobAction.Wait) continue;
+            var parkable = decision.Action == JobAction.Skip && NeedsParking(job);
+            if (decision.Action is JobAction.Skip && !parkable) continue;
+            if (decision.Action == JobAction.Wait) continue;
             if (decision.Action == JobAction.Run && !ready) continue;
             ct.ThrowIfCancellationRequested();
-            if (disk.IsLow())
+            if (!parkable && disk.IsLow())
             {
                 metrics.SetPaused(LowDisk());
                 break;
             }
 
-            metrics.SetCurrent(job.Source.JobId);
-            var outcome = await pipeline.ProcessAsync(job, ct);
-            metrics.JobFinished(outcome, clock.UtcNow);
+            metrics.SetCurrent(job.Source.JobId, clock.UtcNow);
+            JobOutcome outcome;
+            try
+            {
+                outcome = await pipeline.ProcessAsync(job, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Analysis of {Job} threw; carrying on with the next segment", job.Source.JobId);
+                outcome = new JobOutcome(job.Source.JobId, decision.Action, JobStatus.Failed, $"{ex.GetType().Name}: {ex.Message}", 0, 0, 0);
+            }
+
+            metrics.JobFinished(outcome, clock.UtcNow, job.Source.Recorder);
             if (outcome.Status == JobOutcome.PausedDisk)
             {
                 metrics.SetPaused(LowDisk());
@@ -8399,10 +8855,10 @@ public sealed class AnalysisRunner(
             }
 
             if (outcome.Status == JobStatus.Done) touched.Add((job.Source.Meta.StartUtc, job.Source.Meta.EndUtc));
-            if (outcome.Status == JobStatus.Waiting) ready = await transcriber.IsReadyAsync(ct);
+            if (outcome.Status == JobStatus.Waiting) ready = await ReadyAsync(ct);
         }
 
-        metrics.SetCurrent(null);
+        metrics.SetCurrent(null, clock.UtcNow);
         var after = Decide();
         var pending = Pending(after);
         metrics.SetBacklog(pending.Count, pending.Count == 0 ? null : pending.Min(p => p.ToUtc),
@@ -8415,8 +8871,19 @@ public sealed class AnalysisRunner(
         }
 
         foreach (var (from, to) in MergeRanges(touched))
-            foreach (var doc in shows.Update(from, to, pending))
-                _shows[doc.ShowId] = doc;
+        {
+            try
+            {
+                foreach (var doc in shows.Update(from, to, pending))
+                    _shows[doc.ShowId] = doc;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.LogError(ex, "Updating the day timelines and shows from {From:u} to {To:u} failed", from, to);
+                metrics.RecordFailure(AnalysisMetrics.ShowClass, null, $"{ex.GetType().Name}: {ex.Message}", clock.UtcNow);
+            }
+        }
+
         foreach (var old in _shows.Values.Where(s => s.StartUtc < now - TimeSpan.FromDays(14)).Select(s => s.ShowId).ToList()) _shows.Remove(old);
 
         if (enricher is not null)
@@ -8427,8 +8894,24 @@ public sealed class AnalysisRunner(
                 foreach (var show in _shows.Values.Where(enricher.IsDue).OrderByDescending(s => s.StartUtc).Take(MaxEnrichmentsPerPass).ToList())
                 {
                     ct.ThrowIfCancellationRequested();
-                    await enricher.EnrichAsync(show, ct);
+                    metrics.SetCurrent("enrich:" + show.ShowId, clock.UtcNow);
+                    try
+                    {
+                        await enricher.EnrichAsync(show, ct);
+                        metrics.RecordSuccess(AnalysisMetrics.EnrichmentClass, clock.UtcNow);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        log.LogError(ex, "Enrichment of {Show} threw; carrying on", show.ShowId);
+                        metrics.RecordFailure(AnalysisMetrics.EnrichmentClass, show.ShowId, $"{ex.GetType().Name}: {ex.Message}", clock.UtcNow);
+                    }
                 }
+
+                metrics.SetCurrent(null, clock.UtcNow);
             }
 
             var statuses = _shows.Values.Select(enricher.StatusOf).ToList();
@@ -8442,7 +8925,7 @@ public sealed class AnalysisRunner(
     public int RebuildAll()
     {
         var jobs = WorkPlanner.Plan(discovery.Scan(), preference, since);
-        var rebuilt = jobs.Count(pipeline.RebuildEvents);
+        var rebuilt = jobs.Count(j => Guarded(j, "rebuild", pipeline.RebuildEvents));
         if (jobs.Count > 0)
         {
             var pending = Pending(Decide());
@@ -8454,8 +8937,72 @@ public sealed class AnalysisRunner(
         return rebuilt;
     }
 
+    /// <summary>--unpark: every failed or parked segment goes back in the queue with its attempts reset. Returns how many.</summary>
+    public int UnparkAll()
+    {
+        var n = WorkPlanner.Plan(discovery.Scan(), preference, since).Count(j => Guarded(j, "un-park", pipeline.Unpark));
+        log.LogInformation("Un-parked {Count} segments", n);
+        return n;
+    }
+
+    bool Guarded(SegmentJob job, string what, Func<SegmentJob, bool> act)
+    {
+        try
+        {
+            return act(job);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning("Could not {What} {Job}: {Error}", what, job.Source.JobId, ex.Message);
+            return false;
+        }
+    }
+
+    async Task<bool> ReadyAsync(CancellationToken ct)
+    {
+        bool ready;
+        try
+        {
+            ready = await transcriber.IsReadyAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning("Whisper readiness check failed: {Error}", ex.Message);
+            ready = false;
+        }
+
+        metrics.SetWhisper(ready, transcriber.Device);
+        return ready;
+    }
+
+    bool NeedsParking(SegmentJob job)
+    {
+        try
+        {
+            return pipeline.NeedsParking(job);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>A segment whose decision cannot be worked out (for example a file name that is not a safe job id) is skipped as failed, so it cannot stop the rest of the plan.</summary>
     List<(SegmentJob Job, JobDecision Decision)> Decide() =>
-        WorkPlanner.Plan(discovery.Scan(), preference, since).Select(j => (j, pipeline.Decide(j))).ToList();
+        WorkPlanner.Plan(discovery.Scan(), preference, since).Select(j => (j, SafeDecide(j))).ToList();
+
+    JobDecision SafeDecide(SegmentJob job)
+    {
+        try
+        {
+            return pipeline.Decide(job);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            log.LogWarning("Segment {Job} cannot be analysed: {Error}", job.Source.JobId, ex.Message);
+            return new JobDecision(JobAction.Skip, $"failed: cannot be analysed ({ex.GetType().Name}: {ex.Message})");
+        }
+    }
 
     static List<SourceSpan> Pending(List<(SegmentJob Job, JobDecision Decision)> decided) => decided
         .Where(p => p.Decision.Action is not JobAction.Skip)
@@ -8501,7 +9048,13 @@ namespace WebAudioArchive.Analysis;
 
 public sealed record AnalysisRuntime(AnalysisRunner Runner, AnalysisMetrics Metrics, ScratchSpace Scratch, SegmentDecoder Decoder, ITranscriber Transcriber);
 
-/// <summary>Builds the service from its settings and config: whisper in process (Whisper.net, D18), Ollama over HTTP (20 minutes), the saved schedule, the 5 minute show margin.</summary>
+/// <summary>
+/// Builds the service from its settings and config: whisper in process (Whisper.net, D18), Ollama over HTTP (no redirects,
+/// timeout from WAA_OLLAMA_TIMEOUT_MINUTES), the saved schedule, the 5 minute show margin. Refuses to build (with an
+/// <see cref="AnalysisSettingsException"/> that names the setting) when the scratch folder would contain a recorder's data or
+/// the analysis output, or when the output folder is inside a recorder's data: scratch is swept and the archive must never
+/// be written to.
+/// </summary>
 public static class AnalysisComposition
 {
     public static readonly TimeSpan ShowMargin = TimeSpan.FromMinutes(5);
@@ -8509,8 +9062,23 @@ public static class AnalysisComposition
     public static AnalysisRuntime Build(AnalysisSettings s, LoadedConfig c, ILoggerFactory loggers, IClock clock)
     {
         var log = loggers.CreateLogger("WebAudioArchive.Analysis");
+        foreach (var r in s.Recorders)
+        {
+            if (IsSameOrInside(Path.GetFullPath(s.OutputDir), Path.GetFullPath(r.Root)))
+                throw new AnalysisSettingsException($"WAA_ANALYSIS_OUT: '{s.OutputDir}' is inside the data of recorder '{r.Id}' ({r.Root}); analysis output must never be written into a recorder's folder.");
+        }
+
         var paths = new AnalysisPaths(s.OutputDir, s.Station);
-        var scratch = new ScratchSpace(s.ScratchDir, s.ScratchMaxBytes);
+        ScratchSpace scratch;
+        try
+        {
+            scratch = new ScratchSpace(s.ScratchDir, s.ScratchMaxBytes, [.. s.Recorders.Select(r => r.Root), s.OutputDir]);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new AnalysisSettingsException($"WAA_SCRATCH: {ex.Message}");
+        }
+
         var decoder = new SegmentDecoder();
         var transcriber = new WhisperNetTranscriber(s.WhisperModelPath, s.WhisperDevice, s.WhisperThreads, s.WhisperDtw);
         var disk = new DiskGuard(s.OutputDir, s.MinFreeBytes);
@@ -8519,13 +9087,19 @@ public static class AnalysisComposition
         var pipeline = new SegmentPipeline(paths, c, scratch, decoder, transcriber, disk, watershed, schedule.TitleAt, clock, log);
         var shows = new ShowProcessor(paths, schedule, s.Preference, ShowMargin, clock, log);
         var enricher = s.EnrichmentEnabled
-            ? new Enricher(paths, new OllamaClient(new HttpClient { Timeout = TimeSpan.FromMinutes(20) }, s.OllamaUrl),
+            ? new Enricher(paths, new OllamaClient(OllamaClient.CreateHttpClient(s.OllamaTimeout), s.OllamaUrl),
                 EnrichmentPrompt.Load(c.ConfigDir, c.Config.Enrichment), c.Config.Enrichment, s.OllamaModel, s.Preference, clock, log)
             : null;
         var metrics = new AnalysisMetrics(clock.UtcNow);
         var runner = new AnalysisRunner(new SegmentDiscovery(s.Recorders, s.Station, log), pipeline, shows, enricher, transcriber, disk, scratch,
             metrics, s.Preference, s.Since, clock, log);
         return new AnalysisRuntime(runner, metrics, scratch, decoder, transcriber);
+    }
+
+    static bool IsSameOrInside(string inner, string outer)
+    {
+        var rel = Path.GetRelativePath(outer, inner);
+        return rel == "." || (!rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel));
     }
 }
 ```
@@ -8544,16 +9118,29 @@ namespace WebAudioArchive.Analysis;
 /// <summary>
 /// --benchmark &lt;file.mp3&gt; [seconds]: decodes a copy of the file in scratch, transcribes its first N seconds (600 by
 /// default) with the configured transcriber and prints the realtime factor. Writes no analysis output (issue #85).
+/// Returns 2 for an unusable file (missing, or an open .part recording) and 1 when the transcriber is not ready.
 /// </summary>
 public static class Benchmark
 {
     public static async Task<int> RunAsync(string mp3, double seconds, SegmentDecoder decoder, ScratchSpace scratch, ITranscriber transcriber,
         TranscriptionOptions o, TextWriter output, CancellationToken ct)
     {
+        if (mp3.EndsWith(".part", StringComparison.OrdinalIgnoreCase))
+        {
+            output.WriteLine($"benchmark: {mp3} is an open recording (.part); give a closed segment");
+            return 2;
+        }
+
         if (!File.Exists(mp3))
         {
             output.WriteLine($"benchmark: {mp3} not found");
             return 2;
+        }
+
+        if (!await transcriber.IsReadyAsync(ct))
+        {
+            output.WriteLine($"benchmark: the transcriber ({transcriber.Engine} {transcriber.Model}) is not ready; check the model file (WAA_WHISPER_MODEL_PATH) and the device");
+            return 1;
         }
 
         var length = new FileInfo(mp3).Length;
@@ -8581,11 +9168,13 @@ public static class Benchmark
 
         var rtf = audio > 0 ? transcribe / audio : 0;
         output.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"benchmark: {transcriber.Engine} {transcriber.Model}: {audio:0.0} s of audio in {chunks.Count} chunks, decode {decodeSeconds:0.0} s, transcribe {transcribe:0.0} s, realtime factor {rtf:0.000} ({(rtf > 0 ? 1 / rtf : 0):0.0} times faster than real time), {words} words"));
+            $"benchmark: {transcriber.Engine} {transcriber.Model} on {transcriber.Device}: {audio:0.0} s of audio in {chunks.Count} chunks, decode {decodeSeconds:0.0} s, transcribe {transcribe:0.0} s, realtime factor {rtf:0.000} ({(rtf > 0 ? 1 / rtf : 0):0.0} times faster than real time), {words} words"));
         return 0;
     }
 }
 ```
+
+The small changes to existing files (see the diff of the Task 15 commit): `SegmentPipeline.NeedsParking(job)` and `Unpark(job)` plus a shared `IsParkable` rule; `ITranscriber.Device` (default `"unknown"`); `OllamaClient.MinTimeout` and `CreateHttpClient(timeout)`; `AnalysisSettings.OllamaTimeout`.
 
 - [ ] **Step 4: Replace the service host**
 
@@ -8598,16 +9187,32 @@ namespace WebAudioArchive.Analysis.Service;
 /// <summary>A public type in this assembly, for WebApplicationFactory in the tests.</summary>
 public sealed class AnalysisEntryPoint;
 
-/// <summary>Sweeps scratch left by a crash, then runs a pass every 60 s until stopped. A failed pass is logged and retried; it never stops the service.</summary>
-public sealed class AnalysisWorker(AnalysisRuntime runtime, ILogger<AnalysisWorker> log) : BackgroundService
+/// <summary>
+/// Sweeps scratch left by a crash, then runs a pass every 60 s until stopped. A failed pass is logged, shown in /healthz and
+/// retried; it never stops the service. On a stop the token is cancelled: the transcriber, the decoder and the Ollama client all
+/// take it, so the job in hand is abandoned within seconds and left waiting (no attempt used). Run the container with a
+/// stop grace period of at least 60 s (docker compose stop_grace_period), otherwise Docker kills it and the attempt counts.
+/// </summary>
+public sealed class AnalysisWorker(AnalysisRuntime runtime, TimeProvider time, ILogger<AnalysisWorker> log) : BackgroundService
 {
     public static readonly TimeSpan PassInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>The host waits this long for the worker to stop; it is shorter than the 60 s the container is given.</summary>
+    public static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(50);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Yield();
-        var swept = runtime.Scratch.SweepStale();
-        if (swept > 0) log.LogInformation("Removed {Count} leftover scratch entries", swept);
+        try
+        {
+            var swept = runtime.Scratch.SweepStale();
+            if (swept > 0) log.LogInformation("Removed {Count} leftover scratch entries", swept);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            log.LogWarning(ex, "Could not sweep scratch at start-up");
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -8621,6 +9226,7 @@ public sealed class AnalysisWorker(AnalysisRuntime runtime, ILogger<AnalysisWork
             catch (Exception ex)
             {
                 log.LogError(ex, "Analysis pass failed; trying again in {Seconds} s", PassInterval.TotalSeconds);
+                runtime.Metrics.PassFailed($"{ex.GetType().Name}: {ex.Message}", time.GetUtcNow());
             }
 
             try
@@ -8696,6 +9302,11 @@ try
 {
     runtime = AnalysisComposition.Build(settings, config, loggers, new SystemClock());
 }
+catch (AnalysisSettingsException ex)
+{
+    Console.Error.WriteLine("config error: " + ex.Message);
+    return 2;
+}
 catch (AnalysisConfigException ex)
 {
     foreach (var e in ex.Errors) Console.Error.WriteLine("config error: " + e);
@@ -8721,9 +9332,17 @@ if (args.Contains("--rebuild"))
     return 0;
 }
 
+if (args.Contains("--unpark"))
+{
+    Console.WriteLine($"un-parked {runtime.Runner.UnparkAll()} segments; the running service picks them up on its next pass");
+    return 0;
+}
+
 if (builder.Configuration["urls"] is null && Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is null)
     builder.WebHost.UseUrls($"http://+:{settings.Port}");
 
+builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = AnalysisWorker.ShutdownTimeout);
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(settings);
 builder.Services.AddSingleton(runtime);
 builder.Services.AddHostedService<AnalysisWorker>();
@@ -8747,13 +9366,13 @@ return 0;
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisServiceTests`
-Expected: PASS, 11 tests (7 facts and 4 theory cases). Then `dotnet test`: all pass.
+Expected: PASS, 26 tests. Then `dotnet test`: all pass.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add src/WebAudioArchive.Analysis/AnalysisMetrics.cs src/WebAudioArchive.Analysis/AnalysisHealth.cs src/WebAudioArchive.Analysis/AnalysisRunner.cs src/WebAudioArchive.Analysis/AnalysisComposition.cs src/WebAudioArchive.Analysis/Benchmark.cs src/WebAudioArchive.Analysis.Service tests/WebAudioArchive.Tests/AnalysisServiceTests.cs
-git commit -m "Analysis service: single work lane, lag and realtime factor in /healthz, benchmark and rebuild commands (#85, #77)"
+git add src/WebAudioArchive.Analysis/AnalysisMetrics.cs src/WebAudioArchive.Analysis/AnalysisHealth.cs src/WebAudioArchive.Analysis/AnalysisRunner.cs src/WebAudioArchive.Analysis/AnalysisComposition.cs src/WebAudioArchive.Analysis/Benchmark.cs src/WebAudioArchive.Analysis.Service src/WebAudioArchive.Analysis/Work/SegmentPipeline.cs src/WebAudioArchive.Analysis/Transcription src/WebAudioArchive.Analysis/Enrichment/OllamaClient.cs src/WebAudioArchive.Analysis/Settings/AnalysisSettings.cs tests/WebAudioArchive.Tests/Support/FakeTranscriber.cs tests/WebAudioArchive.Tests/AnalysisServiceTests.cs
+git commit -m "Analysis service: single work lane, lag and realtime factor in /healthz, benchmark, rebuild and un-park commands (#85, #77)"
 ```
 
 ---

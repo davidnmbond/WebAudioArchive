@@ -23,6 +23,8 @@ public sealed class FakeTranscriber : ITranscriber
 
     public string Model { get; set; } = "fake-model";
 
+    public string Device { get; set; } = "fake";
+
     public Task<bool> IsReadyAsync(CancellationToken ct) => Task.FromResult(Ready);
 
     public Task<IReadOnlyList<RawSegment>> TranscribeAsync(TranscriptionRequest request, CancellationToken ct)

@@ -34,6 +34,9 @@ public interface ITranscriber
 
     string Model { get; }
 
+    /// <summary>Where the model runs, for /healthz: "cuda", "cpu", "not loaded" or "unknown". For information only; never part of the job version.</summary>
+    string Device => "unknown";
+
     Task<bool> IsReadyAsync(CancellationToken ct);
 
     Task<IReadOnlyList<RawSegment>> TranscribeAsync(TranscriptionRequest request, CancellationToken ct);

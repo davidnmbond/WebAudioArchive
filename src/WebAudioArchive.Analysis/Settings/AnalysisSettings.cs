@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
+using WebAudioArchive.Analysis.Enrichment;
 
 namespace WebAudioArchive.Analysis.Settings;
 
@@ -44,6 +45,9 @@ public sealed partial record AnalysisSettings(
     TimeSpan LagAlarm,
     int Port)
 {
+    /// <summary>How long one Ollama request may take (WAA_OLLAMA_TIMEOUT_MINUTES, 10 to 240, default 20): an enrichment of a long show takes minutes.</summary>
+    public TimeSpan OllamaTimeout { get; init; } = TimeSpan.FromMinutes(20);
+
     /// <summary>The model label recorded in transcripts: the model file name without its extension.</summary>
     public string WhisperModel => Path.GetFileNameWithoutExtension(WhisperModelPath);
 
@@ -138,7 +142,7 @@ public sealed partial record AnalysisSettings(
             since = s;
         }
 
-        return new AnalysisSettings(
+        var settings = new AnalysisSettings(
             station,
             recorders,
             preference,
@@ -159,6 +163,7 @@ public sealed partial record AnalysisSettings(
             since,
             TimeSpan.FromHours(Number("WAA_LAG_ALARM_HOURS", 6, 0.1, 24 * 365)),
             (int)Number("WAA_PORT", 8080, 1, 65535));
+        return settings with { OllamaTimeout = TimeSpan.FromMinutes(Number("WAA_OLLAMA_TIMEOUT_MINUTES", 20, OllamaClient.MinTimeout.TotalMinutes, 240)) };
     }
 
     static Uri HttpUrl(string name, string value) =>

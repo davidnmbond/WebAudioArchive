@@ -27,6 +27,8 @@ public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device
 
     public string Model => Path.GetFileNameWithoutExtension(modelPath);
 
+    public string Device => RuntimeOptions.LoadedLibrary is { } lib ? lib.ToString().ToLowerInvariant() : "not loaded";
+
     /// <summary>The Whisper.net package version, the model name and the model file's size (or "missing"): the same before and after the model loads and on the GPU or the CPU.</summary>
     public string Identity
     {

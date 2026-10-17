@@ -12,8 +12,19 @@ public sealed class OllamaClient(HttpClient http, Uri baseUrl) : ILlmClient
 {
     public const int MaxReplyBytes = 4 * 1024 * 1024;
 
-    // The HttpClient is built by the caller (Task 15): it must set AllowAutoRedirect = false and a long Timeout (minutes), because a
-    // show enrichment can take several minutes and a redirect could send the transcript to another host.
+    /// <summary>The shortest request timeout allowed: an enrichment of a long show takes minutes, and the HttpClient default is 100 s.</summary>
+    public static readonly TimeSpan MinTimeout = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// The only way the service builds the client's HttpClient: no automatic redirects (a 307 or 308 would resend the POST body, the
+    /// transcript, to another host), no proxy (the transcript goes straight to the configured host) and a timeout of at least
+    /// <see cref="MinTimeout"/>.
+    /// </summary>
+    public static HttpClient CreateHttpClient(TimeSpan timeout)
+    {
+        if (timeout < MinTimeout) throw new ArgumentOutOfRangeException(nameof(timeout), timeout, $"the Ollama timeout must be at least {MinTimeout.TotalMinutes:0} minutes");
+        return new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false }) { Timeout = timeout };
+    }
 
     HttpRequestMessage Post(string path, object body) => new(HttpMethod.Post, new Uri(baseUrl, path)) { Content = JsonContent.Create(body) };
 

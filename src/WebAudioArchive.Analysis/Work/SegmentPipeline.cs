@@ -54,14 +54,39 @@ public sealed class SegmentPipeline(
         return Redetect(job.Source, dir, state, new JobDecision(JobAction.Redetect, "rebuild")).Status == JobStatus.Done;
     }
 
+    /// <summary>True when the job is left running or waiting with all its attempts used: the runner must still call <see cref="ProcessAsync"/> once so it is marked failed (parked) and stops being reported as a backlog.</summary>
+    public bool NeedsParking(SegmentJob job) => IsParkable(JobStore.Read(paths.SegmentDir(job.Source.JobId)), Decide(job));
+
+    /// <summary>--unpark: puts a failed or parked job back in the queue with a fresh attempt count (for example after five forced stops). False when there is nothing to un-park.</summary>
+    public bool Unpark(SegmentJob job)
+    {
+        var dir = paths.SegmentDir(job.Source.JobId);
+        var state = JobStore.Read(dir);
+        if (state is null || state.Status == JobStatus.Done) return false;
+        if (state.Status != JobStatus.Failed && state.Attempts < JobRules.MaxAttempts) return false;
+        JobStore.Write(dir, state with
+        {
+            Status = JobStatus.Waiting,
+            Attempts = 0,
+            NextAttemptUtc = null,
+            LastError = $"un-parked by an operator (was: {state.LastError})",
+            UpdatedUtc = clock.UtcNow,
+        });
+        log.LogInformation("Un-parked {Job}", job.Source.JobId);
+        return true;
+    }
+
+    static bool IsParkable(JobState? state, JobDecision decision) =>
+        decision.Action == JobAction.Skip && state is not null && state.Status is not (JobStatus.Done or JobStatus.Failed) && state.Attempts >= JobRules.MaxAttempts;
+
     public async Task<JobOutcome> ProcessAsync(SegmentJob job, CancellationToken ct)
     {
         var s = job.Source;
         var dir = paths.SegmentDir(s.JobId);
         var state = JobStore.Read(dir);
         var decision = JobRules.Decide(state, s.Fingerprint, TranscriptVersion, config.DetectorVersion, clock.UtcNow);
-        if (decision.Action == JobAction.Skip && state is not null && state.Status is not (JobStatus.Done or JobStatus.Failed) && state.Attempts >= JobRules.MaxAttempts)
-            return Park(s, dir, state, decision.Reason);
+        if (IsParkable(state, decision))
+            return Park(s, dir, state!, decision.Reason);
         if (decision.Action is JobAction.Skip or JobAction.Wait)
             return new JobOutcome(s.JobId, decision.Action, state?.Status ?? "none", decision.Reason, 0, 0, 0);
         if (decision.Action == JobAction.Redetect)
