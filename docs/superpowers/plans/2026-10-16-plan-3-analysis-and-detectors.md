@@ -5658,6 +5658,8 @@ git commit -m "Analysis: discover closed segments, plan A first with B filling h
 
 ### Task 12: The resumable segment pipeline
 
+> Implemented deviation: DetectorRunner emits the suppressed-run hits from `SwearDetector.DetectSuppressed` as swear events with `Evidence["suppressed"]` set to the reason (`"no"` on normal events, a stable key later tasks aggregate on), severity low, confidence capped at 0.3, `runLength` in evidence; they are excluded from the `swears` and `swearsBeforeWatershed` stats and counted in `suppressedSwearRuns`; severity uses `SeverityTier`. Test `A_suppressed_swear_run_is_one_flagged_low_confidence_event_and_does_not_inflate_counts` proves it. The expected swear start in the first test uses `AddMilliseconds(2800)` because `AddSeconds(1.0 + 6 * 0.3)` is one tick off the rounded 2.8 s.
+
 **Files:**
 - Create: `src/WebAudioArchive.Analysis/Transcription/TranscriptAssembler.cs`, `src/WebAudioArchive.Analysis/Detectors/DetectorRunner.cs`, `src/WebAudioArchive.Analysis/Work/SegmentPipeline.cs`
 - Create: `tests/WebAudioArchive.Tests/Support/AnalysisFixtures.cs`
@@ -5806,7 +5808,7 @@ public sealed class SegmentPipelineTests : IAsyncLifetime
         var swear = Assert.Single(events.Events, e => e.Type == EventTypes.Swear);
         Assert.Equal(Severities.High, swear.Severity);
         Assert.Equal("true", swear.Evidence!["beforeWatershed"]);
-        Assert.Equal(T.AddSeconds(1.0 + 6 * 0.3), swear.StartUtc);
+        Assert.Equal(T.AddMilliseconds(2800), swear.StartUtc);
         Assert.Equal(EventSources.Transcript, swear.Source);
         Assert.Single(events.Events, e => e.Type == EventTypes.Filler);
         var dead = Assert.Single(events.Events, e => e.Type == EventTypes.DeadAir);
