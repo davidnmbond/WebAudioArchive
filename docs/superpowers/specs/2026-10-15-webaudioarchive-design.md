@@ -421,6 +421,9 @@ known details for the show. Master segment JSON is the equivalent for unassigned
   and never deletes a segment that a manager has marked "hold" (for example an incident under investigation).
   The correct period for Burst depends on its licence or university policy and is the manager's to determine;
   this spec does not assert a legal requirement.
+- **Consolidated originals (3.14, owner decision 2026-10-17):** once A and B have been merged into one verified
+  copy, the originals are held for 7 days and then deleted **only when a manager confirms**, with each deletion
+  logged. This is not automatic deletion, and it removes duplicates only: every frame is kept in the merged copy.
 - **Personal data:** recordings and transcripts contain people's voices and speech, and the user table and
   audit log hold Google account emails. The service is private by design, with access limited by role,
   an audit trail, and a retention setting. This is design guidance for the operator, not legal advice; the
@@ -449,9 +452,11 @@ nothing built before them may make them harder.
   time window (for example a show with its margins) the cutter prefers a single recorder that covers the whole
   window with no gap; if neither does, it stitches from both at MP3 frame boundaries. The two connections start
   at different moments (and a Revma connection starts about 5 seconds ahead of its arrival time, see 3.4), so
-  A and B are **not byte-identical and their segments overlap**. Stitching must choose a cut point, not
+  A and B's **files are not byte-identical and their segments overlap**. Stitching must choose a cut point, not
   concatenate, and the sidecar for a cut records which recorder supplied each part. Coverage reported in
-  `/healthz` and the weekly report is computed over the union.
+  `/healthz` and the weekly report is computed over the union. Measured since (2026-10-17): the MP3 **frames**
+  are byte-identical between A and B, only offset by a few frames, so cut points can be found exactly by matching
+  frames (3.14). The union is built in the web app (#103); each recorder's `/healthz` reports only itself.
 - **What it does and does not protect.** A/B protects recording during upgrades and against one recorder
   failing. It does not protect against the host or the shared volume failing; for that, the two-instance setup
   in 3.10 remains the answer. Two recorders double the load on the station's stream server (two listeners) and
@@ -460,6 +465,66 @@ nothing built before them may make them harder.
   sidecar schema changes are additive with a `schema` version (already present); readers address segments by
   sidecar `startUtc` and `instance`, never by file name or by assuming one recorder; folder names carry the
   recorder id when more than one exists.
+
+### 3.14 Consolidating A and B into one merged copy (designed 2026-10-17, not built; issue #104)
+
+Two recorders double the disk use. Once an hour is safely in the past, keep one merged copy holding every frame
+either recorder has, then retire the originals. Owner decisions, 2026-10-17: a merged copy, not "keep one
+recorder"; hours with gaps are merged too; an hour is eligible once both recorders' segments covering it have been
+closed for 24 hours; originals are held for 7 days, then deleted when a manager confirms; the work runs in its own
+container.
+
+**Evidence (2026-10-16, Burst, read-only).** 13:00 UTC: A 137,866 frames, B 137,860; every overlapping frame
+byte-identical at offset 0; A cut the hour 6 frames (0.16 s) later. 14:00 UTC, which held an outage on both: before
+it B = A + 6 frames, after reconnecting B = A - 30, so B holds about 0.94 s that A lacks; every frame of each file
+matches the other at one of those two offsets. Sidecar wall times are only estimates (a mid-run hour holds about
+2.2 s more audio than its wall-clock span; a reconnect replays about 5 s).
+
+- **Process:** a `consolidator` container, the recorder image started with `--consolidate`, mounting `data/a`,
+  `data/b` and `data/merged` read-write. Recorders never run it and it never touches an open segment. It wakes
+  hourly, does the eligible hours oldest first, one hour at a time, and can be stopped at any point without harm.
+  It reports through its own `/healthz` (last hour merged, backlog, last failure).
+- **Frame identity:** each frame's hash (SHA-1 of its bytes) is its identity. Silence and other repeated content
+  makes single frames ambiguous (about 400 repeats an hour measured), so alignment anchors on runs of 8
+  consecutive identical frames. Wall-clock times only narrow the search. No decoding at any point.
+- **Merging an hour:** read the frame lists of every A and B segment overlapping the hour (plus the last frames
+  already merged for the previous hour). Walk the primary recorder (A, else whichever has more frames); at each
+  of its gaps or ends, find the other recorder's run that matches the frames before the gap and copy from it until
+  the primary's frames resume (matched by an anchor), then switch back. Where neither has the next frames, record
+  a gap missing from both. Frames already written for the previous hour are skipped by identity, so files
+  join with no repeat and no loss.
+- **Hour boundaries:** a merged file starts at the first frame whose estimated UTC is at or after the hour, the
+  estimate coming from the supplying recorder's timeline. Concatenating merged files in order reproduces the
+  station's stream as captured, without duplicates.
+- **Output:** `data/merged/<station>/master/<yyyy>/<MM-dd>/<HHmmss>.mp3` with `.json`, the same sidecar schema
+  plus `sources` (per stretch: recorder, source file, first and last frame index, UTC), `missing` (stretches
+  neither had), `sha256` of the file and of each source file, and `framesFromA`, `framesFromB`. Written to `.part`
+  and renamed after verification.
+- **Verification, before anything moves:** every frame of every source segment is accounted for (present in the
+  merged file in order, or before the hour in the previous merged file, or after it in the next once merged); the
+  merged file parses as whole frames from start to end; the frame count and duration equal the sum of the
+  stretches. A failure leaves the originals in place, marks the hour `failed` with the reason, and stops the
+  run so a person can look; it is retried only when its inputs change or a manager asks.
+- **Holding:** verified originals move (a rename within their own folder tree) to
+  `data/<recorder>/<station>/held/<yyyy>/<MM-dd>/`, keeping their sidecars. After 7 days the merged copy is
+  verified again against the held files, and the hour is listed as **ready to delete**. A manager confirms in the
+  web app (one hour, a day, or everything listed); each deletion is logged with who, when (UTC) and the checksums.
+  Nothing is deleted without that confirmation, and a manager's "hold" (3.12) blocks it.
+- **Readers:** the segment catalog reads `merged` as a third source. Combined coverage (#103) takes the union of
+  A, B and merged. Clips prefer merged and otherwise behave as now. Held originals are listed only in the
+  deletion review. Analysis events and song data address UTC spans, not files, so they are unaffected. Analysis
+  (plan 3) discovers segments in `data/a` and `data/b`; it normally finishes an hour long before the hour is
+  eligible, but re-analysis of an older hour must also look in `data/merged` (same `master/<yyyy>/<MM-dd>/`
+  layout and sidecar schema, recorder id `merged`). Consolidation waits for an hour's analysis to finish, so an
+  hour is never moved out from under a running job. `data/merged` is separate from `data/analysis`.
+- **Reporting:** Status gains a consolidation card (eligible backlog, last merged hour, failures, hours awaiting
+  confirmation, disk freed); Recordings shows merged segments as their own lane.
+- **Deployment safety (#102):** the recorders move to their own compose project so that building or restarting
+  any other service can never recreate them; the consolidator lives in the main project. (Proposed; needs the
+  owner's approval at planning.)
+- **Tests:** synthetic MP3 frame streams for A and B with chosen offsets, gaps on one side, gaps on both,
+  reconnect replays, repeated silence frames and hour cut differences; property: the merged stream equals the
+  de-duplicated union in order; a corrupted source or a lost frame makes verification fail and moves nothing.
 
 ## 4. Repository layout
 
@@ -551,6 +616,9 @@ All packages pinned to exact versions.
 - Google OAuth clients: not yet created. The operator will be guided through creating one per instance at
   implementation time; client id and secret come from environment variables only.
 - Song identification deferred; events timeline reserves for it.
+- A/B consolidation (2026-10-17, 3.14): a merged copy of every frame from A and B, for hours closed 24 hours,
+  gaps included; made by a separate consolidator container; originals held 7 days, then deleted only on a
+  manager's confirmation.
 - Songs (2026-10-17): both recorders capture the station's now-playing data around the clock; identification
   uses PanoramicData.SoundPrint from its published NuGet package, trained from the now-playing labels, against our
   own catalogue (3.9). Design first; capture to be built next, identification once the package is published.
