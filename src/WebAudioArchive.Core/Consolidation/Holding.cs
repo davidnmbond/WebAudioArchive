@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using WebAudioArchive.Core.Analysis;
 using WebAudioArchive.Core.Mp3;
 using WebAudioArchive.Core.Recording;
 
@@ -36,6 +37,9 @@ public static class Holding
 {
     public static readonly TimeSpan HoldPeriod = TimeSpan.FromDays(7);
 
+    /// <summary>A ready record may be deleted only this long after its last recheck; after that a recheck is due first.</summary>
+    public static readonly TimeSpan ReadyValidFor = TimeSpan.FromHours(24);
+
     public const string Held = "held";
     public const string Ready = "ready";
     public const string Failed = "failed";
@@ -65,9 +69,12 @@ public static class Holding
         File.Exists(heldJson) ? JsonSerializer.Deserialize<HeldRecord>(File.ReadAllText(heldJson), Options) : null;
 
     /// <summary>
-    /// True when the segment is whole frames from its first byte to its last and every distinct frame of it is in
+    /// True when the segment is whole frames from its first byte to its last and every frame of it is accounted for in
     /// <paramref name="mergedMp3s"/> (the merged hours from one before it to one after it), each of which must exist and
-    /// still match the checksum in its sidecar's merge block.
+    /// still match the checksum in its sidecar's merge block. Frames are matched as the merge matched them, with
+    /// <see cref="FrameMerge"/>: the merged hours in time order are the primary and the segment the secondary, so a frame
+    /// repeated in a run (silence) counts once per occurrence, and a reconnect replay inside the segment, which the merged
+    /// copy holds once, is not counted as missing. The segment is fully merged when the merge takes nothing from it.
     /// </summary>
     public static bool AllFramesMerged(SourceSegment s, IReadOnlyList<string> mergedMp3s, out string reason)
     {
@@ -79,7 +86,7 @@ public static class Holding
                 return false;
             }
 
-            var merged = new HashSet<ulong>();
+            var mergedSegments = new List<SourceSegment>();
             foreach (var mp3 in mergedMp3s)
             {
                 if (CheckMerged(mp3, fullHash: true) is { } bad)
@@ -88,8 +95,8 @@ public static class Holding
                     return false;
                 }
 
-                using var fs = OpenRead(mp3);
-                foreach (var f in FrameIndex.Read(fs, 0, fs.Length)) merged.Add(f.Hash);
+                var meta = SegmentMetaStore.Read(Path.ChangeExtension(mp3, ".json"))!;
+                mergedSegments.Add(new SourceSegment("merged", Path.GetDirectoryName(mp3)!, mp3, meta));
             }
 
             if (!File.Exists(s.AudioPath))
@@ -98,37 +105,52 @@ public static class Holding
                 return false;
             }
 
-            using var source = OpenRead(s.AudioPath);
-            var frames = FrameIndex.Read(source, 0, source.Length);
-            long at = 0;
-            foreach (var f in frames)
+            var (source, wholeTo) = Frames(s);
+            if (wholeTo != new FileInfo(s.AudioPath).Length)
             {
-                if (f.Offset != at) break;
-                at += f.Length;
-            }
-
-            if (at != source.Length)
-            {
-                reason = $"{s.Recorder} {s.RelativeFile} has bytes that are not a whole frame at byte {at}";
+                reason = $"{s.Recorder} {s.RelativeFile} has bytes that are not a whole frame at byte {wholeTo}";
                 return false;
             }
 
-            var missing = frames.Where(f => !merged.Contains(f.Hash)).ToList();
-            var distinct = missing.Select(f => f.Hash).Distinct().Count();
-            if (distinct > 0)
+            var primary = new List<MergeFrame>();
+            foreach (var m in mergedSegments.OrderBy(m => m.Meta.StartUtc)) primary.AddRange(Frames(m).Frames);
+
+            var result = FrameMerge.Merge(primary, source);
+            var missing = result.Blocks.Where(b => b.Source == FrameSource.Secondary).ToList();
+            if (missing.Count > 0)
             {
-                reason = $"{distinct} distinct frame(s) of {s.Recorder} {s.RelativeFile} are not in the merged files, the first at byte {missing[0].Offset}";
+                reason = $"{missing.Sum(b => b.Count)} frame(s) of {s.Recorder} {s.RelativeFile} are not in the merged files, the first is frame {missing.Min(b => b.Start)} of the segment";
                 return false;
             }
 
             reason = "";
             return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
             reason = $"could not read the files: {ex.Message}";
             return false;
         }
+    }
+
+    /// <summary>The file's whole frames with their estimated UTC from its anchors, and the byte where its run of contiguous frames from byte 0 ends.</summary>
+    static (List<MergeFrame> Frames, long WholeTo) Frames(SourceSegment s)
+    {
+        using var fs = OpenRead(s.AudioPath);
+        var refs = FrameIndex.Read(fs, 0, fs.Length);
+        var anchors = s.Anchors;
+        var bytesPerSecond = s.BytesPerSecond;
+        var frames = new List<MergeFrame>(refs.Count);
+        long at = 0;
+        var contiguous = true;
+        foreach (var f in refs)
+        {
+            if (contiguous && f.Offset == at) at += f.Length;
+            else contiguous = false;
+            frames.Add(new MergeFrame(f.Hash, SegmentTimeline.ToUtc(anchors, (double)f.Offset / bytesPerSecond).ToUniversalTime()));
+        }
+
+        return (frames, at);
     }
 
     /// <summary>
@@ -210,8 +232,9 @@ public static class Holding
 
     /// <summary>
     /// Deletes a held segment a manager has confirmed: only when its record is ready, the held audio still matches its
-    /// checksum and the merged files are still there. The deletion is logged before anything is removed, as one JSON line
-    /// of {utc, confirmedBy, recorder, file, sha256, bytes}. Anything else throws and deletes nothing.
+    /// checksum, it was rechecked within <see cref="ReadyValidFor"/> and the merged files are still there. The deletion
+    /// is logged before anything is removed, as one JSON line of {utc, confirmedBy, recorder, file, sha256, bytes}.
+    /// Anything else throws and deletes nothing.
     /// </summary>
     public static void Delete(string heldJson, string confirmedBy, DateTimeOffset now, string deletionsLog)
     {
@@ -220,6 +243,9 @@ public static class Holding
         if (record.Status != Ready)
             throw new HoldingException($"{record.Recorder} {record.File} is {record.Status}, not ready; not deleted");
 
+        if (record.CheckedUtc is not { } checkedUtc || now - checkedUtc > ReadyValidFor)
+            throw new HoldingException($"{record.Recorder} {record.File}: recheck due (last checked {record.CheckedUtc:O}); not deleted");
+
         // A manager's hold mark (spec 3.12) will block deletion here once hold marks exist.
 
         if (CheckHeld(heldJson, record) is { } changed) throw new HoldingException($"not deleted: {changed}");
@@ -227,8 +253,16 @@ public static class Holding
             if (CheckMerged(mp3, fullHash: false) is { } bad) throw new HoldingException($"not deleted: {bad}");
 
         var heldMp3 = HeldMp3(heldJson, record);
-        AppendLine(deletionsLog, JsonSerializer.Serialize(
-            new DeletionEntry(now.ToUniversalTime(), confirmedBy, record.Recorder, record.File, record.Sha256, record.Bytes), LogOptions));
+        try
+        {
+            AppendLine(deletionsLog, JsonSerializer.Serialize(
+                new DeletionEntry(now.ToUniversalTime(), confirmedBy, record.Recorder, record.File, record.Sha256, record.Bytes), LogOptions));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new HoldingException($"not deleted: the deletions log {deletionsLog} could not be written: {ex.Message}");
+        }
+
         File.Delete(heldMp3);
         File.Delete(Path.ChangeExtension(heldMp3, ".json"));
         File.Delete(heldJson);
@@ -379,12 +413,12 @@ public static class Holding
         File.Move(tmp, path, overwrite: true);
     }
 
-    /// <summary>One write of the whole line, flushed to disk. A torn last line from an earlier crash is ended first so this entry stays whole.</summary>
+    /// <summary>One write of the whole line, flushed to disk, through one handle held exclusively so a concurrent writer fails instead of racing. A torn last line from an earlier crash is ended first so this entry stays whole.</summary>
     static void AppendLine(string path, string line)
     {
         var dir = Path.GetDirectoryName(Path.GetFullPath(path));
         if (dir is not null) Directory.CreateDirectory(dir);
-        using var fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        using var fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var prefix = "";
         if (fs.Length > 0)
         {

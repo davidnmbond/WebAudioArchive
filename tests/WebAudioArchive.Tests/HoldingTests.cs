@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using WebAudioArchive.Core.Consolidation;
+using WebAudioArchive.Core.Mp3;
 using WebAudioArchive.Core.Recording;
 using WebAudioArchive.Tests.Support;
 
@@ -36,12 +37,22 @@ public sealed class HoldingTests : IDisposable
 
     static string Sha(string path) => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
 
-    /// <summary>A and B record 09:00 to 12:00; the three hours are merged. Returns the merged files and A's 10:00 segment.</summary>
-    (IReadOnlyList<string> Merged, SourceSegment A10) MergeThreeHours()
+    static readonly TimeSpan SegmentLength = TimeSpan.FromMinutes(1);
+
+    static int SeqAt(double secondAfterT0) => SegmentFiles.FramesFor((T0.AddSeconds(secondAfterT0) - Epoch).TotalSeconds);
+
+    /// <summary>
+    /// A and B each record a minute at 09:59, 10:00 and 11:00 (short, so the tests run quickly); the three hours 09:00,
+    /// 10:00 and 11:00 are merged. Returns the merged files and A's 10:00 segment. <paramref name="aReplaySeconds"/> makes
+    /// A's 10:00 segment begin with a reconnect replay of audio A already holds at the end of 09:59.
+    /// </summary>
+    (IReadOnlyList<string> Merged, SourceSegment A10) MergeThreeHours((int From, int To)? silence = null, double aReplaySeconds = 0)
     {
         foreach (var id in new[] { "a", "b" })
-            for (var h = -1; h < 2; h++)
-                SegmentFiles.Live(Root(id), "burst", Epoch, T0.AddHours(h), T0.AddHours(h + 1));
+            foreach (var start in new[] { T0 - SegmentLength, T0, T0.AddHours(1) })
+                SegmentFiles.Live(
+                    Root(id), "burst", Epoch, start, start + SegmentLength, silence: silence,
+                    replaySeconds: id == "a" && start == T0 ? aReplaySeconds : 0);
 
         var files = new List<string>();
         IReadOnlyList<ulong> tail = [];
@@ -199,19 +210,19 @@ public sealed class HoldingTests : IDisposable
         Assert.Equal("ready", Holding.Recheck(heldJson, Now + Holding.HoldPeriod).Status);
 
         // No one named: refused.
-        Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, " ", Now.AddDays(8), Log));
+        Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, " ", Now + Holding.HoldPeriod + TimeSpan.FromHours(2), Log));
         Assert.True(File.Exists(heldMp3));
 
         // Ready, but the held file changed since the recheck: refused.
         var original = File.ReadAllBytes(heldMp3);
         File.AppendAllBytes(heldMp3, [1]);
-        var changed = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", Now.AddDays(8), Log));
+        var changed = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", Now + Holding.HoldPeriod + TimeSpan.FromHours(2), Log));
         Assert.Contains("checksum", changed.Message);
         Assert.True(File.Exists(heldMp3));
         Assert.False(File.Exists(Log));
         File.WriteAllBytes(heldMp3, original);
 
-        var when = Now.AddDays(8);
+        var when = Now + Holding.HoldPeriod + TimeSpan.FromHours(2);
         Holding.Delete(heldJson, "station.manager@example.org", when, Log);
 
         Assert.False(File.Exists(heldMp3));
@@ -253,11 +264,107 @@ public sealed class HoldingTests : IDisposable
         Holding.Recheck(heldJson, Now + Holding.HoldPeriod);
         File.Delete(merged[1]);
 
-        var ex = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", Now.AddDays(8), Log));
+        var ex = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", Now + Holding.HoldPeriod + TimeSpan.FromHours(2), Log));
 
         Assert.Contains("100000.mp3", ex.Message);
         Assert.True(File.Exists(Path.Combine(HeldDay, "100000.mp3")));
         Assert.False(File.Exists(Log));
+    }
+
+    [Fact]
+    public void A_merged_copy_missing_part_of_a_silence_run_does_not_account_for_the_segment()
+    {
+        var (merged, a10) = MergeThreeHours(silence: (SeqAt(10), SeqAt(40)));
+        Assert.True(Holding.AllFramesMerged(a10, merged, out var before), before);
+
+        // Drop 20 frames from the middle of the silent run in the merged 10:00 hour, and reseal its sidecar so only the
+        // frame count tells. Every distinct frame of the segment is still in the merged copy.
+        var mp3 = merged[1];
+        var data = File.ReadAllBytes(mp3);
+        List<FrameRef> frames;
+        using (var fs = new MemoryStream(data)) frames = FrameIndex.Read(fs, 0, data.Length);
+        var silent = frames.GroupBy(f => f.Hash).OrderByDescending(g => g.Count()).First().ToList();
+        Assert.True(silent.Count > 100);
+        var dropped = silent.Skip(silent.Count / 2).Take(20).Select(f => f.Offset).ToHashSet();
+        var kept = frames.Where(f => !dropped.Contains(f.Offset)).SelectMany(f => data.AsSpan((int)f.Offset, f.Length).ToArray()).ToArray();
+        File.WriteAllBytes(mp3, kept);
+        var json = Path.ChangeExtension(mp3, ".json");
+        var meta = SegmentMetaStore.Read(json)!;
+        SegmentMetaStore.Write(json, meta with { Bytes = kept.Length, Frames = meta.Frames - 20, Merge = meta.Merge! with { Sha256 = Sha(mp3) } });
+        var mergedHashes = merged.SelectMany(m =>
+        {
+            using var fs = File.OpenRead(m);
+            return FrameIndex.Read(fs, 0, fs.Length).Select(f => f.Hash).ToList();
+        }).ToHashSet();
+        using (var fs = File.OpenRead(a10.AudioPath)) Assert.All(FrameIndex.Read(fs, 0, fs.Length), f => Assert.Contains(f.Hash, mergedHashes));
+
+        Assert.False(Holding.AllFramesMerged(a10, merged, out var reason));
+        Assert.Contains("20 frame(s)", reason);
+        Assert.Throws<HoldingException>(() => Holding.Hold(a10, merged, Now));
+        Assert.True(File.Exists(a10.AudioPath));
+    }
+
+    [Fact]
+    public void A_segment_that_begins_with_a_reconnect_replay_is_accounted_for()
+    {
+        var (merged, a10) = MergeThreeHours(aReplaySeconds: 5);
+        var a0959 = Scan("a").Single(s => s.Meta.StartUtc == T0 - SegmentLength);
+        using (var fs = File.OpenRead(a10.AudioPath))
+        using (var prev = File.OpenRead(a0959.AudioPath))
+        {
+            var head = FrameIndex.Read(fs, 0, fs.Length).Take(SegmentFiles.FramesFor(5)).Select(f => f.Hash);
+            var tail = FrameIndex.Read(prev, 0, prev.Length).Select(f => f.Hash).ToHashSet();
+            Assert.All(head, h => Assert.Contains(h, tail)); // the replay repeats audio A already holds
+        }
+
+        Assert.True(Holding.AllFramesMerged(a10, merged, out var why), why);
+        Assert.Equal("held", Holding.Hold(a10, merged, Now).Status);
+    }
+
+    [Fact]
+    public void A_ready_record_not_rechecked_within_a_day_is_not_deleted()
+    {
+        var (merged, a10) = MergeThreeHours();
+        Holding.Hold(a10, merged, Now);
+        var heldJson = Path.Combine(HeldDay, "100000.held.json");
+        var checkedAt = Now + Holding.HoldPeriod;
+        Holding.Recheck(heldJson, checkedAt);
+
+        var ex = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", checkedAt + Holding.ReadyValidFor + TimeSpan.FromSeconds(1), Log));
+
+        Assert.Equal(TimeSpan.FromHours(24), Holding.ReadyValidFor);
+        Assert.Contains("recheck due", ex.Message);
+        Assert.True(File.Exists(Path.Combine(HeldDay, "100000.mp3")));
+        Assert.True(File.Exists(heldJson));
+        Assert.False(File.Exists(Log));
+
+        // Rechecked again, it may be deleted.
+        var again = checkedAt.AddDays(2);
+        Assert.Equal("ready", Holding.Recheck(heldJson, again).Status);
+        Holding.Delete(heldJson, "manager", again + Holding.ReadyValidFor, Log);
+        Assert.False(File.Exists(Path.Combine(HeldDay, "100000.mp3")));
+    }
+
+    [Fact]
+    public void A_deletion_whose_log_is_held_open_by_another_writer_deletes_nothing()
+    {
+        var (merged, a10) = MergeThreeHours();
+        Holding.Hold(a10, merged, Now);
+        var heldJson = Path.Combine(HeldDay, "100000.held.json");
+        Holding.Recheck(heldJson, Now + Holding.HoldPeriod);
+        Directory.CreateDirectory(Path.GetDirectoryName(Log)!);
+        File.WriteAllText(Log, "{\"earlier\":1}\n");
+
+        using (new FileStream(Log, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var ex = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", Now + Holding.HoldPeriod + TimeSpan.FromHours(1), Log));
+            Assert.Contains("deletions log", ex.Message);
+        }
+
+        Assert.True(File.Exists(Path.Combine(HeldDay, "100000.mp3")));
+        Assert.True(File.Exists(Path.Combine(HeldDay, "100000.json")));
+        Assert.True(File.Exists(heldJson));
+        Assert.Equal("{\"earlier\":1}\n", File.ReadAllText(Log));
     }
 
     [Fact]
