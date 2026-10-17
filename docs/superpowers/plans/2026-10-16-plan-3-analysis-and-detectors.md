@@ -10365,6 +10365,8 @@ git commit -m "Web: read-only analysis API (events, transcript, shows) and PDMed
 
 ### Task 18: Validation on a labelled synthetic sample, scoring real labels, thresholds in docs
 
+**As built (differs from the snippets below):** `Score` has a fifth member `ReviewOnly`, `Compare` excludes suppressed swear events (`IsReviewOnly`) from precision and recall and counts them separately, `Table` has a "Review only" column, `DetectorScore.Report` builds the `--validate` text (Program.cs only prints it, and runs before the composition so no model is needed), `ThresholdsDoc.Render` generates the thresholds block that `docs/analysis-validation.md` carries between markers (a test fails if it drifts from `config/analysis/analysis.json`), and `docs/analysis-validation-labels.example.csv` is a committed synthetic example of the labels format. The MP3 figures were measured (all 1.00) and are recorded in the document with what synthetic validation cannot show.
+
 **Files:**
 - Create: `src/WebAudioArchive.Analysis/Validation/DetectorScore.cs`
 - Modify: `src/WebAudioArchive.Analysis.Service/Program.cs` (add `--validate`)

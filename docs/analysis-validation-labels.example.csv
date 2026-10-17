@@ -1,0 +1,5 @@
+type,startUtc,endUtc,note
+filler,2026-10-16T09:12:03.4Z,2026-10-16T09:12:03.8Z,um (synthetic example row)
+swear,2026-10-16T09:20:00Z,2026-10-16T09:20:00.6Z,synthetic example row
+clipping,2026-10-16T09:31:10.2Z,2026-10-16T09:31:10.4Z,synthetic example row: a crackle
+dead-air,2026-10-16T09:45:00Z,2026-10-16T09:45:08Z,synthetic example row: silence between two songs

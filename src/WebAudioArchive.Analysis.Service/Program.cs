@@ -2,6 +2,8 @@ using System.Globalization;
 using WebAudioArchive.Analysis;
 using WebAudioArchive.Analysis.Service;
 using WebAudioArchive.Analysis.Settings;
+using WebAudioArchive.Analysis.Validation;
+using WebAudioArchive.Core.Analysis;
 using WebAudioArchive.Core.Recording;
 
 if (args.Contains("--healthcheck"))
@@ -38,6 +40,32 @@ catch (AnalysisConfigException ex)
 {
     foreach (var e in ex.Errors) Console.Error.WriteLine("config error: " + e);
     return 2;
+}
+
+var validate = Array.IndexOf(args, "--validate");
+if (validate >= 0)
+{
+    // Scores owner-supplied labels against the analysed events under the output folder. Reads only; no model, scratch or recorder needed.
+    if (validate + 3 >= args.Length)
+    {
+        Console.Error.WriteLine("usage: --validate <labels.csv> <fromUtc> <toUtc>");
+        return 2;
+    }
+
+    try
+    {
+        var from = DateTimeOffset.Parse(args[validate + 2], CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
+        var to = DateTimeOffset.Parse(args[validate + 3], CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal);
+        var labels = DetectorScore.ReadCsv(args[validate + 1]);
+        var detected = AnalysisStore.DayEvents(new AnalysisPaths(settings.OutputDir, settings.Station), from, to);
+        Console.Write(DetectorScore.Report(labels, detected, from, to));
+        return 0;
+    }
+    catch (Exception ex) when (ex is FormatException or IOException)
+    {
+        Console.Error.WriteLine("validate error: " + ex.Message);
+        return 2;
+    }
 }
 
 builder.Logging.AddSimpleConsole(o =>
