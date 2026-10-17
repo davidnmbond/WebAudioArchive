@@ -108,4 +108,39 @@ public sealed class SegmentCatalogTests : IDisposable
         time.Advance(TimeSpan.FromSeconds(SegmentCatalog.CacheSeconds + 1));
         Assert.Equal(2, catalog.Segments("a").Count);
     }
+
+    [Fact]
+    public void A_closed_segment_is_read_once_and_then_listed_from_memory()
+    {
+        // A sidecar is written once, when its segment closes; on a slow share (Docker Desktop on Windows) reading every
+        // sidecar again each time took seconds, so only new files are read.
+        var first = SegmentFiles.Closed(_root, "burst", T0, 60, firstSeq: 0);
+        SegmentFiles.Closed(_root, "burst", T0.AddMinutes(5), 60, firstSeq: 0);
+        var time = new ManualTimeProvider(T0.AddHours(2));
+        var catalog = new SegmentCatalog(TestSettings.Create(("a", _root)), time, NullLogger<SegmentCatalog>.Instance);
+
+        Assert.Equal(2, catalog.Segments("a").Count);
+        Assert.Equal(2, catalog.SidecarReads);
+
+        time.Advance(TimeSpan.FromSeconds(SegmentCatalog.CacheSeconds + 1));
+        Assert.Equal(2, catalog.Segments("a").Count);
+        Assert.Equal(2, catalog.SidecarReads);
+
+        // A new segment is read; one whose audio has gone is dropped without reading anything.
+        SegmentFiles.Closed(_root, "burst", T0.AddMinutes(10), 60, firstSeq: 0);
+        File.Delete(first.AudioPath);
+        time.Advance(TimeSpan.FromSeconds(SegmentCatalog.CacheSeconds + 1));
+        var list = catalog.Segments("a");
+        Assert.Equal([T0.AddMinutes(5), T0.AddMinutes(10)], list.Select(s => s.StartUtc));
+        Assert.Equal(3, catalog.SidecarReads);
+
+        // A half-written sidecar is not remembered: it is read again until it parses.
+        var broken = Path.Combine(DayDir, "141500.json");
+        File.WriteAllText(broken, "{ \"schema\": 1");
+        time.Advance(TimeSpan.FromSeconds(SegmentCatalog.CacheSeconds + 1));
+        Assert.Equal(2, catalog.Segments("a").Count);
+        time.Advance(TimeSpan.FromSeconds(SegmentCatalog.CacheSeconds + 1));
+        Assert.Equal(2, catalog.Segments("a").Count);
+        Assert.Equal(5, catalog.SidecarReads);
+    }
 }

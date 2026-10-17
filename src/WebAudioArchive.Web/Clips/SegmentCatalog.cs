@@ -50,12 +50,25 @@ public sealed record CatalogSegment(
     public double BurstSeconds => Math.Max(0, AudioSeconds - (WallSeconds - GapSeconds));
 }
 
-/// <summary>Reads the recorders' output folders. Read-only: nothing here ever writes, moves or deletes a data file.</summary>
+/// <summary>
+/// Reads the recorders' output folders. Read-only: nothing here ever writes, moves or deletes a data file.
+/// <para>
+/// A closed segment's sidecar is written once, when the segment closes, and never changed, so each one is read once and
+/// then remembered. A rescan only lists names (no per-file stat or read), reads the sidecars it has not seen and the open
+/// segment, and leaves out a remembered segment whose files are no longer listed. On Docker Desktop's Windows file
+/// sharing reading every sidecar again took seconds per page; listing names takes a fraction of that.
+/// </para>
+/// </summary>
 public sealed class SegmentCatalog(WebSettings settings, TimeProvider time, ILogger<SegmentCatalog> log)
 {
     public const int CacheSeconds = 5;
 
     readonly ConcurrentDictionary<string, (DateTimeOffset At, IReadOnlyList<CatalogSegment> List)> _cache = new();
+    readonly ConcurrentDictionary<string, CatalogSegment> _closed = new(StringComparer.Ordinal);
+    int _sidecarReads;
+
+    /// <summary>How many sidecars have been read (a remembered one does not count); for diagnostics and tests.</summary>
+    public int SidecarReads => Volatile.Read(ref _sidecarReads);
 
     public IReadOnlyList<CatalogSegment> Segments(string recorder)
     {
@@ -64,7 +77,7 @@ public sealed class SegmentCatalog(WebSettings settings, TimeProvider time, ILog
         if (_cache.TryGetValue(r.Id, out var hit) && now - hit.At < TimeSpan.FromSeconds(CacheSeconds) && now >= hit.At)
             return hit.List;
 
-        var list = Scan(r.Root, settings.Station, r.Id, log);
+        var list = Scan(r.Root, settings.Station, r.Id, log, _closed, () => Interlocked.Increment(ref _sidecarReads));
         _cache[r.Id] = (now, list);
         return list;
     }
@@ -72,23 +85,46 @@ public sealed class SegmentCatalog(WebSettings settings, TimeProvider time, ILog
     public IReadOnlyList<RecorderSegments> All() =>
         settings.Recorders.Select(r => new RecorderSegments(r.Id, Segments(r.Id))).ToList();
 
-    /// <summary>Every readable segment under &lt;root&gt;/&lt;station&gt;/master, in start order.</summary>
-    public static IReadOnlyList<CatalogSegment> Scan(string root, string station, string recorder, ILogger log)
+    /// <summary>Every readable segment under &lt;root&gt;/&lt;station&gt;/master, in start order, reading every sidecar.</summary>
+    public static IReadOnlyList<CatalogSegment> Scan(string root, string station, string recorder, ILogger log) =>
+        Scan(root, station, recorder, log, known: null, onRead: null);
+
+    /// <summary>As <see cref="Scan(string, string, string, ILogger)"/>, taking closed segments from <paramref name="known"/> (keyed by sidecar path) when already read.</summary>
+    static IReadOnlyList<CatalogSegment> Scan(string root, string station, string recorder, ILogger log,
+        ConcurrentDictionary<string, CatalogSegment>? known, Action? onRead)
     {
         var master = Path.Combine(root, station, "master");
         var list = new List<CatalogSegment>();
         if (!Directory.Exists(master)) return list;
 
-        foreach (var json in Directory.EnumerateFiles(master, "*.json", SearchOption.AllDirectories))
+        // One listing of names serves both kinds of file and says whether a remembered segment's files are still there.
+        var files = Directory.EnumerateFiles(master, "*", SearchOption.AllDirectories).Select(Path.GetFullPath).ToList();
+        var present = files.ToHashSet(StringComparer.Ordinal);
+
+        foreach (var json in files.Where(f => f.EndsWith(".json", StringComparison.Ordinal)))
         {
-            if (!json.EndsWith(".json", StringComparison.Ordinal)) continue;
+            if (known is not null && known.TryGetValue(json, out var remembered))
+            {
+                if (present.Contains(remembered.AudioPath)) list.Add(remembered);
+                continue;
+            }
+
+            onRead?.Invoke();
             var seg = TryClosed(json, station, recorder, log);
-            if (seg is not null) list.Add(seg);
+            if (seg is null) continue;
+            if (known is not null) known[json] = seg;
+            list.Add(seg);
         }
 
-        foreach (var part in Directory.EnumerateFiles(master, "*.mp3.part", SearchOption.AllDirectories))
+        if (known is not null)
         {
-            if (!part.EndsWith(".mp3.part", StringComparison.Ordinal)) continue;
+            var prefix = Path.GetFullPath(master) + Path.DirectorySeparatorChar;
+            foreach (var gone in known.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal) && !present.Contains(k)))
+                known.TryRemove(gone, out _);
+        }
+
+        foreach (var part in files.Where(f => f.EndsWith(".mp3.part", StringComparison.Ordinal)))
+        {
             var seg = TryOpen(part, station, recorder, log);
             if (seg is not null) list.Add(seg);
         }
