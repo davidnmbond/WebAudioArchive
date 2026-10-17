@@ -189,4 +189,16 @@ public class TranscriptionTests
         var other = Assert.IsType<TranscriptionFailedException>(WhisperNetTranscriber.Classify(new InvalidOperationException("bad audio")));
         Assert.Contains("bad audio", other.Message);
     }
+
+    [Fact]
+    public async Task A_transient_error_drops_the_loaded_model_so_the_next_attempt_reloads_it()
+    {
+        Assert.True(WhisperNetTranscriber.ReloadsModelAfter(WhisperNetTranscriber.Classify(new InvalidOperationException("CUDA error: out of memory"))));
+        Assert.False(WhisperNetTranscriber.ReloadsModelAfter(WhisperNetTranscriber.Classify(new InvalidOperationException("bad audio"))));
+
+        using var t = new WhisperNetTranscriber(Path.Combine(Path.GetTempPath(), "waa-no-such-model.bin"), WhisperDevice.Cpu, 1, dtw: false);
+        t.ResetModel();
+        t.ResetModel();
+        Assert.False(await t.IsReadyAsync(CancellationToken.None));
+    }
 }

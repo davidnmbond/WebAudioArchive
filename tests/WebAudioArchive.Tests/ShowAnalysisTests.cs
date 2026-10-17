@@ -291,4 +291,20 @@ public sealed class ShowAnalysisTests : IDisposable
 
         Assert.Equal(2, provider.Occurrences(Show.AddHours(-1), Show.AddHours(3)).Count);
     }
+
+    [Fact]
+    public void Dead_air_that_starts_before_the_window_and_runs_into_the_show_is_counted_by_the_processor()
+    {
+        var job = "a/2026/10-15/180000";
+        var segment = Segment("a", Show.AddHours(-1), Show, Event(EventTypes.DeadAir, Show.AddMinutes(-2), seconds: 180)) with { Scope = "segment:" + job };
+        AnalysisJson.Write(Path.Combine(Paths.SegmentDir(job), AnalysisPaths.EventsFile), segment);
+        var margin = TimeSpan.FromMinutes(1);
+        var processor = new ShowProcessor(Paths, new ScheduleProvider(WriteSchedule(), null, "burst", NullLogger.Instance), ["a", "b"], margin, _clock, NullLogger.Instance);
+
+        // The event starts 2 minutes before the show, so before the 1 minute margin window as well.
+        var doc = Assert.Single(processor.Update(Show.AddMinutes(-10), Show.AddHours(3), []), d => d.Title == "Backseat Aux");
+
+        Assert.Equal(1, doc.Counts.DeadAirEvents);
+        Assert.Equal(60, doc.Counts.DeadAirSeconds, 3);
+    }
 }

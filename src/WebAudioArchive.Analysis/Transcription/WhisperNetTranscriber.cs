@@ -48,6 +48,16 @@ public sealed class WhisperNetTranscriber(string modelPath, WhisperDevice device
         return new TranscriptionFailedException($"whisper could not transcribe this chunk: {text}");
     }
 
+    /// <summary>A GPU or memory error can leave the native context broken until it is rebuilt, so the model is reloaded for the next attempt.</summary>
+    public static bool ReloadsModelAfter(Exception classified) => classified is TransientTranscriptionException;
+
+    /// <summary>Drops the loaded model; the next readiness check or chunk loads it again. Safe when nothing is loaded.</summary>
+    public void ResetModel()
+    {
+        var old = Interlocked.Exchange(ref _factory, null);
+        old?.Dispose();
+    }
+
     /// <summary>Why the last readiness check failed, for the log; null when ready.</summary>
     public string? LastError { get; private set; }
 

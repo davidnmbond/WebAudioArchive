@@ -103,8 +103,11 @@ public sealed class Enricher(AnalysisPaths paths, ILlmClient llm, EnrichmentProm
 
     IReadOnlyList<TimedLine> Lines(ShowAnalysis show)
     {
+        // A segment with a timeline gap has several sources with one JobId: read each transcript once.
         var docs = show.Sources
-            .Select(s => AnalysisJson.TryRead<TranscriptDocument>(Path.Combine(paths.SegmentDir(s.JobId), AnalysisPaths.TranscriptFile), out _))
+            .Select(s => s.JobId)
+            .Distinct(StringComparer.Ordinal)
+            .Select(job => AnalysisJson.TryRead<TranscriptDocument>(Path.Combine(paths.SegmentDir(job), AnalysisPaths.TranscriptFile), out _))
             .OfType<TranscriptDocument>()
             .ToList();
         return TranscriptSlicer.Slice(docs, show.WindowFromUtc, show.WindowToUtc, preference);

@@ -147,20 +147,65 @@ public static partial class EnrichmentValidator
 
     static IEnumerable<string> Words(string normalised) => normalised.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
+    static readonly HashSet<string> Titles = new(StringComparer.OrdinalIgnoreCase) { "mr", "mrs", "ms", "dr", "st" };
+
+    /// <summary>Capitalised words that are not names: days, months, titles and common acronyms.</summary>
+    static readonly HashSet<string> CommonCapitals = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+        "mr", "mrs", "ms", "dr", "st",
+        "uk", "bbc", "dj", "fm", "am", "pm", "usa", "eu", "tv", "cd", "lp", "ep",
+    };
+
+    static string CoreOf(string token) => TrimNonAlphanumeric(token, leading: true, trailing: true);
+
+    static string TrimNonAlphanumeric(string s, bool leading, bool trailing)
+    {
+        var start = 0;
+        var end = s.Length;
+        while (leading && start < end && !char.IsLetterOrDigit(s[start])) start++;
+        while (trailing && end > start && !char.IsLetterOrDigit(s[end - 1])) end--;
+        return s[start..end];
+    }
+
+    /// <summary>
+    /// A token ends a sentence when, ignoring closing quotes and brackets after it, it ends in . ! ? or :, unless it is a
+    /// title abbreviation such as "Mr.".
+    /// </summary>
+    static bool EndsSentence(string token)
+    {
+        var t = token.TrimEnd(c => !char.IsLetterOrDigit(c) && c is not ('.' or '!' or '?' or ':'));
+        if (t.Length == 0 || t[^1] is not ('.' or '!' or '?' or ':')) return false;
+        return !(t[^1] == '.' && Titles.Contains(CoreOf(t)));
+    }
+
+    static string TrimEnd(this string s, Func<char, bool> drop)
+    {
+        var end = s.Length;
+        while (end > 0 && drop(s[end - 1])) end--;
+        return s[..end];
+    }
+
+    /// <summary>
+    /// A capitalised word (not opening a sentence) in free text that no transcript line, show title or station contains
+    /// and that is not a day, month, title or common acronym: free text may not introduce names.
+    /// </summary>
     static string? UnknownName(string text, HashSet<string> vocabulary)
     {
         var tokens = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         for (var i = 0; i < tokens.Length; i++)
         {
-            var raw = tokens[i].Trim('"', '(', ')', ',', ';', ':', '.', '!', '?');
-            if (raw.Length < 2 || !char.IsUpper(raw[0])) continue;
-            var startsSentence = i == 0 || tokens[i - 1].EndsWith('.') || tokens[i - 1].EndsWith('!') || tokens[i - 1].EndsWith('?') || tokens[i - 1].EndsWith(':');
-            if (startsSentence) continue;
-            if (Words(Normalise(raw)).Any(w => w.Length > 1 && !vocabulary.Contains(w))) return raw;
+            var core = CoreOf(tokens[i]);
+            if (core.Length < 2 || !char.IsUpper(core[0])) continue;
+            if (i == 0 || EndsSentence(tokens[i - 1])) continue;
+            if (CommonCapitals.Contains(core)) continue;
+            if (Words(Normalise(core)).Any(w => w.Length > 1 && !vocabulary.Contains(w))) return core;
         }
 
         return null;
     }
+
 
     static IEnumerable<JsonElement> Items(JsonElement root, string name)
     {

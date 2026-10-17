@@ -368,6 +368,62 @@ public sealed class EnricherTests : IDisposable
     }
 
     [Fact]
+    public async Task A_segment_with_a_timeline_gap_sends_each_transcript_line_once()
+    {
+        var show = Analysed(Said) with
+        {
+            Sources =
+            [
+                new ShowSource("a", Job, Show, Show.AddMinutes(20)),
+                new ShowSource("a", Job, Show.AddMinutes(30), Show.AddHours(1)),
+            ],
+        };
+
+        var result = await MakeEnricher(Options with { MaxTranscriptChars = 150 }).EnrichAsync(show, CancellationToken.None);
+
+        var prompts = string.Join('\n', _llm.Requests.Select(r => r.User));
+        foreach (var line in Said)
+            Assert.Equal(1, prompts.Split(line).Length - 1);
+        Assert.True(_llm.Requests.Count >= 2);
+        Assert.Equal(EnrichmentStatus.Done, result.Status);
+    }
+
+    [Theory]
+    [InlineData("Tonight we met “Hanks” and friends.")]
+    [InlineData("Tonight we met [Hanks] and friends.")]
+    [InlineData("Tonight we met *Hanks* and friends.")]
+    [InlineData("Tonight we met -Hanks and friends.")]
+    [InlineData("Tonight we met ‘Hanks’ and friends.")]
+    [InlineData("Today Mr. Hanks visited.")]
+    [InlineData("Today Dr. Hanks visited.")]
+    public void Names_behind_punctuation_or_a_title_abbreviation_are_still_caught(string summary)
+    {
+        var content = "{ \"hosts\": [], \"summary\": \"" + summary + "\" }";
+        var parts = EnrichmentValidator.Validate(content, Lines(), 40);
+        Assert.Null(parts.Summary);
+        Assert.Equal(1, parts.Dropped);
+    }
+
+    [Theory]
+    [InlineData("Amy waved (bye.) Zorro smiled.")]
+    [InlineData("Amy said “thanks.” Zorro smiled.")]
+    [InlineData("Amy asked \"really?\" Zorro smiled.")]
+    public void A_capitalised_word_after_a_sentence_end_with_a_closing_quote_or_bracket_is_a_sentence_start(string summary)
+    {
+        var content = "{ \"hosts\": [], \"summary\": \"" + summary.Replace("\"", "\\\"") + "\" }";
+        Assert.NotNull(EnrichmentValidator.Validate(content, Lines(), 40).Summary);
+    }
+
+    [Fact]
+    public void Days_months_and_common_acronyms_do_not_make_a_summary_fail()
+    {
+        const string content = """{ "hosts": [], "summary": "On Thursday in October the BBC and a DJ on FM played UK and USA music from a CD and an LP, then watched TV at 9 PM." }""";
+        var parts = EnrichmentValidator.Validate(content, Lines(), 40);
+        Assert.NotNull(parts.Summary);
+        Assert.Equal(0, parts.Dropped);
+    }
+
+    [Fact]
     public void Prompt_files_load_with_a_content_version_and_missing_files_are_named()
     {
         var a = EnrichmentPrompt.Load(ConfigDir, Options);

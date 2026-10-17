@@ -25,7 +25,7 @@ public sealed class ShowProcessor(AnalysisPaths paths, ScheduleProvider schedule
             if (windowTo > now) continue;
 
             var segments = DayTimeline.ReadSegments(paths, windowFrom, windowTo);
-            var events = DayTimeline.Merge(segments, preference).Where(e => e.StartUtc >= windowFrom && e.StartUtc < windowTo).ToList();
+            var events = DayTimeline.Merge(segments, preference).Where(e => e.StartUtc < windowTo && (e.EndUtc > windowFrom || e.StartUtc >= windowFrom)).ToList(); // by overlap: the builder clips durations to the show
             var transcripts = segments
                 .Select(s => s.Scope.StartsWith("segment:", StringComparison.Ordinal) ? s.Scope["segment:".Length..] : null)
                 .OfType<string>()
