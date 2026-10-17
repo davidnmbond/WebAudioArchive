@@ -52,7 +52,7 @@ public class DeploymentFilesTests
         Assert.Contains("restart: unless-stopped", a);
         Assert.Contains("user:", a);
         Assert.Contains("\"127.0.0.1:8095:8080\"", a);
-        Assert.Contains("WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://host.docker.internal:11434}", a);
+        Assert.Contains("WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://pdl-rune-02.panoramicdata.com:11434}", a);
     }
 
     [Fact]

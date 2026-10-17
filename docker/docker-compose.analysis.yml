@@ -35,9 +35,13 @@ services:
       WAA_WHISPER_MODEL_PATH: ${WAA_WHISPER_MODEL_PATH:-/models/ggml-base.en.bin}
       WAA_WHISPER_DEVICE: cpu
       WAA_WHISPER_THREADS: "4"
-      # host.docker.internal is a private name, so it needs no WAA_OLLAMA_ALLOWED_HOSTS entry.
-      WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://host.docker.internal:11434}
+      # The owner's Ollama servers (decision 2026-10-17): pdl-rune-02 for this machine (test), pdl-rune-01 for production.
+      # Named hosts must be in WAA_OLLAMA_ALLOWED_HOSTS. Transcript text goes to the server named here over plain HTTP on the
+      # private network. pdl-rune-01 has qwen3.6:27b rather than qwen3.6:latest: set WAA_OLLAMA_MODEL when pointing at it.
+      WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://pdl-rune-02.panoramicdata.com:11434}
+      WAA_OLLAMA_ALLOWED_HOSTS: ${WAA_OLLAMA_ALLOWED_HOSTS:-pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com}
       WAA_OLLAMA_MODEL: ${WAA_OLLAMA_MODEL:-qwen3.6:latest}
+      WAA_OLLAMA_KEEP_ALIVE: ${WAA_OLLAMA_KEEP_ALIVE:-5m}
       WAA_ENRICHMENT: ${WAA_ENRICHMENT:-on}
       WAA_ANALYSIS_CONFIG: /config/analysis/analysis.json
       WAA_STATIONS_CONFIG: /config/stations.json

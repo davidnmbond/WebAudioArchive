@@ -15,7 +15,7 @@ One work lane, one pass every 60 seconds:
 3. Per segment: decode, features, transcription in chunks (progress saved after each), then the detectors (swearing, fillers,
    clipping, dead air) into `events.json`.
 4. Rebuilds the day timelines and the show files (`show-analysis.json`) for what changed.
-5. When no segment work is ready, enriches up to two finished shows with the local LLM (Ollama): hosts, guests, topics, songs.
+5. When no segment work is ready, enriches up to two finished shows with the LLM on the owner's Ollama server (pdl-rune-02 for test, pdl-rune-01 for production): hosts, guests, topics, songs.
 
 ## Files
 
@@ -43,8 +43,9 @@ Environment variables (compose sets the defaults):
 | `WAA_WHISPER_MODEL_PATH` | `/models/ggml-large-v3-turbo-q8_0.bin` (GPU), `ggml-base.en.bin` (CPU compose) | the model file |
 | `WAA_WHISPER_DEVICE` | `auto` | `auto` tries CUDA then CPU, `cpu`, `cuda` |
 | `WAA_RETRANSCRIBE` | `false` | `true`: transcribe again every segment made by a different model (name or file size); see Changing the model |
-| `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` | `http://host.docker.internal:11434`, `qwen3.6:latest` | the local LLM (never a cloud model) |
-| `WAA_OLLAMA_KEEP_ALIVE` | `0` | how long Ollama keeps its model after a request; `0` frees the GPU at once |
+| `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` | `http://pdl-rune-02.panoramicdata.com:11434`, `qwen3.6:latest` | the owner's Ollama server (never a cloud model). For production use `http://pdl-rune-01.panoramicdata.com:11434` and `WAA_OLLAMA_MODEL=qwen3.6:27b`, which is what that server has |
+| `WAA_OLLAMA_ALLOWED_HOSTS` | `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` | the only named hosts transcript text may be sent to (a name that is not listed is refused; loopback and private IP addresses are accepted) |
+| `WAA_OLLAMA_KEEP_ALIVE` | `5m` in the compose file (`0` in code) | how long Ollama keeps its model after a request. A shared server should keep it for a few minutes; use `0` only when Ollama shares this machine's GPU |
 | `WAA_ENRICHMENT` | `on` | `off` stops the LLM step |
 | `WAA_LAG_ALARM_HOURS` | 6 | lag above this is `catching-up` or `lagging` |
 | `WAA_ANALYSIS_SINCE` | none | ignore segments that ended before this UTC time |
@@ -117,7 +118,10 @@ model name, file size and device are recorded in each transcript and in `state.j
 when `WAA_RETRANSCRIBE=true` (each segment whose recorded model differs is run once and then records the new model, so turn the setting
 off again afterwards), when `--rebuild --retranscribe` marks segments, or when the options or the package major version change.
 
-## Sharing the GPU with Ollama
+## Sharing the GPU with Ollama (only if you run Ollama on this machine)
+
+By default Ollama now runs on the owner's servers (`pdl-rune-02`, or `pdl-rune-01` for production), so none of this applies unless `WAA_OLLAMA_URL` points at an Ollama on this machine.
+
 
 Whisper and Ollama share the 12 GB card. Whisper builds a processor (with its own GPU state) for every chunk, and a model held by
 Ollama can make that allocation fail. The service therefore: sends `keep_alive` `0` to Ollama so its model is unloaded straight after

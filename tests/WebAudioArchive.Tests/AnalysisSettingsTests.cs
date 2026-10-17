@@ -1,4 +1,5 @@
 using WebAudioArchive.Analysis.Settings;
+using WebAudioArchive.Tests.Support;
 
 namespace WebAudioArchive.Tests;
 
@@ -128,6 +129,19 @@ public sealed class AnalysisSettingsTests : IDisposable
         Assert.Equal("gpu-box", AnalysisSettings.Load(env("http://gpu-box:11434")).OllamaUrl.Host);
         Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(env("http://ai:11434")));
     }
+    [Theory]
+    [InlineData("http://pdl-rune-02.panoramicdata.com:11434")]
+    [InlineData("http://pdl-rune-01.panoramicdata.com:11434")]
+    public void The_owners_ollama_servers_are_accepted_with_the_compose_allow_list(string url)
+    {
+        var compose = RepoFiles.Read("docker/docker-compose.analysis.yml");
+        var m = System.Text.RegularExpressions.Regex.Match(compose, @"WAA_OLLAMA_ALLOWED_HOSTS: \$\{WAA_OLLAMA_ALLOWED_HOSTS:-([^}]+)\}");
+        Assert.True(m.Success, "docker-compose.analysis.yml must set a default WAA_OLLAMA_ALLOWED_HOSTS");
+        var s = AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_OLLAMA_URL", url), ("WAA_OLLAMA_ALLOWED_HOSTS", m.Groups[1].Value)));
+        Assert.Equal(new Uri(url), s.OllamaUrl);
+        Assert.Contains("pdl-rune-02.panoramicdata.com:11434", compose);
+    }
+
     [Fact]
     public void A_remote_ollama_needs_an_explicit_opt_in()
     {

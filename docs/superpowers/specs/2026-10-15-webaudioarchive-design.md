@@ -209,6 +209,11 @@ analyses independently, so both need local whisper and an LLM, as you have confi
 - Schedule facts stay authoritative. LLM output lives under `derived` with model, prompt version and date, and
   can be regenerated without touching audio. If Ollama is down the show is marked `"enrichment": "pending"` and
   retried.
+- **Where the LLM runs (decision, 2026-10-17):** on the owner's own Ollama servers, `pdl-rune-02.panoramicdata.com`
+  for the test instance and `pdl-rune-01.panoramicdata.com` for production (both `:11434`, reachable on the private
+  network), instead of an Ollama on the analysis host. Transcript text for enrichment therefore leaves the analysis
+  host, but only to those two named servers (an allow-list; cloud models and any other host are refused), and
+  currently over plain HTTP. Audio never leaves the analysis host: transcription stays local.
 - **Derived hosts never grant access.** They are suggestions shown to a manager (see 3.8).
 
 ### 3.8 Web app, accounts and access
