@@ -6,6 +6,7 @@
 #               (the two libraries Whisper.net's CUDA runtime links); the NVIDIA container toolkit supplies the driver.
 # Build and restart only it: docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
 WORKDIR /src
 COPY global.json Directory.Build.props ./
 COPY src/WebAudioArchive.Core/ src/WebAudioArchive.Core/
@@ -39,7 +40,8 @@ ENTRYPOINT ["nice", "-n", "10", "dotnet", "WebAudioArchive.Analysis.Service.dll"
 
 FROM cpu AS cuda
 USER root
-ADD https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb /tmp/cuda-keyring.deb
+# The checksum pins the keyring package (sha256 of cuda-keyring_1.1-1_all.deb, 4328 bytes, fetched 2026-10-17); if NVIDIA republishes it, check the new file and update the hash.
+ADD --checksum=sha256:d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb /tmp/cuda-keyring.deb
 RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
     && apt-get update \
     && apt-get install -y --no-install-recommends cuda-cudart-13-0 libcublas-13-0 \

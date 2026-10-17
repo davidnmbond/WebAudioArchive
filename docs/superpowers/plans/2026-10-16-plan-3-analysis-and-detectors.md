@@ -11497,6 +11497,14 @@ git commit -m "Detector validation: labelled synthetic sample in CI, --validate 
 - Create: `docs/analysis.md`
 - Modify: `docs/operations.md`, `README.md`, `docs/superpowers/specs/2026-10-15-webaudioarchive-design.md`, `docs/analysis-validation.md`
 
+- [ ] **Step 0: GPU memory pre-check**
+
+Whisper (about 1.5 GB for large-v3-turbo q8_0 plus working memory) and Ollama (about 9 GB for the default model) share the RTX 3060's 12 GB with the Windows desktop. Before starting, with Ollama's model loaded (`ollama run qwen3.6:latest ""`):
+```powershell
+nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv
+```
+Expected: `memory.free` of at least 3 GB (3072 MiB). If it is less, stop here: unload the Ollama model (`ollama stop qwen3.6:latest`) or close GPU-heavy programs. The service itself sends `keep_alive` 0 to Ollama and drops whisper's model before an enrichment batch (`WAA_OLLAMA_KEEP_ALIVE`, default `0`), so the two do not hold the card at once in normal running.
+
 - [ ] **Step 1: Start analysis on the GPU without touching the recorders**
 
 Run:
@@ -11509,16 +11517,18 @@ curl.exe -s http://127.0.0.1:8095/healthz
 ```
 Expected: the first and second `ps` show `waa-recorder-a`, `waa-recorder-b` and `waa-web` with the same "Up ..." durations (not restarted); `waa-analysis` is new. `nvidia-smi` inside the container names `NVIDIA GeForce RTX 3060` (the toolkit injects it with the driver). `/healthz` returns JSON with `"whisperReady":true` within a few minutes of the first pass (the first cuda build downloads about 1.3 GB of CUDA libraries; the model loads in a few seconds). If `nvidia-smi` fails, rerun the D4 check (`docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi`); if whisper stays not ready, `docker logs waa-analysis` shows `LastError` from the transcriber (model path, or the CUDA library that did not load).
 
-- [ ] **Step 2: Measure the realtime factor**
+- [ ] **Step 2: Measure the realtime factor (service stopped, niced, no published port)**
 
-Run (any closed hour from recorder A):
+Stop the analysis service, run the benchmark in a one-off container, then start the service again. `run` publishes no ports (so it does not clash with 8095), and the image entrypoint keeps `nice -n 10`; an `exec` into the live container would run un-niced and double the GPU memory (two models loaded).
 ```powershell
 $seg = (Get-ChildItem data/a/burst/master -Recurse -Filter *.mp3 | Sort-Object LastWriteTime | Select-Object -Last 2 | Select-Object -First 1)
 $rel = $seg.FullName.Substring((Resolve-Path data/a).Path.Length).Replace('\', '/')
-docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --benchmark "/data/a$rel" 600
+docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml stop analysis
+docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml run --rm analysis --benchmark "/data/a$rel" 600
 nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv
+docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d analysis
 ```
-Expected: a line `benchmark: whisper.net 1.9.1 (cuda) ggml-large-v3-turbo-q8_0: 600.0 s of audio in 2 chunks, decode ... s, transcribe ... s, realtime factor 0.0xx (...)`. The engine must say `(cuda)`; `(cpu)` means the CUDA runtime did not load (see Step 1). Record the figure. Pass: realtime factor at most 0.2 (5 times faster than real time, so a day of audio takes under 5 hours); the D18 spike measured 0.035 (28x) for speech in a container. If it is above 0.2, check that the host CPU is not saturated (whisper.cpp's threads starve under full load, D18) and try `WAA_WHISPER_THREADS` 2 or 6; record each figure. Run the benchmark a second time while Ollama is enriching (watch `docker logs -f waa-analysis` for "Enriched") and record that figure too: it shows the cost of sharing the GPU.
+Expected: a line `benchmark: whisper.net 1.9.1 (cuda) ggml-large-v3-turbo-q8_0: 600.0 s of audio in 2 chunks, decode ... s, transcribe ... s, realtime factor 0.0xx (...)`. The engine must say `(cuda)`; `(cpu)` means the CUDA runtime did not load (see Step 1). Record the figure. Pass: realtime factor at most 0.2 (5 times faster than real time, so a day of audio takes under 5 hours); the D18 spike measured 0.035 (28x) for speech in a container. If it is above 0.2, check that the host CPU is not saturated (whisper.cpp's threads starve under full load, D18) and try `WAA_WHISPER_THREADS` 2 or 6; record each figure. To record the cost of sharing the GPU, run the benchmark a second time while Ollama is loaded with the model (`ollama run qwen3.6:latest ""` on the host, then repeat the stop, run, start sequence) and record that figure too. The recorders are not touched by any of these commands.
 
 - [ ] **Step 3: Watch it catch up and check the recorders are unaffected**
 
@@ -11553,99 +11563,9 @@ Expected: with the huge threshold `/healthz` says `"status":"paused"` and `"paus
 
 In `docs/analysis-validation.md` add the realtime factors from Step 2 (alone and while enriching, with the date, model, flags and GPU) under a new heading "Throughput (RTX 3060)", and, when the owner has labelled a real sample (owner action 6), run the `--validate` command shown there and paste the tables into "Real sample". If the labels are not ready yet, leave #84 open and say so in its issue.
 
-- [ ] **Step 6: Write the analysis guide**
+- [ ] **Step 6: Check the analysis guide**
 
-`docs/analysis.md`:
-````markdown
-# Analysis (plan 3)
-
-The analysis service turns the archive into transcripts, detected events and per-show facts. It is a separate
-container (`waa-analysis`) with its own image, below the recorders' priority, that runs whisper.cpp in process on the
-GPU (Whisper.net). It never writes to the recordings: it reads closed segments read-only, copies each one into a 2 GiB tmpfs
-scratch, decodes the copy, and writes only under `data/analysis`. All times are UTC.
-
-## Run
-
-First time, or after a change to analysis (always name the service; never touch the recorders):
-
-    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
-
-Without an NVIDIA GPU leave out the second `-f` file: the image is then the cpu target and whisper runs on the CPU with
-`base.en`, which is far slower and needs a host that is not otherwise busy (a day of audio can take longer than a day;
-the lag in `/healthz` shows it). Nothing in the image needs ffmpeg or a compiler: decoding is managed code (NLayer,
-NAudio) and whisper.cpp comes prebuilt in the Whisper.net runtime packages.
-
-Models are not in git. Download them into `models/` once (sizes and hashes in plan 3, Task 16):
-`ggml-large-v3-turbo-q8_0.bin` (GPU) and `ggml-base.en.bin` (CPU).
-
-Health: `http://127.0.0.1:8095/healthz` (503 when the lag passes `WAA_LAG_ALARM_HOURS`, default 6, or no pass has
-finished for 15 minutes; `docker ps` then shows the container unhealthy; it is not restarted).
-
-## What it does, in order
-
-1. Every 60 s: if free disk is below `WAA_MIN_FREE_GB` (default 20) it stops (and stops a running job between chunks),
-   so the recorders keep the space.
-2. Finds closed segments (a `.json` sidecar beside its `.mp3`, sizes agreeing). Recorder A is analysed; recorder B only
-   where A covers less than 98% of the span (`WAA_ANALYSIS_PREFERENCE`). Newest first.
-3. Per segment (a job, idempotent and resumable through `state.json`): copy into scratch, decode once in managed code to
-   16 kHz mono WAV (for whisper) and full-rate float PCM (streamed into the level and clipping features), split into about
-   5 minute chunks at quiet moments, transcribe each chunk (progress saved after each), assemble `transcript.json`, run
-   the detectors into `events.json`. A job runs again only when the segment, the transcriber or its options change;
-   detector changes rebuild events from the stored transcript and features without whisper or audio.
-4. Rebuilds the UTC day timeline (`events/<yyyy>/<MM-dd>.json`) and the `show-analysis.json` of each scheduled show
-   (from the schedule the web app saved) whose window, the show plus 5 minutes either side, has ended.
-5. When no segment job is ready, enriches up to 2 finished shows with the local LLM (`enrichment.json`).
-
-## Files (under data/analysis/<station>/)
-
-| Path | What |
-|---|---|
-| `segments/<recorder>/<yyyy>/<MM-dd>/<stem>/state.json` | job state: fingerprint, versions, status, attempts, chunks done |
-| `.../features.json` | 50 ms window levels and clip runs at 0.98, 0.99, 0.999 (rebuild without decoding) |
-| `.../transcript.json` | schema 1: segments with words, times in seconds from the segment's audio start, `timeline` anchors to map to UTC, `suppressed` reasons |
-| `.../events.json` | schema 1, scope `segment:<job>`: events, coverage, stats, versions |
-| `events/<yyyy>/<MM-dd>.json` | the merged UTC day: each event filed by its start, A preferred where it has audio |
-| `shows/<yyyy>/<show id>/show-analysis.json` | counts for the show proper (swears by tier and before the watershed, clipping, dead air, fillers per minute of speech), sources, notes |
-| `shows/<yyyy>/<show id>/enrichment.json` | hosts, guests, topics, songs, artists, locations, calls to action, language, summary; each claim with a verbatim quote and its UTC time; model, model digest and prompt version |
-
-An event: `id` (stable), `type` (`swear`, `clipping`, `filler`, `dead-air`; `song` reserved), `startUtc`, `endUtc`,
-`severity` (`info`, `low`, `medium`, `high`), `confidence` (0 to 1), `detector`, `detectorVersion`, `source` (`audio`,
-`transcript`, `llm`), `recorder`, `jobId`, `audioOffset`, `audioSeconds`, `label`, `evidence` and `link` (the web
-Player 5 s either side).
-
-## Web API (read-only, no sign-in yet, loopback only like the rest of the web app)
-
-- `GET /api/analysis/events?from=<UTC>&to=<UTC>[&types=swear,clipping]` (at most 7 days)
-- `GET /api/analysis/transcript?from=<UTC>&to=<UTC>` (at most 6 hours)
-- `GET /api/analysis/shows/<show id>` (for example `burst-20261015T1900Z`)
-
-The player markers and segments are built from these in plan 4.
-
-## Commands
-
-    docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --benchmark /data/a/burst/master/<yyyy>/<MM-dd>/<HHmmss>.mp3 600
-    docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --rebuild
-    docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --validate /analysis/validation/<labels>.csv <fromUtc> <toUtc>
-
-## Settings (environment)
-
-`WAA_STATION`, `WAA_RECORDERS` (required), `WAA_ANALYSIS_PREFERENCE`, `WAA_ANALYSIS_OUT`, `WAA_SCRATCH`,
-`WAA_SCRATCH_MAX_MB` (2048), `WAA_MIN_FREE_GB` (20), `WAA_WHISPER_MODEL_PATH` (the ggml model file; its name is recorded
-in transcripts), `WAA_WHISPER_DEVICE` (`auto`, `cpu` or `cuda`), `WAA_WHISPER_THREADS` (4), `WAA_WHISPER_DTW` (`off`;
-turn on only with `chunkSeconds` 30, D18), `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` (`qwen3.6:latest`; cloud
-models are refused), `WAA_OLLAMA_ALLOWED_HOSTS` (comma separated extra private-network host names; any other non-local, non-private host is refused, dotless names included), `WAA_OLLAMA_ALLOW_REMOTE`, `WAA_ENRICHMENT` (on or off), `WAA_ANALYSIS_CONFIG`,
-`WAA_STATIONS_CONFIG`, `WAA_SCHEDULE_FILE`, `WAA_ANALYSIS_SINCE` (UTC), `WAA_LAG_ALARM_HOURS` (6), `WAA_PORT`. Thresholds, word lists and prompts are in `config/analysis/` (versioned; a change rebuilds events or
-re-enriches shows as needed).
-
-## Limits
-
-- Detections are estimates: speech recognition mishears and softens words, drops many fillers, and transcribes song
-  lyrics (a swear in a lyric is reported, with `speechOrLyrics: unknown`). Every event links to its audio to confirm.
-- Clipping is measured on the decoded MP3, which blurs it; thresholds are provisional (docs/analysis-validation.md).
-- Times are good to about a second; after a reconnect inside a segment, a few seconds (as in the web Player).
-- Derived hosts never grant access to anything.
-- Not built: speaker diarisation, song identification (#2, #3), the player UI for events (plan 4), search (plan 4).
-````
+`docs/analysis.md` was written in the final fix wave (it is referenced by `docker/docker-compose.analysis.yml` and the transcriber). Read it against what you saw in Steps 0 to 5 and correct anything that differs: the first-run checklist (model hashes, GPU check), the statuses (`ok`, `catching-up`, `paused`, `lagging`, `stalled`, `failing`), the maintenance commands (stop the service first), the model-switch rule (`WAA_RETRANSCRIBE`), the GPU sharing note, the lock, and the warning that `up -d --build web` without `docker/docker-compose.web-analysis.yml` silently drops `WAA_ANALYSIS`. `DeploymentFilesTests` checks that the file exists and names each of these.
 
 - [ ] **Step 7: Update the operations guide, README and spec**
 
@@ -11736,3 +11656,17 @@ Close #84 only when the real-sample figures are in `docs/analysis-validation.md`
 **Review Focus check:** each of the eight items has its named test in the owning task (Tasks 5, 7, 8, 9, 10, 11, 12, 14).
 
 **D18 consistency (NuGet stack):** no task starts a process or needs a native tool: `Ffmpeg`, `TestFfmpeg`, `WhisperCppTranscriber`, `Dockerfile.whisper`, the whisper service and the CUDA workflow are gone, and every caller of `SegmentDecoder` uses the parameterless constructor (Tasks 9, 12, 15, 18). `DecodedSegment.Decoder` feeds `TranscriptDocument.Decoder` (Task 3, renamed from `Ffmpeg`) through `TranscriptAssembler` (Task 12). `AnalysisSettings` (Task 1) carries `WhisperModelPath`, `WhisperDevice`, `WhisperThreads` and `WhisperDtw`, used only by `AnalysisComposition` (Task 15) and set by compose and the GPU override (Task 16). `ITranscriber` is unchanged, so the pipeline, runner and their tests (Tasks 12, 15) keep the fake. The Task 9 and Task 10 code and tests were compiled with `TreatWarningsAsErrors` and run in the spike (18 tests passing); the Dockerfile follows the throwaway images the spike built and ran.
+
+
+## Amendments from the whole-branch review (final fix wave)
+
+These replace the code shown in the earlier tasks where they differ; the tests named are in the repository.
+
+- **I1 GPU sharing (Tasks 12, 13, 15).** `WhisperNetTranscriber.RunAsync<TProcessor>(build, process, resetModel, ct)` builds the per-chunk processor: any exception from the build step is a `TransientTranscriptionException` (not counted, backoff, `ResetModel()`), a memory or GPU error while processing is transient with a reset, anything else fails the chunk. `OllamaClient` takes a keep-alive (`WAA_OLLAMA_KEEP_ALIVE`, default `"0"`; a bare number other than 0 is sent as a number). `ITranscriber` gains `ResetModel()`, `ModelBytes` and `ModelIdentity`; `AnalysisRunner` calls `ResetModel()` before an enrichment batch (only when a show is due). Tests: `WhisperProcessorTests`, `FinalFixContractTests`, `AnalysisServiceTests` (reset ordering, no attempt burnt).
+- **I2 service lock (Task 15).** The lock records `pid`, `host`, `processStartUtc` and `startedUtc`. A lock naming this host and this pid is ours (a restarted container is PID 1 again) and is taken over; on this host a gone pid or a different process start time is stale; a fresh lock from another host is live. Tests in `AnalysisServiceFinalFixTests.cs`.
+- **I3 timeline from the sidecar (Task 12).** `Redetect` (and so `--rebuild`) sets `Timeline = SegmentTimeline.Anchors(meta)`, `SegmentStartUtc`, `SegmentEndUtc` and `AudioSeconds` from the current sidecar before refiltering. `DetectorCodeVersion` is "2", so the position-model fix (#106) triggers a Redetect of stored events. Tests: `Rebuilding_events_takes_the_timeline_from_the_current_sidecar...`, `AnalysisRedetectStallTests`.
+- **I4 transcript reads (Tasks 14, 15).** `Enricher` caches each show's transcript fingerprint and line count keyed by the window and each source transcript's write time and length; `IsDue` reads no transcript while nothing changed (`Enricher.Forget` when a show ages out). Test: `A_pass_with_nothing_changed_reads_no_transcript_for_the_enrichment_checks`.
+- **I5 model switch (Tasks 3, 12).** The transcript version is `whisper.net <major>|<transcript options key>`; the model name, size and device are recorded (`TranscriptDocument.ModelBytes`, `Device`, `JobState.ModelIdentity`) but are not in the key. `WAA_RETRANSCRIBE=true` runs a finished job once more when its recorded `ModelIdentity` differs from the current one (`JobRules.Decide(..., modelIdentity, retranscribe)`); `--rebuild --retranscribe` marks such jobs for the service. Tests: `Switching_the_model_keeps_done_jobs_done`, `Retranscribe_*`, `A_transcript_option_change_or_a_package_major_change_re_runs...`, `JobRulesModelTests`.
+- **I6 health (Task 15).** `/healthz` gains `backlogAudioHours` and `catchUpEtaHours` (backlog audio hours times the average realtime factor, which is transcription seconds per audio second; null until a job has finished) and the status `catching-up` (200). Over the alarm with a segment job finished within the stall window is `catching-up` (or `paused` when paused); over the alarm with no such job is 503 `lagging`; `stalled`, `failing` and `paused` are as before. Tests: `AnalysisHealthCatchUpTests`.
+- **I7, I8 (Tasks 16, 19).** Task 19 gains Step 0 (GPU memory pre-check) and Step 2 runs the benchmark with the service stopped through `run --rm`; Step 3 expects `backlogAudioHours` to fall, not `lagSeconds`. `RepoFiles.Read` strips `\r` and `.gitattributes` pins yaml, shell and Dockerfiles to LF.
+- **Minors.** Tiers are counted by `severityTier` (falling back to `tier` for older events). `ShowCounts` gains `WorstClippingPeak` and `Swears{Mild,Strong,Severe}{Before,After}Watershed` (schema 2, suppressed runs excluded). CI `ldd` checks start with `test -f <library> &&`. The analysis service drops all capabilities and sets `no-new-privileges`. The CUDA keyring download is pinned with `ADD --checksum=sha256:...` and the build stage sets `DOTNET_CLI_TELEMETRY_OPTOUT=1`. `AnalysisJson.Write` retries the final rename after 50, 100 and 200 ms. `docs/analysis.md` is written.

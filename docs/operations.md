@@ -282,5 +282,13 @@ when you may interrupt the web app for a few seconds.) If the recorder project's
 its new path in place of `docker/docker-compose.yml`. The current web service already mounts `data/` read-only, so
 `data/analysis` is visible read-only there; the override makes the mount and the setting explicit.
 
+**Analysis health (`http://127.0.0.1:8095/healthz`).** `status` is one of: `ok` (200); `catching-up` (200: lag is above the
+6 hour alarm only because of the backlog, a job finished within the stall window; expected for days after the first start, watch
+`backlogAudioHours` and `catchUpEtaHours` instead of `lagSeconds`); `paused` (200: low disk or whisper not ready, `paused` says
+why); `lagging` (503: lag above the alarm and no job finished within the stall window, so nothing is progressing); `stalled`
+(503: no sign of life for 15 minutes, or a job running longer than the stall window); `failing` (503: whole passes keep
+failing, see `lastPassError`). Full detail, the first-run checklist, the maintenance commands (stop the service first), the GPU
+sharing with Ollama and the warning about the web override are in `docs/analysis.md`.
+
 CI builds both image targets, checks with `ldd` that the images carry the libraries whisper.cpp links, and validates
 the compose combinations with `docker compose config` (which starts nothing).

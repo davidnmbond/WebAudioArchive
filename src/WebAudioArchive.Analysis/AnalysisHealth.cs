@@ -3,7 +3,8 @@ namespace WebAudioArchive.Analysis;
 public sealed record HealthResult(int StatusCode, object Body);
 
 /// <summary>
-/// /healthz for the analysis service (spec 5, D16): 503 when the lag passes the alarm or the worker shows no sign of life
+/// /healthz for the analysis service (spec 5, D16): 503 "lagging" when the lag passes the alarm and no segment job has finished within the stall window
+/// (while jobs do finish the status is the 200 "catching-up", the whole first catch-up), or "stalled" when the worker shows no sign of life
 /// for 15 minutes, so `docker ps` shows unhealthy. A pause (low disk, whisper not ready) is reported but is 200 until the
 /// lag it causes reaches the alarm. Passes that keep throwing (last pass error set, no pass finished for 15 minutes) are 503 "failing". A job in progress counts as alive for up to <see cref="JobStallAfter"/> since the last
 /// sign of life (a one hour segment on a CPU can take longer than 15 minutes). All times UTC.

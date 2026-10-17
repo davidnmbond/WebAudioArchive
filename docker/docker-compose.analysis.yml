@@ -59,6 +59,9 @@ services:
     mem_limit: 6g
     oom_score_adj: 800
     pids_limit: 512
+    # No capability is needed: nice with a positive value is allowed to any user, and the service only binds a port above 1024.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     ports:
       - "127.0.0.1:8095:8080"
 
