@@ -66,6 +66,8 @@ public sealed partial class Status
 
     static string YesNo(bool? b) => b is null ? "-" : b.Value ? "yes" : "no";
 
+    static string Uptime(double? s) => DurationText.Humanize(s);
+
     static string Seconds(double? s) => s is null ? "-" : s.Value.ToString("0.0", CultureInfo.InvariantCulture) + " s";
 
     static string LastError(RecorderHealth? h) =>

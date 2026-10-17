@@ -43,7 +43,7 @@ else
                                 <tr><th scope="row">Last error</th><td>@LastError(s.Health)</td></tr>
                                 <tr><th scope="row">Current segment start</th><td class="utc">@Utc(s.Health?.CurrentSegmentStartUtc)</td></tr>
                                 <tr><th scope="row">Reconnects</th><td>@(s.Health?.Reachable == true ? s.Health.Reconnects.ToString(CultureInfo.InvariantCulture) : "-")</td></tr>
-                                <tr><th scope="row">Recorder uptime</th><td>@Seconds(s.Health?.UptimeSeconds)</td></tr>
+                                <tr><th scope="row">Recorder uptime</th><td>@Uptime(s.Health?.UptimeSeconds)</td></tr>
                                 <tr><th scope="row">Latest segment</th><td class="utc">@Latest(s)</td></tr>
                                 <tr><th scope="row">Data root</th><td><code>@s.Recorder.Root</code> (read-only)</td></tr>
                             </tbody>
