@@ -176,4 +176,16 @@ public sealed class FrameMergeTests
         Assert.Equal(frames[0].Hash, frames[2].Hash);
         Assert.NotEqual(frames[0].Hash, frames[1].Hash);
     }
+
+    [Fact]
+    public void Frame_index_reads_across_its_chunk_boundaries_and_from_an_offset_without_losing_a_frame()
+    {
+        var bytes = Support.Mp3TestData.CbrFrames(20_000); // about 8 MB: several 1 MB chunks
+        var all = Support.SegmentFiles.Boundaries(bytes);
+
+        var frames = FrameIndex.Read(new MemoryStream(bytes), all[5], all[^3]);
+
+        Assert.Equal(all.Skip(5).SkipLast(3), frames.Select(f => f.Offset));
+        Assert.All(frames, f => Assert.Equal(Support.Mp3TestData.CbrFrame(Support.Mp3TestData.SeqOf(bytes.AsSpan((int)f.Offset))).Length, f.Length));
+    }
 }
