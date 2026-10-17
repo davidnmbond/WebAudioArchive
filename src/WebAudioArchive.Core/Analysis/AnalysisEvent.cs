@@ -54,6 +54,10 @@ public sealed record AnalysisEvent(
 {
     public const double LinkPaddingSeconds = 5;
 
+    /// <summary>A swear hit that detection set aside as probable hallucination (repeated or invented text): for review only, never counted, shown or aggregated as swearing.</summary>
+    [JsonIgnore]
+    public bool IsReviewOnly => Type == EventTypes.Swear && Evidence?.GetValueOrDefault("suppressed") is { } s && s != "no";
+
     /// <summary>The web app's Player for this event with 5 s either side (a clip made on request from that recorder).</summary>
     public string Link
     {

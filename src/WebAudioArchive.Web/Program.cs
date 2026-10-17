@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.DataProtection;
 using PanoramicData.Blazor.Extensions;
 using WebAudioArchive.Web;
+using WebAudioArchive.Web.Analysis;
 using WebAudioArchive.Web.Clips;
 using WebAudioArchive.Web.Components;
 using WebAudioArchive.Web.Schedule;
@@ -49,6 +50,7 @@ builder.Services.AddSingleton<SegmentCatalog>();
 builder.Services.AddSingleton<ClipService>();
 builder.Services.AddSingleton<StatusService>();
 builder.Services.AddSingleton<RecordingsQuery>();
+builder.Services.AddSingleton<AnalysisReader>();
 builder.Services.AddHostedService<CacheHousekeeper>();
 // The schedule: page URL and zone from the stations config; fetched at start and every 15 minutes, last good kept.
 var scheduleSource = ScheduleSource.Load(settings.Station, Setting("WAA_STATIONS_CONFIG"));
@@ -110,6 +112,28 @@ app.MapGet("/media/clip/{id}.mp3", (string id, HttpRequest req, WebSettings s) =
     var name = download ? ClipBuilder.ReadInfo(s.CacheDir, id)?.DownloadName ?? $"{s.Station}_{id}.mp3" : null;
     return Results.File(path, "audio/mpeg", name, enableRangeProcessing: true);
 });
+
+// Analysis results (plan 3), read-only, all times UTC. The player pages use them in plan 4.
+// NO SIGN-IN yet: loopback only until plan 4a adds it (see AnalysisReader). Review-only swear hits are left out unless includeReview=true.
+if (settings.AnalysisDir is not null)
+    app.Logger.LogWarning("Analysis API enabled from {Dir} (read-only). It has no sign-in: publish this port on loopback only until plan 4a.", settings.AnalysisDir);
+app.MapGet("/api/analysis/events", (HttpRequest req, AnalysisReader a) => AnalysisReader.Respond(() =>
+{
+    var (from, to) = AnalysisReader.Range(req.Query["from"], req.Query["to"], AnalysisReader.MaxEventsRange);
+    var events = a.Events(from, to, req.Query["types"], string.Equals(req.Query["includeReview"], "true", StringComparison.OrdinalIgnoreCase));
+    return new { from, to, count = events.Count, events };
+}));
+app.MapGet("/api/analysis/transcript", (HttpRequest req, AnalysisReader a) => AnalysisReader.Respond(() =>
+{
+    var (from, to) = AnalysisReader.Range(req.Query["from"], req.Query["to"], AnalysisReader.MaxTranscriptRange);
+    var lines = a.Transcript(from, to);
+    return new { from, to, count = lines.Count, lines };
+}));
+app.MapGet("/api/analysis/shows/{id}", (string id, AnalysisReader a) => AnalysisReader.Respond(() =>
+{
+    var (analysis, enrichment) = a.Show(id);
+    return new { analysis, enrichment };
+}));
 
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 

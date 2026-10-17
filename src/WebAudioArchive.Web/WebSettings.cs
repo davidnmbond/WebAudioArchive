@@ -21,6 +21,9 @@ public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderS
     public long CacheMaxBytes { get; init; } = 2L * 1024 * 1024 * 1024;
     public int DefaultMarginMinutes { get; init; } = 5;
 
+    /// <summary>The analysis output folder (WAA_ANALYSIS, read-only), or null when analysis is not set up.</summary>
+    public string? AnalysisDir { get; init; }
+
     public RecorderSettings? Find(string id) => Recorders.FirstOrDefault(r => r.Id == id);
 
     [GeneratedRegex("^[a-z0-9][a-z0-9-]{0,31}$")]
@@ -55,7 +58,11 @@ public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderS
         }
 
         var cache = get("WAA_CACHE");
-        return new WebSettings(station, recorders, string.IsNullOrWhiteSpace(cache) ? "/cache" : cache.Trim());
+        var analysis = get("WAA_ANALYSIS");
+        return new WebSettings(station, recorders, string.IsNullOrWhiteSpace(cache) ? "/cache" : cache.Trim())
+        {
+            AnalysisDir = string.IsNullOrWhiteSpace(analysis) ? null : analysis.Trim(),
+        };
     }
 
     static Dictionary<string, string> ParsePairs(string name, string text)

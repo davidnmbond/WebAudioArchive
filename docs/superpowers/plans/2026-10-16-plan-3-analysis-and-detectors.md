@@ -9379,6 +9379,8 @@ git commit -m "Analysis service: single work lane, lag and realtime factor in /h
 
 ### Task 16: Containers: the analysis image (CPU and CUDA targets, whisper in process), compose, the GPU override and CI
 
+> **Carry-forwards from Tasks 15 and 17 (review rounds):** the analysis compose service needs `stop_grace_period: 60s` or more (a stop abandons the chunk in hand cleanly; a kill uses an attempt, and five parks the segment until `--unpark`); give it `WAA_OLLAMA_TIMEOUT_MINUTES` only if the default 20 is not right; the web service environment gets `WAA_ANALYSIS: /data/analysis` (Task 17 deferred this compose edit). The analysis container mounts the recorders read-only and must never get `WAA_SCRATCH` or `WAA_ANALYSIS_OUT` inside them (the service refuses to start).
+
 **Files:**
 - Create: `docker/Dockerfile.analysis`, `docker/docker-compose.gpu.yml`
 - Modify: `docker/docker-compose.yml` (add `analysis`; the recorder and web services are not changed), `.github/workflows/ci.yml`
@@ -9735,38 +9737,41 @@ git add docker/Dockerfile.analysis docker/docker-compose.yml docker/docker-compo
 git commit -m "Analysis container (cpu and cuda targets, whisper in process), GPU override, resource limits below the recorders, CI image builds (#76, #77, #85)"
 ```
 
----
-
 ### Task 17: Web integration points (read-only data API for the player)
 
-The web app gets read-only access to the analysis output so plan 4 can draw markers and segments in `PDMediaPlayer` and list transcripts. No page changes here: the UI is plan 4 (issue #11).
+The web app gets read-only access to the analysis output so plan 4 can draw markers and segments in `PDMediaPlayer` and list transcripts. No page changes here: the UI is plan 4 (issue #11). **There is no sign-in on these endpoints**: like the rest of the web app they are for loopback only until plan 4a adds sign-in (the `AnalysisReader` doc comment and a start-up warning say so); transcripts and swear events are about identifiable presenters, so do not publish the port before that.
 
 **Files:**
 - Create: `src/WebAudioArchive.Core/Analysis/AnalysisStore.cs`
+- Modify: `src/WebAudioArchive.Core/Analysis/AnalysisEvent.cs` (`IsReviewOnly`)
 - Create: `src/WebAudioArchive.Web/Analysis/AnalysisReader.cs`, `src/WebAudioArchive.Web/Analysis/AnalysisMarkers.cs`
-- Modify: `src/WebAudioArchive.Web/WebSettings.cs` (add `AnalysisDir`), `src/WebAudioArchive.Web/Program.cs` (register the reader, map three endpoints), `docker/docker-compose.yml` (web: `WAA_ANALYSIS`)
+- Modify: `src/WebAudioArchive.Web/WebSettings.cs` (add `AnalysisDir`), `src/WebAudioArchive.Web/Program.cs` (register the reader, map three endpoints)
+- **Deferred to Task 16, not done here (another session owns compose):** `docker/docker-compose.yml`, web service `environment`: `WAA_ANALYSIS: /data/analysis` plus a comment (the web container already mounts the whole data folder read-only at `/data`).
 - Test: `tests/WebAudioArchive.Tests/AnalysisWebTests.cs`
 
+**Review changes to the first draft (binding):**
+- The Web project references only Core (a test checks the Web assembly does not reference the Analysis assembly).
+- No request value reaches the file system: times are parsed (UTC with a Z, bounded range), and a show id is parsed, must be the station's, and is then matched by exact name against the folders that exist (`AnalysisStore.FindShowDir`); anything else is a 404 (tests: traversal, encoded slashes, other station, wrong case, trailing characters).
+- Swear events that detection set aside (`evidence.suppressed` other than `no`, `AnalysisEvent.IsReviewOnly`) are review only: the events endpoint leaves them out unless `includeReview=true`, and `AnalysisMarkers` draws them as the separate kind `swear-review` (grey, "probably invented text, review only"), never as `swear`.
+- Show ids in the 404 message are truncated to 64 characters.
+
 **Interfaces:**
-- Consumes: `AnalysisPaths`, `AnalysisJson`, `EventsDocument`, `AnalysisEvent`, `TranscriptDocument`, `TranscriptSlicer`, `TimedLine`, `ShowAnalysis`, `ShowEnrichment` (Core); `ShowOccurrence.TryParseId` (Core, Task 13); `WebSettings`, `ClipClock`, `ClipMarkers.Time`, `PDMediaMarker`, `PDMediaSegment` (Web).
-- Produces:
-  - `static class AnalysisStore { IEnumerable<string> SegmentDirs(AnalysisPaths, DateTimeOffset fromUtc, DateTimeOffset toUtc); IReadOnlyList<TranscriptDocument> Transcripts(AnalysisPaths, DateTimeOffset, DateTimeOffset); IReadOnlyList<AnalysisEvent> DayEvents(AnalysisPaths, DateTimeOffset, DateTimeOffset); }`
-  - `WebSettings.AnalysisDir` (`string?`, from `WAA_ANALYSIS`; optional).
-  - `sealed class AnalysisQueryException(int statusCode, string message)`; `sealed class AnalysisReader(WebSettings settings) { static TimeSpan MaxEventsRange (7 days), MaxTranscriptRange (6 hours); static (DateTimeOffset From, DateTimeOffset To) Range(string? from, string? to, TimeSpan max); IReadOnlyList<AnalysisEvent> Events(DateTimeOffset, DateTimeOffset, string? types); IReadOnlyList<TimedLine> Transcript(DateTimeOffset, DateTimeOffset); (ShowAnalysis? Analysis, ShowEnrichment? Enrichment) Show(string id); static IResult Respond(Func<object> make); }`
-  - Endpoints (JSON, UTC): `GET /api/analysis/events?from=<UTC>&to=<UTC>[&types=swear,clipping]`, `GET /api/analysis/transcript?from=<UTC>&to=<UTC>`, `GET /api/analysis/shows/{id}` (id as on the Shows tab, for example `burst-20261015T1900Z`). 400 `{ error }` for bad input, 404 when analysis is not configured or the show has no analysis.
-  - `static class AnalysisMarkers { const string Talk = "talk"; IReadOnlyDictionary<string, string> KindLabels, KindColors; IReadOnlyList<PDMediaMarker> Markers(IEnumerable<AnalysisEvent>, ClipClock); IReadOnlyList<PDMediaSegment> Segments(IEnumerable<AnalysisEvent>, IEnumerable<TimedLine>, ClipClock); }` (dead air becomes a segment as well as a marker; each transcript line becomes a `talk` segment)
+- Consumes: `AnalysisPaths`, `AnalysisJson`, `EventsDocument`, `AnalysisEvent`, `TranscriptDocument`, `TranscriptSlicer`, `TimedLine`, `ShowAnalysis`, `ShowEnrichment`, `ShowOccurrence.TryParseId` (Core); `WebSettings`, `ClipClock`, `ClipMarkers.Time`, `PDMediaMarker`, `PDMediaSegment` (Web).
+- Produces: `AnalysisStore.SegmentDirs/Transcripts/DayEvents/FindShowDir`; `WebSettings.AnalysisDir` (from `WAA_ANALYSIS`, optional); `AnalysisQueryException`; `AnalysisReader` (`MaxEventsRange` 7 days, `MaxTranscriptRange` 6 hours, `Range`, `Events(from, to, types, includeReview = false)`, `Transcript`, `Show`, `Respond`); endpoints (JSON, UTC) `GET /api/analysis/events?from=<UTC>&to=<UTC>[&types=swear,clipping][&includeReview=true]`, `GET /api/analysis/transcript?from=&to=`, `GET /api/analysis/shows/{id}`; 400 `{ error }` for bad input, 404 when analysis is not configured or the show has no analysis; `AnalysisMarkers` (`Talk`, `SwearReview`, `KindLabels`, `KindColors`, `Markers`, `Segments`).
 
 - [ ] **Step 1: Pull first**
 
-Run: `git pull --rebase` and `git log --oneline 19a06f0..HEAD -- src/WebAudioArchive.Web/Program.cs src/WebAudioArchive.Web/WebSettings.cs`. Read any changes the web UI work made so the edits below go onto the current text.
+Run: `git pull --rebase` and `git log --oneline 19a06f0..HEAD -- src/WebAudioArchive.Web`. Done at execution: no web changes since the analysis commits other than the Core move (`fdeb292`).
 
 - [ ] **Step 2: Write the failing tests**
 
-`tests/WebAudioArchive.Tests/AnalysisWebTests.cs`:
+`tests/WebAudioArchive.Tests/AnalysisWebTests.cs` (the committed file is the source of truth):
+
 ```csharp
 extern alias web;
 
 using System.Net;
+using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using WebAudioArchive.Core.Analysis;
@@ -9788,12 +9793,13 @@ public sealed class AnalysisWebTests : IDisposable
         var paths = Paths;
         AnalysisJson.Write(paths.DayEvents(new DateOnly(2026, 10, 15)), Day("day:2026-10-15",
             Event(EventTypes.Swear, T.AddMinutes(10)), Event(EventTypes.Filler, T.AddMinutes(11)), Event(EventTypes.DeadAir, T.AddMinutes(30), 8),
-            Event(EventTypes.Clipping, T.AddHours(2))));
+            Event(EventTypes.Clipping, T.AddHours(2)),
+            Event(EventTypes.Swear, T.AddMinutes(20), suppressed: "repetition")));
         AnalysisJson.Write(Path.Combine(paths.SegmentDir("a/2026/10-15/190000"), AnalysisPaths.TranscriptFile),
             TranscriptFixtures.Of(T, "Good evening, this is Backseat Aux.", "Next up, a song.") with { JobId = "a/2026/10-15/190000" });
         AnalysisJson.Write(Path.Combine(paths.ShowDir("burst-20261015T1900Z", T), AnalysisPaths.ShowAnalysisFile),
             new ShowAnalysis(1, "burst-20261015T1900Z", "burst", "Backseat Aux", T, T.AddHours(1), T.AddMinutes(-5), T.AddMinutes(65), T.AddHours(2), true,
-                [], new ShowCounts(0, 1, 0, 1, 0, 0, 1, 8, 1, 0.1, null, 3600, 0), []));
+                [], new ShowCounts(0, 1, 0, 1, 0, 0, 1, 8, 1, 0.1, null, 3600, 1), []));
     }
 
     public void Dispose() => Directory.Delete(_root, recursive: true);
@@ -9801,9 +9807,10 @@ public sealed class AnalysisWebTests : IDisposable
     string AnalysisDir => Path.Combine(_root, "analysis");
     AnalysisPaths Paths => new(AnalysisDir, "burst");
 
-    static AnalysisEvent Event(string type, DateTimeOffset at, double seconds = 0.4) => new(
-        AnalysisEvent.MakeId(type, "a/2026/10-15/190000", (at - T).TotalSeconds), type, at, at.AddSeconds(seconds), Severities.Medium, 0.9, type, "1",
-        EventSources.Transcript, "a", "a/2026/10-15/190000", (at - T).TotalSeconds, seconds, type + " label", null);
+    static AnalysisEvent Event(string type, DateTimeOffset at, double seconds = 0.4, string? suppressed = null) => new(
+        AnalysisEvent.MakeId(type, "a/2026/10-15/190000", (at - T).TotalSeconds, suppressed), type, at, at.AddSeconds(seconds), Severities.Medium, 0.9, type, "1",
+        EventSources.Transcript, "a", "a/2026/10-15/190000", (at - T).TotalSeconds, seconds, type + " label",
+        type == EventTypes.Swear ? new Dictionary<string, string> { ["suppressed"] = suppressed ?? "no" } : null);
 
     static EventsDocument Day(string scope, params AnalysisEvent[] events) => new(1, "burst", scope, new DateTimeOffset(T.UtcDateTime.Date, TimeSpan.Zero),
         new DateTimeOffset(T.UtcDateTime.Date.AddDays(1), TimeSpan.Zero), T, new Dictionary<string, string>(), [], null, events);
@@ -9822,6 +9829,21 @@ public sealed class AnalysisWebTests : IDisposable
     }
 
     [Fact]
+    public void Suppressed_swear_events_are_review_only_and_left_out_unless_asked_for()
+    {
+        var r = Reader();
+
+        var normal = r.Events(T, T.AddHours(1), "swear");
+        Assert.All(normal, e => Assert.Equal("no", e.Evidence!["suppressed"]));
+        Assert.Single(normal);
+
+        var review = r.Events(T, T.AddHours(1), "swear", includeReview: true);
+        Assert.Equal(2, review.Count);
+        Assert.Single(review, e => e.IsReviewOnly);
+        Assert.Equal(4, r.Events(T, T.AddHours(1), null, includeReview: true).Count);
+    }
+
+    [Fact]
     public void Transcript_lines_and_show_files_are_read()
     {
         var r = Reader();
@@ -9833,6 +9855,21 @@ public sealed class AnalysisWebTests : IDisposable
         Assert.Null(enrichment);
         Assert.Equal(404, Assert.Throws<AnalysisQueryException>(() => r.Show("burst-20261015T2300Z")).StatusCode);
         Assert.Equal(404, Assert.Throws<AnalysisQueryException>(() => r.Show("../../etc")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("burst-20261015T1900Z/..")]
+    [InlineData("burst-20261015T1900Z%2f..")]
+    [InlineData("..\\..\\x")]
+    [InlineData("other-20261015T1900Z")]
+    [InlineData("burst-20261015T1900")]
+    [InlineData("BURST-20261015T1900Z")]
+    [InlineData("burst-20261015T1900Z ")]
+    [InlineData("burst-20261015T1900Z.json")]
+    [InlineData("")]
+    public void Only_ids_of_discovered_shows_reach_the_file_system(string id)
+    {
+        Assert.Equal(404, Assert.Throws<AnalysisQueryException>(() => Reader().Show(id)).StatusCode);
     }
 
     [Theory]
@@ -9869,11 +9906,33 @@ public sealed class AnalysisWebTests : IDisposable
         Assert.Equal(TimeSpan.FromMinutes(35), dead.Start);
         Assert.Equal(TimeSpan.FromMinutes(35).Add(TimeSpan.FromSeconds(8)), dead.End);
         Assert.Equal(2, segments.Count(s => s.Kind == AnalysisMarkers.Talk));
-        foreach (var kind in new[] { EventTypes.Swear, EventTypes.Clipping, EventTypes.Filler, EventTypes.DeadAir, EventTypes.Song, AnalysisMarkers.Talk })
+        foreach (var kind in new[] { EventTypes.Swear, EventTypes.Clipping, EventTypes.Filler, EventTypes.DeadAir, EventTypes.Song, AnalysisMarkers.Talk, AnalysisMarkers.SwearReview })
         {
             Assert.True(AnalysisMarkers.KindLabels.ContainsKey(kind));
             Assert.True(AnalysisMarkers.KindColors.ContainsKey(kind));
         }
+    }
+
+    [Fact]
+    public void A_suppressed_swear_is_never_drawn_as_a_swear_marker()
+    {
+        var clock = new ClipClock([(0, T.AddMinutes(-5))], 4200);
+        var events = Reader().Events(T, T.AddHours(1), null, includeReview: true);
+
+        var markers = AnalysisMarkers.Markers(events, clock);
+
+        Assert.Single(markers, m => m.Kind == EventTypes.Swear);
+        var review = Assert.Single(markers, m => m.Kind == AnalysisMarkers.SwearReview);
+        Assert.Contains("review only", review.Detail);
+        Assert.Contains("probably", AnalysisMarkers.KindLabels[AnalysisMarkers.SwearReview]);
+    }
+
+    [Fact]
+    public void The_web_project_does_not_reference_the_analysis_project()
+    {
+        var referenced = typeof(AnalysisReader).Assembly.GetReferencedAssemblies().Select(a => a.Name);
+        Assert.DoesNotContain("WebAudioArchive.Analysis", referenced);
+        Assert.Contains("WebAudioArchive.Core", referenced);
     }
 
     WebApplicationFactory<WebEntryPoint> Host(bool analysis) => new WebApplicationFactory<WebEntryPoint>().WithWebHostBuilder(b =>
@@ -9894,11 +9953,29 @@ public sealed class AnalysisWebTests : IDisposable
         var body = await events.Content.ReadAsStringAsync();
         Assert.Contains("\"type\":\"swear\"", body);
         Assert.Contains("\"link\":\"/player?from=2026-10-15T19:09:55Z", body);
+        Assert.Equal(1, JsonDocument.Parse(body).RootElement.GetProperty("count").GetInt32());
 
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/analysis/transcript?from=2026-10-15T19:00:00Z&to=2026-10-15T19:30:00Z")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/analysis/shows/burst-20261015T1900Z")).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/analysis/shows/burst-20261016T1900Z")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/analysis/shows/..%2f..%2fetc")).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await client.GetAsync("/api/analysis/events?from=yesterday&to=today")).StatusCode);
+    }
+
+    [Fact]
+    public async Task The_events_endpoint_hides_review_only_swears_unless_asked()
+    {
+        await using var factory = Host(analysis: true);
+        var client = factory.CreateClient();
+        const string range = "from=2026-10-15T19:00:00Z&to=2026-10-15T20:00:00Z&types=swear";
+
+        var normal = JsonDocument.Parse(await client.GetStringAsync("/api/analysis/events?" + range));
+        Assert.Equal(1, normal.RootElement.GetProperty("count").GetInt32());
+        Assert.DoesNotContain("repetition", normal.RootElement.ToString());
+
+        var review = JsonDocument.Parse(await client.GetStringAsync("/api/analysis/events?" + range + "&includeReview=true"));
+        Assert.Equal(2, review.RootElement.GetProperty("count").GetInt32());
+        Assert.Contains("repetition", review.RootElement.ToString());
     }
 
     [Fact]
@@ -9915,7 +9992,7 @@ public sealed class AnalysisWebTests : IDisposable
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisWebTests`
-Expected: build FAILS with `CS0234` for `web::WebAudioArchive.Web.Analysis` and `CS0117` for `AnalysisDir`.
+Expected: build FAILS with `CS0234` for `WebAudioArchive.Web.Analysis` and `CS0246` for `AnalysisReader`.
 
 - [ ] **Step 4: Implement the store, the reader, the markers and the endpoints**
 
@@ -9925,7 +10002,10 @@ using System.Globalization;
 
 namespace WebAudioArchive.Core.Analysis;
 
-/// <summary>Read-only helpers over the analysis folder for readers such as the web app. Damaged files are skipped.</summary>
+/// <summary>
+/// Read-only helpers over the analysis folder for readers such as the web app. Damaged files are skipped. Nothing here
+/// takes a path from a caller: folders are found by listing the analysis tree itself.
+/// </summary>
 public static class AnalysisStore
 {
     /// <summary>Segment result folders for segments filed from the day before <paramref name="fromUtc"/> to the day of <paramref name="toUtc"/>.</summary>
@@ -9964,24 +10044,28 @@ public static class AnalysisStore
 
         return events.OrderBy(e => e.StartUtc).ToList();
     }
+
+    /// <summary>
+    /// The folder of a show's analysis, found by listing the station's shows folder and matching the name exactly, so the id
+    /// a caller gives only ever selects a folder that exists; it is never turned into a path. Null when there is none.
+    /// </summary>
+    public static string? FindShowDir(AnalysisPaths paths, string showId, DateTimeOffset startUtc)
+    {
+        var year = Path.Combine(paths.ShowsDir, startUtc.UtcDateTime.ToString("yyyy", CultureInfo.InvariantCulture));
+        if (!Directory.Exists(year)) return null;
+        return Directory.EnumerateDirectories(year).FirstOrDefault(d => string.Equals(Path.GetFileName(d), showId, StringComparison.Ordinal));
+    }
 }
 ```
 
-In `src/WebAudioArchive.Web/WebSettings.cs`:
-- after `public int DefaultMarginMinutes { get; init; } = 5;` add:
+In `src/WebAudioArchive.Core/Analysis/AnalysisEvent.cs`, in `AnalysisEvent` after `LinkPaddingSeconds`:
 ```csharp
+    /// <summary>A swear hit that detection set aside as probable hallucination (repeated or invented text): for review only, never counted, shown or aggregated as swearing.</summary>
+    [JsonIgnore]
+    public bool IsReviewOnly => Type == EventTypes.Swear && Evidence?.GetValueOrDefault("suppressed") is { } s && s != "no";
+```
 
-    /// <summary>The analysis output folder (WAA_ANALYSIS, read-only), or null when analysis is not set up.</summary>
-    public string? AnalysisDir { get; init; }
-```
-- replace `return new WebSettings(station, recorders, string.IsNullOrWhiteSpace(cache) ? "/cache" : cache.Trim());` with:
-```csharp
-        var analysis = get("WAA_ANALYSIS");
-        return new WebSettings(station, recorders, string.IsNullOrWhiteSpace(cache) ? "/cache" : cache.Trim())
-        {
-            AnalysisDir = string.IsNullOrWhiteSpace(analysis) ? null : analysis.Trim(),
-        };
-```
+In `src/WebAudioArchive.Web/WebSettings.cs`: add `public string? AnalysisDir { get; init; }` (with its summary) after `DefaultMarginMinutes`, and in `Load` replace the final `return new WebSettings(...)` with the same call followed by an initialiser `{ AnalysisDir = string.IsNullOrWhiteSpace(analysis) ? null : analysis.Trim() }` where `var analysis = get("WAA_ANALYSIS");`.
 
 `src/WebAudioArchive.Web/Analysis/AnalysisReader.cs`:
 ```csharp
@@ -9997,7 +10081,17 @@ public sealed class AnalysisQueryException(int statusCode, string message) : Exc
 
 /// <summary>
 /// The web app's read-only view of the analysis output (WAA_ANALYSIS, mounted read-only): events, transcript lines and
-/// show documents for a UTC range or a show id. It never writes there. Access rules for presenters come with plan 4.
+/// show documents for a UTC range or a show id. It never writes there, and no value from a request is turned into a path:
+/// times are parsed, and a show id is parsed and then matched against the folders that exist.
+/// <para>
+/// SECURITY: these endpoints have no sign-in. Like the rest of the web app they must only be published on loopback until
+/// sign-in is added (plan 4a); the transcripts and swear events here are about identifiable presenters. Do not expose them
+/// before that.
+/// </para>
+/// <para>
+/// Swear hits that detection set aside as probable hallucination are review only: <see cref="Events"/> leaves them out unless
+/// <c>includeReview</c> is asked for, and the markers draw them as a different kind.
+/// </para>
 /// </summary>
 public sealed class AnalysisReader(WebSettings settings)
 {
@@ -10020,10 +10114,13 @@ public sealed class AnalysisReader(WebSettings settings)
         return (f, t);
     }
 
-    public IReadOnlyList<AnalysisEvent> Events(DateTimeOffset from, DateTimeOffset to, string? types)
+    public IReadOnlyList<AnalysisEvent> Events(DateTimeOffset from, DateTimeOffset to, string? types, bool includeReview = false)
     {
         var wanted = (types ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.Ordinal);
-        return AnalysisStore.DayEvents(Paths, from, to).Where(e => wanted.Count == 0 || wanted.Contains(e.Type)).ToList();
+        return AnalysisStore.DayEvents(Paths, from, to)
+            .Where(e => wanted.Count == 0 || wanted.Contains(e.Type))
+            .Where(e => includeReview || !e.IsReviewOnly)
+            .ToList();
     }
 
     public IReadOnlyList<TimedLine> Transcript(DateTimeOffset from, DateTimeOffset to) =>
@@ -10031,9 +10128,10 @@ public sealed class AnalysisReader(WebSettings settings)
 
     public (ShowAnalysis? Analysis, ShowEnrichment? Enrichment) Show(string id)
     {
-        if (!ShowOccurrence.TryParseId(id, out var station, out var start) || station != settings.Station)
-            throw new AnalysisQueryException(404, $"There is no show '{id}'.");
-        var dir = Paths.ShowDir(id, start);
+        var paths = Paths;
+        if (!ShowOccurrence.TryParseId(id, out var station, out var start) || station != settings.Station
+            || AnalysisStore.FindShowDir(paths, id, start) is not { } dir)
+            throw new AnalysisQueryException(404, $"There is no analysis for show '{(id.Length > 64 ? id[..64] : id)}'.");
         var analysis = AnalysisJson.TryRead<ShowAnalysis>(Path.Combine(dir, AnalysisPaths.ShowAnalysisFile), out _)
             ?? throw new AnalysisQueryException(404, $"The show {id} has not been analysed yet.");
         return (analysis, AnalysisJson.TryRead<ShowEnrichment>(Path.Combine(dir, AnalysisPaths.EnrichmentFile), out _));
@@ -10073,14 +10171,19 @@ namespace WebAudioArchive.Web.Analysis;
 /// <summary>
 /// Analysis results as PDMediaPlayer markers and segments for a clip (wired into the pages in plan 4). Positions come
 /// from UTC through the clip's clock, so they share the clip's accuracy (about a second). Every label says detected.
+/// A swear hit that detection set aside as probable hallucination is its own kind, <see cref="SwearReview"/>, never a swear.
 /// </summary>
 public static class AnalysisMarkers
 {
     public const string Talk = "talk";
 
+    /// <summary>The marker kind for a suppressed swear hit: probably repeated or invented text, for review only.</summary>
+    public const string SwearReview = "swear-review";
+
     public static readonly IReadOnlyDictionary<string, string> KindLabels = new Dictionary<string, string>
     {
         [EventTypes.Swear] = "Swearing (detected)",
+        [SwearReview] = "Possible swearing, probably invented text (review only)",
         [EventTypes.Clipping] = "Clipping (detected)",
         [EventTypes.Filler] = "Filler word (estimate)",
         [EventTypes.DeadAir] = "Dead air (detected)",
@@ -10091,6 +10194,7 @@ public static class AnalysisMarkers
     public static readonly IReadOnlyDictionary<string, string> KindColors = new Dictionary<string, string>
     {
         [EventTypes.Swear] = "var(--bs-danger)",
+        [SwearReview] = "var(--bs-gray-500)",
         [EventTypes.Clipping] = "var(--bs-warning)",
         [EventTypes.Filler] = "var(--bs-secondary)",
         [EventTypes.DeadAir] = "var(--bs-dark)",
@@ -10103,9 +10207,10 @@ public static class AnalysisMarkers
         {
             Id = "event-" + e.Id,
             Position = clock.ToClip(e.StartUtc),
-            Kind = e.Type,
+            Kind = e.IsReviewOnly ? SwearReview : e.Type,
             Label = $"{e.Label ?? e.Type} at {ClipMarkers.Time(e.StartUtc)}",
-            Detail = string.Create(CultureInfo.InvariantCulture, $"{e.Severity}, confidence {e.Confidence:0.00}, {e.Source} ({e.Detector} {e.DetectorVersion}). Detected, not proven: listen to confirm."),
+            Detail = string.Create(CultureInfo.InvariantCulture, $"{e.Severity}, confidence {e.Confidence:0.00}, {e.Source} ({e.Detector} {e.DetectorVersion}). Detected, not proven: listen to confirm.")
+                + (e.IsReviewOnly ? " Probably repeated or invented text: review only, not counted as swearing." : ""),
         })
         .ToList();
 
@@ -10142,46 +10247,33 @@ public static class AnalysisMarkers
 }
 ```
 
-In `src/WebAudioArchive.Web/Program.cs`:
-- add `using WebAudioArchive.Web.Analysis;` to the usings at the top;
-- after `builder.Services.AddSingleton<RecordingsQuery>();` add `builder.Services.AddSingleton<AnalysisReader>();`;
-- before `app.MapRazorComponents<App>().AddInteractiveServerRenderMode();` add:
+In `src/WebAudioArchive.Web/Program.cs`: add `using WebAudioArchive.Web.Analysis;`; after `builder.Services.AddSingleton<RecordingsQuery>();` add `builder.Services.AddSingleton<AnalysisReader>();`; before `app.MapRazorComponents<App>()...` add:
 ```csharp
 // Analysis results (plan 3), read-only, all times UTC. The player pages use them in plan 4.
+// NO SIGN-IN yet: loopback only until plan 4a adds it (see AnalysisReader). Review-only swear hits are left out unless includeReview=true.
+if (settings.AnalysisDir is not null)
+    app.Logger.LogWarning("Analysis API enabled from {Dir} (read-only). It has no sign-in: publish this port on loopback only until plan 4a.", settings.AnalysisDir);
 app.MapGet("/api/analysis/events", (HttpRequest req, AnalysisReader a) => AnalysisReader.Respond(() =>
 {
     var (from, to) = AnalysisReader.Range(req.Query["from"], req.Query["to"], AnalysisReader.MaxEventsRange);
-    var events = a.Events(from, to, req.Query["types"]);
+    var events = a.Events(from, to, req.Query["types"], string.Equals(req.Query["includeReview"], "true", StringComparison.OrdinalIgnoreCase));
     return new { from, to, count = events.Count, events };
-}));
-app.MapGet("/api/analysis/transcript", (HttpRequest req, AnalysisReader a) => AnalysisReader.Respond(() =>
-{
-    var (from, to) = AnalysisReader.Range(req.Query["from"], req.Query["to"], AnalysisReader.MaxTranscriptRange);
-    var lines = a.Transcript(from, to);
-    return new { from, to, count = lines.Count, lines };
-}));
-app.MapGet("/api/analysis/shows/{id}", (string id, AnalysisReader a) => AnalysisReader.Respond(() =>
-{
-    var (analysis, enrichment) = a.Show(id);
-    return new { analysis, enrichment };
 }));
 ```
 
-In `docker/docker-compose.yml`, in the `web` service's `environment`, add (the web container already mounts the whole data folder read-only at `/data`):
-```yaml
-      # Analysis output (plan 3), read-only through the /data mount.
-      WAA_ANALYSIS: /data/analysis
-```
+(The three `MapGet` calls are in the committed `Program.cs`, between the media endpoint and `MapRazorComponents`.)
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `dotnet test --filter FullyQualifiedName~AnalysisWebTests`
-Expected: PASS, 10 tests. Then `dotnet test`: all pass, including the existing web tests.
+Expected: PASS, 23 tests. Then `dotnet test`: all pass, including the existing web tests.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add src/WebAudioArchive.Core/Analysis/AnalysisStore.cs src/WebAudioArchive.Web/Analysis src/WebAudioArchive.Web/WebSettings.cs src/WebAudioArchive.Web/Program.cs docker/docker-compose.yml tests/WebAudioArchive.Tests/AnalysisWebTests.cs
+git add src/WebAudioArchive.Core/Analysis/AnalysisStore.cs src/WebAudioArchive.Core/Analysis/AnalysisEvent.cs src/WebAudioArchive.Web/Analysis src/WebAudioArchive.Web/WebSettings.cs src/WebAudioArchive.Web/Program.cs tests/WebAudioArchive.Tests/AnalysisWebTests.cs
+git commit -m "Web: read-only analysis API (events, transcript, shows) and PDMediaPlayer marker and segment mapping (#9, #82)"
+```
 git commit -m "Web: read-only analysis API (events, transcript, shows) and PDMediaPlayer marker and segment mapping (#9, #82)"
 ```
 
