@@ -1,0 +1,68 @@
+# Analysis (plan 3): transcripts, detectors, events and show enrichment. Its OWN compose project (name: waa-analysis),
+# separate from the recorder project, so nothing here can recreate, restart or rebuild a recorder or the web app.
+# Below the recorders' priority (nice 10, low CPU shares, capped CPU and memory, killed first under memory pressure).
+# It reads the recorders' folders read-only, writes only data/analysis and a 2 GiB tmpfs scratch, and stops first when
+# free disk falls below WAA_MIN_FREE_GB. whisper.cpp runs inside it (Whisper.net, decision D18): here the CPU build with
+# base.en; docker-compose.gpu.yml switches to the CUDA target and large-v3-turbo. Models come from models/ (see
+# docs/analysis.md). Health: http://127.0.0.1:8095/healthz.
+#   docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
+#   docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+# The schedule cache is the web app's volume, shared read-only. It is external because the web app lives in another
+# compose project; its name is the web project's name plus "_web-cache" (docker_web-cache today). If the recorder
+# project is renamed, set WAA_WEB_CACHE_VOLUME to the new name (docker volume ls).
+name: waa-analysis
+
+services:
+  analysis:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.analysis
+      target: cpu
+    image: webaudioarchive-analysis:local
+    container_name: waa-analysis
+    restart: unless-stopped
+    # A graceful stop finishes or aborts the current chunk and restores the job's attempts before Docker kills it.
+    stop_grace_period: 90s
+    user: "${APP_UID:-1654}"
+    environment:
+      WAA_STATION: burst
+      WAA_RECORDERS: a=/data/a,b=/data/b
+      WAA_ANALYSIS_PREFERENCE: a,b
+      WAA_ANALYSIS_OUT: /analysis
+      WAA_SCRATCH: /scratch
+      WAA_SCRATCH_MAX_MB: "2048"
+      WAA_MIN_FREE_GB: ${WAA_MIN_FREE_GB:-20}
+      WAA_WHISPER_MODEL_PATH: ${WAA_WHISPER_MODEL_PATH:-/models/ggml-base.en.bin}
+      WAA_WHISPER_DEVICE: cpu
+      WAA_WHISPER_THREADS: "4"
+      # host.docker.internal is a private name, so it needs no WAA_OLLAMA_ALLOWED_HOSTS entry.
+      WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://host.docker.internal:11434}
+      WAA_OLLAMA_MODEL: ${WAA_OLLAMA_MODEL:-qwen3.6:latest}
+      WAA_ENRICHMENT: ${WAA_ENRICHMENT:-on}
+      WAA_ANALYSIS_CONFIG: /config/analysis/analysis.json
+      WAA_STATIONS_CONFIG: /config/stations.json
+      WAA_SCHEDULE_FILE: /web-cache/schedule/burst.json
+      WAA_LAG_ALARM_HOURS: "6"
+    volumes:
+      - ${WAA_DATA_DIR:-../data}/a:/data/a:ro
+      - ${WAA_DATA_DIR:-../data}/b:/data/b:ro
+      - ${WAA_DATA_DIR:-../data}/analysis:/analysis
+      - ${WAA_MODELS_DIR:-../models}:/models:ro
+      - ../config:/config:ro
+      - web-cache:/web-cache:ro
+    tmpfs:
+      - /scratch:size=2g,mode=1777
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cpus: 6
+    cpu_shares: 256
+    mem_limit: 6g
+    oom_score_adj: 800
+    pids_limit: 512
+    ports:
+      - "127.0.0.1:8095:8080"
+
+volumes:
+  web-cache:
+    external: true
+    name: ${WAA_WEB_CACHE_VOLUME:-docker_web-cache}

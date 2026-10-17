@@ -225,3 +225,52 @@ Vendored front-end files (served from the container, no CDN, so the app works of
 - Font Awesome Free 5.14.0 (`wwwroot/lib/font-awesome`: `css/all.min.css` and the woff2, woff and ttf fonts), the same
   version the PanoramicData.Blazor demo pins; the library's icons (pager, sort arrows, buttons) need it. Licence file
   beside it: icons CC BY 4.0, fonts SIL OFL 1.1, code MIT.
+
+## Analysis container (plan 3)
+
+The analysis service (transcripts, detectors, events, show enrichment) is its own image (`docker/Dockerfile.analysis`,
+targets `cpu` and `cuda`) and its own compose project, **`waa-analysis`**, defined in
+`docker/docker-compose.analysis.yml`. It is deliberately not part of `docker/docker-compose.yml`, so no command for the
+recorder project can recreate it and no command for this one can touch a recorder or the web app. whisper.cpp runs
+inside it (Whisper.net, decision D18); there is no ffmpeg and no whisper container.
+
+Before the first start (owner actions): download the models into `models/` (gitignored; commands and sha256 values in
+the plan, Task 16 Step 1), create the output folder `data/analysis`, and make sure the web app has saved the schedule
+once (the analysis reads it from the web app's `web-cache` volume, read-only).
+
+What it may touch: `data/a` and `data/b` are mounted read-only; it writes only `data/analysis` and a 2 GiB tmpfs
+scratch; `models/` and `config/` are read-only. It runs as the image's non-root user (UID 1654, set `APP_UID` if your
+`data/analysis` folder is owned by someone else), under `nice 10`, `cpu_shares: 256`, `cpus: 6`, `mem_limit: 6g`,
+`oom_score_adj: 800`. Its `/healthz` is published on `127.0.0.1:8095` only. It reaches Ollama on the host at
+`http://host.docker.internal:11434` (`extra_hosts: host-gateway`; a private name, so it needs no
+`WAA_OLLAMA_ALLOWED_HOSTS`).
+
+**Stopping.** `stop_grace_period` is 90 s (never below 60 s): a graceful stop finishes or aborts the current chunk
+and restores the job's attempts before Docker would kill the container. Use `docker compose ... stop analysis` (or
+`down`) rather than `docker kill`.
+
+Commands (always from the repository root, always naming the service; these never touch the recorders):
+
+    # CPU image, base.en model
+    docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
+    # GPU image (cuda target, large-v3-turbo q8_0, device auto: CUDA first, CPU if no GPU is attached)
+    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+    curl http://127.0.0.1:8095/healthz
+
+The `docker_web-cache` volume belongs to the recorder project (named after its compose project plus `_web-cache`).
+When that project is restructured or renamed, find the new name with `docker volume ls` and set
+`WAA_WEB_CACHE_VOLUME` to it in the shell or in `.env`.
+
+**Showing the analysis in the web app.** The web service needs `WAA_ANALYSIS=/data/analysis` and a read-only view of
+`data/analysis`. That is `docker/docker-compose.web-analysis.yml`, which adds only those two things to the `web`
+service. It must be merged with the existing web service definition (the recorder project's file), never used alone:
+
+    docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml up -d web
+
+(Name only `web`: this recreates the web container, which is rebuilt on its own and never touches a recorder. Do it
+when you may interrupt the web app for a few seconds.) If the recorder project's compose file has moved by then, use
+its new path in place of `docker/docker-compose.yml`. The current web service already mounts `data/` read-only, so
+`data/analysis` is visible read-only there; the override makes the mount and the setting explicit.
+
+CI builds both image targets, checks with `ldd` that the images carry the libraries whisper.cpp links, and validates
+the compose combinations with `docker compose config` (which starts nothing).

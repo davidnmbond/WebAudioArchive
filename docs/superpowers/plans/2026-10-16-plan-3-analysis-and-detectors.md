@@ -202,8 +202,9 @@ tests/WebAudioArchive.Tests/Support/ValidationCorpus.cs     the labelled synthet
 tests/WebAudioArchive.Tests/Support/RepoFiles.cs            deployment file checks
 tests/WebAudioArchive.Tests/*Tests.cs                       one file per task area
 docker/Dockerfile.analysis                                  targets cpu and cuda (D18)
-docker/docker-compose.yml                                   add analysis (recorders untouched)
+docker/docker-compose.analysis.yml                          analysis only, its own compose project (waa-analysis)
 docker/docker-compose.gpu.yml                               GPU override for analysis only
+docker/docker-compose.web-analysis.yml                      web override: WAA_ANALYSIS and a read-only data/analysis mount
 .github/workflows/ci.yml                                    analysis image builds (cpu and cuda targets)
 docs/analysis.md                                            how analysis works, files, schemas, operations
 docs/analysis-validation.md                                 thresholds, synthetic and real-sample results
@@ -450,7 +451,7 @@ public sealed class AnalysisSettingsException(string message) : Exception(messag
 
 /// <summary>
 /// Analysis service settings, from environment variables (or any configuration source with the same names). Every
-/// problem names the setting. Defaults are the values used in docker/docker-compose.yml.
+/// problem names the setting. Defaults are the values used in docker/docker-compose.analysis.yml.
 /// </summary>
 public sealed partial record AnalysisSettings(
     string Station,
@@ -9377,23 +9378,22 @@ git commit -m "Analysis service: single work lane, lag and realtime factor in /h
 
 ---
 
-### Task 16: Containers: the analysis image (CPU and CUDA targets, whisper in process), compose, the GPU override and CI
-
-> **Carry-forwards from Tasks 15 and 17 (review rounds):** the analysis compose service needs `stop_grace_period: 60s` or more (a stop abandons the chunk in hand cleanly; a kill uses an attempt, and five parks the segment until `--unpark`); give it `WAA_OLLAMA_TIMEOUT_MINUTES` only if the default 20 is not right; the web service environment gets `WAA_ANALYSIS: /data/analysis` (Task 17 deferred this compose edit). The analysis container mounts the recorders read-only and must never get `WAA_SCRATCH` or `WAA_ANALYSIS_OUT` inside them (the service refuses to start).
+### Task 16: Containers: the analysis image (CPU and CUDA targets, whisper in process), its own compose project, the GPU override, the web override and CI
 
 **Files:**
-- Create: `docker/Dockerfile.analysis`, `docker/docker-compose.gpu.yml`
-- Modify: `docker/docker-compose.yml` (add `analysis`; the recorder and web services are not changed), `.github/workflows/ci.yml`
-
-Decision D18: there is no whisper container, no `Dockerfile.whisper` and no CUDA build workflow; whisper.cpp comes as prebuilt native libraries in the Whisper.net runtime packages, and the GPU image only adds NVIDIA's CUDA 13.0 runtime and cuBLAS packages.
+- Create: `docker/Dockerfile.analysis`, `docker/docker-compose.analysis.yml`, `docker/docker-compose.gpu.yml`, `docker/docker-compose.web-analysis.yml`
+- Modify: `.github/workflows/ci.yml`, `docs/operations.md` (an "Analysis container" section). **`docker/docker-compose.yml` is not changed** (binding change after the plan was written: another session restructures it into its own recorder compose project, so analysis lives in its own file and project).
 - Create: `tests/WebAudioArchive.Tests/Support/RepoFiles.cs`
 - Test: `tests/WebAudioArchive.Tests/DeploymentFilesTests.cs`
 
+Decision D18: there is no whisper container, no `Dockerfile.whisper` and no CUDA build workflow; whisper.cpp comes as prebuilt native libraries in the Whisper.net runtime packages, and the GPU image only adds NVIDIA's CUDA 13.0 runtime and cuBLAS packages.
+
 **Interfaces:**
 - Consumes: the service from Task 15 (`--healthcheck`, port 8080, settings names).
-- Produces: images `webaudioarchive-analysis:local` (target `cpu`) and `webaudioarchive-analysis:cuda` (target `cuda`); container `waa-analysis` (health on `http://127.0.0.1:8095/healthz`); host folders `data/analysis` (output) and `models/` (whisper models, read-only in the container at `/models`). Test helper `RepoFiles.Root` and `RepoFiles.ComposeServices(string relativePath)` (service name to its YAML block).
+- Produces: images `webaudioarchive-analysis:local` (target `cpu`) and `webaudioarchive-analysis:cuda` (target `cuda`); compose project `waa-analysis` with container `waa-analysis` (health on `http://127.0.0.1:8095/healthz`); host folders `data/analysis` (output) and `models/` (whisper models, read-only at `/models`). Binding carry-forwards: `stop_grace_period` 90 s (never below 60 s: a graceful stop finishes or aborts a chunk and restores attempts before Docker kills it); the web service gets `WAA_ANALYSIS: /data/analysis` and a read-only `data/analysis` mount through `docker-compose.web-analysis.yml`, merged with the recorder project's web service (command in `docs/operations.md`); the cuda target runs with `WAA_WHISPER_DEVICE: auto` so that it falls back to the CPU runtime without a GPU (an explicit `cuda` would not). The shared `web-cache` volume is external (`docker_web-cache`, overridable with `WAA_WEB_CACHE_VOLUME`). Test helper `RepoFiles.Root` and `RepoFiles.ComposeServices(string relativePath)`.
 
 - [ ] **Step 1: Download the whisper models (owner action, about 1 GB, not committed)**
+
 
 Run:
 ```powershell
@@ -9406,6 +9406,7 @@ curl.exe -L --fail -o models/ggml-base.en.bin "$hf/ggml-base.en.bin"
 git status --short models
 ```
 Expected: the two hashes are `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1` and `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002`; sizes 874,188,075 and 147,964,211 bytes; `git status` prints nothing (the folder is ignored, Task 1). A different hash means a different file: stop and check the URL.
+
 
 - [ ] **Step 2: Write the repository file helper and the failing tests**
 
@@ -9480,36 +9481,65 @@ namespace WebAudioArchive.Tests;
 /// <summary>The deployment rules that keep the recorders safe, checked on the files so a later edit cannot quietly break them.</summary>
 public class DeploymentFilesTests
 {
+    const string AnalysisFile = "docker/docker-compose.analysis.yml";
     static readonly Dictionary<string, string> Compose = RepoFiles.ComposeServices("docker/docker-compose.yml");
+    static readonly Dictionary<string, string> Analysis = RepoFiles.ComposeServices(AnalysisFile);
 
     [Fact]
     public void Analysis_reads_the_recordings_read_only_and_writes_only_its_own_folder()
     {
-        var a = Compose["analysis"];
+        var a = Analysis["analysis"];
 
         Assert.Contains("/a:/data/a:ro", a);
         Assert.Contains("/b:/data/b:ro", a);
         Assert.Contains("/analysis:/analysis", a);
         Assert.Contains("web-cache:/web-cache:ro", a);
         Assert.Contains("../config:/config:ro", a);
-        Assert.Contains("/models:/models:ro", a);
+        Assert.Contains(":/models:ro", a);
         foreach (var mount in a.Split('\n').Where(l => l.Contains(":/data", StringComparison.Ordinal)))
             Assert.EndsWith(":ro", mount.Trim());
         Assert.Contains("/scratch:size=2g", a);
+        Assert.Contains("host.docker.internal:host-gateway", a);
     }
 
     [Fact]
     public void Analysis_runs_below_the_recorders_and_whisper_has_no_container_of_its_own()
     {
-        var a = Compose["analysis"];
+        var a = Analysis["analysis"];
         Assert.Contains("cpu_shares: 256", a);
         Assert.Contains("oom_score_adj: 800", a);
         Assert.Contains("mem_limit:", a);
         Assert.Contains("cpus:", a);
         Assert.DoesNotContain("depends_on", a);
-        Assert.False(Compose.ContainsKey("whisper"), "whisper runs inside the analysis process since decision D18");
+        Assert.False(Analysis.ContainsKey("whisper"), "whisper runs inside the analysis process since decision D18");
+        Assert.False(Compose.ContainsKey("whisper"));
 
         Assert.Contains("\"nice\", \"-n\", \"10\"", RepoFiles.Read("docker/Dockerfile.analysis"));
+    }
+
+    [Fact]
+    public void Analysis_gets_time_to_stop_gracefully_is_non_root_and_published_on_loopback_only()
+    {
+        var a = Analysis["analysis"];
+
+        var grace = a.Split('\n').Single(l => l.TrimStart().StartsWith("stop_grace_period:", StringComparison.Ordinal));
+        var seconds = int.Parse(grace.Split(':')[1].Trim().TrimEnd('s'));
+        Assert.True(seconds >= 60, "a graceful stop must be able to finish or abort a chunk and restore attempts before Docker kills the container");
+        Assert.Contains("restart: unless-stopped", a);
+        Assert.Contains("user:", a);
+        Assert.Contains("\"127.0.0.1:8095:8080\"", a);
+        Assert.Contains("WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://host.docker.internal:11434}", a);
+    }
+
+    [Fact]
+    public void Analysis_is_its_own_compose_project_and_shares_only_the_web_cache()
+    {
+        var text = RepoFiles.Read(AnalysisFile);
+
+        Assert.Matches("(?m)^name: waa-analysis$", text);
+        Assert.Contains("external: true", text);
+        Assert.Equal(new[] { "analysis" }, Analysis.Keys.Order(StringComparer.Ordinal));
+        Assert.False(Compose.ContainsKey("analysis"), "analysis lives in docker-compose.analysis.yml, not in the recorder project");
     }
 
     [Fact]
@@ -9524,15 +9554,28 @@ public class DeploymentFilesTests
     }
 
     [Fact]
-    public void The_gpu_override_changes_only_analysis()
+    public void The_gpu_override_changes_only_analysis_and_falls_back_to_the_cpu()
     {
         var gpu = RepoFiles.ComposeServices("docker/docker-compose.gpu.yml");
 
         Assert.Equal(new[] { "analysis" }, gpu.Keys.Order(StringComparer.Ordinal));
         Assert.Contains("capabilities: [gpu]", gpu["analysis"]);
         Assert.Contains("target: cuda", gpu["analysis"]);
-        Assert.Contains("WAA_WHISPER_DEVICE: cuda", gpu["analysis"]);
+        Assert.Contains("WAA_WHISPER_DEVICE: auto", gpu["analysis"]);
+        Assert.DoesNotContain("WAA_WHISPER_DEVICE: cuda", gpu["analysis"]);
         Assert.Contains("ggml-large-v3-turbo-q8_0.bin", gpu["analysis"]);
+    }
+
+    [Fact]
+    public void The_web_override_adds_only_the_analysis_setting_and_a_read_only_mount()
+    {
+        var web = RepoFiles.ComposeServices("docker/docker-compose.web-analysis.yml");
+
+        Assert.Equal(new[] { "web" }, web.Keys.Order(StringComparer.Ordinal));
+        Assert.Contains("WAA_ANALYSIS: /data/analysis", web["web"]);
+        Assert.Contains("/analysis:/data/analysis:ro", web["web"]);
+        Assert.DoesNotContain("ports:", web["web"]);
+        Assert.DoesNotContain("image:", web["web"]);
     }
 
     [Fact]
@@ -9561,22 +9604,23 @@ public class DeploymentFilesTests
 }
 ```
 
+
 - [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `dotnet test --filter FullyQualifiedName~DeploymentFilesTests`
-Expected: FAIL: `KeyNotFoundException` for `analysis` (the compose file has no such service yet) and file-not-found for the new Dockerfile and override; `Models_and_data_are_never_committed` and `Recorders_are_untouched_by_analysis` pass.
+Expected: FAIL (the analysis compose file, override files and Dockerfile do not exist yet); `Models_and_data_are_never_committed` and `Recorders_are_untouched_by_analysis` pass.
 
-- [ ] **Step 4: Write the image, the compose service, the override and CI**
+- [ ] **Step 4: Write the image, the compose files, the overrides, CI and the operations section**
 
 `docker/Dockerfile.analysis`:
 ```dockerfile
 # The analysis service (plan 3). Its own image and container: it never shares a process or an image with a recorder.
 # Decision D18: MP3 decoding is managed code and whisper.cpp runs in process through Whisper.net, so nothing is compiled
 # here beyond the .NET publish.
-#   target cpu  (docker-compose.yml): the aspnet image plus the OpenMP runtime that whisper.cpp's CPU library links.
+#   target cpu  (docker-compose.analysis.yml): the aspnet image plus the OpenMP runtime that whisper.cpp's CPU library links.
 #   target cuda (docker-compose.gpu.yml): adds the CUDA 13.0 runtime and cuBLAS from NVIDIA's Ubuntu 24.04 repository
 #               (the two libraries Whisper.net's CUDA runtime links); the NVIDIA container toolkit supplies the driver.
-# Build and restart only it: docker compose -f docker/docker-compose.yml up -d --build analysis
+# Build and restart only it: docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY global.json Directory.Build.props ./
@@ -9623,16 +9667,23 @@ COPY --from=build /cuda/cuda /app/runtimes/cuda
 USER $APP_UID
 ```
 
-In `docker/docker-compose.yml`, add this service after the `web` service and before the top-level `volumes:` key (leave every existing line as it is):
+`docker/docker-compose.analysis.yml`:
 ```yaml
+# Analysis (plan 3): transcripts, detectors, events and show enrichment. Its OWN compose project (name: waa-analysis),
+# separate from the recorder project, so nothing here can recreate, restart or rebuild a recorder or the web app.
+# Below the recorders' priority (nice 10, low CPU shares, capped CPU and memory, killed first under memory pressure).
+# It reads the recorders' folders read-only, writes only data/analysis and a 2 GiB tmpfs scratch, and stops first when
+# free disk falls below WAA_MIN_FREE_GB. whisper.cpp runs inside it (Whisper.net, decision D18): here the CPU build with
+# base.en; docker-compose.gpu.yml switches to the CUDA target and large-v3-turbo. Models come from models/ (see
+# docs/analysis.md). Health: http://127.0.0.1:8095/healthz.
+#   docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
+#   docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+# The schedule cache is the web app's volume, shared read-only. It is external because the web app lives in another
+# compose project; its name is the web project's name plus "_web-cache" (docker_web-cache today). If the recorder
+# project is renamed, set WAA_WEB_CACHE_VOLUME to the new name (docker volume ls).
+name: waa-analysis
 
-  # Analysis (plan 3): transcripts, detectors, events and show enrichment. Its own image and container, below the
-  # recorders' priority (nice 10, low CPU shares, capped CPU and memory, killed first under memory pressure). It reads
-  # the recorders' folders read-only, writes only data/analysis and a 2 GiB tmpfs scratch, and stops first when free
-  # disk falls below WAA_MIN_FREE_GB. whisper.cpp runs inside it (Whisper.net, decision D18): here the CPU build with
-  # base.en; docker-compose.gpu.yml switches to the CUDA target and large-v3-turbo. Models come from models/ (see
-  # docs/analysis.md). Health: http://127.0.0.1:8095/healthz. Always name the service:
-  #   docker compose -f docker/docker-compose.yml up -d --build analysis
+services:
   analysis:
     build:
       context: ..
@@ -9641,6 +9692,9 @@ In `docker/docker-compose.yml`, add this service after the `web` service and bef
     image: webaudioarchive-analysis:local
     container_name: waa-analysis
     restart: unless-stopped
+    # A graceful stop finishes or aborts the current chunk and restores the job's attempts before Docker kills it.
+    stop_grace_period: 90s
+    user: "${APP_UID:-1654}"
     environment:
       WAA_STATION: burst
       WAA_RECORDERS: a=/data/a,b=/data/b
@@ -9652,6 +9706,7 @@ In `docker/docker-compose.yml`, add this service after the `web` service and bef
       WAA_WHISPER_MODEL_PATH: ${WAA_WHISPER_MODEL_PATH:-/models/ggml-base.en.bin}
       WAA_WHISPER_DEVICE: cpu
       WAA_WHISPER_THREADS: "4"
+      # host.docker.internal is a private name, so it needs no WAA_OLLAMA_ALLOWED_HOSTS entry.
       WAA_OLLAMA_URL: ${WAA_OLLAMA_URL:-http://host.docker.internal:11434}
       WAA_OLLAMA_MODEL: ${WAA_OLLAMA_MODEL:-qwen3.6:latest}
       WAA_ENRICHMENT: ${WAA_ENRICHMENT:-on}
@@ -9677,15 +9732,21 @@ In `docker/docker-compose.yml`, add this service after the `web` service and bef
     pids_limit: 512
     ports:
       - "127.0.0.1:8095:8080"
+
+volumes:
+  web-cache:
+    external: true
+    name: ${WAA_WEB_CACHE_VOLUME:-docker_web-cache}
 ```
 
 `docker/docker-compose.gpu.yml`:
 ```yaml
 # GPU override (spec 5, decisions D1 to D4 and D18): the analysis image's cuda target with whisper.cpp on the NVIDIA GPU,
 # large-v3-turbo (q8_0), flash attention on and DTW off (D18: DTW cut 300 s requests short in the spike). It changes
-# only analysis:
-#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
-# Never run it without naming the service, so the recorders are never rebuilt or restarted by it.
+# only analysis and is applied on top of docker-compose.analysis.yml (never the recorder file):
+#   docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+# The cuda image falls back to the CPU runtime when no GPU is attached (after a slow first load attempt), so
+# WAA_WHISPER_DEVICE here is auto: CUDA first, CPU otherwise.
 services:
   analysis:
     build:
@@ -9693,7 +9754,7 @@ services:
     image: webaudioarchive-analysis:cuda
     environment:
       WAA_WHISPER_MODEL_PATH: /models/ggml-large-v3-turbo-q8_0.bin
-      WAA_WHISPER_DEVICE: cuda
+      WAA_WHISPER_DEVICE: auto
     deploy:
       resources:
         reservations:
@@ -9703,38 +9764,61 @@ services:
               capabilities: [gpu]
 ```
 
+`docker/docker-compose.web-analysis.yml`:
+```yaml
+# Web override: lets the web app read the analysis output (events, transcripts, shows). It adds only an environment
+# setting and a read-only mount to the web service, and is meant to be merged with the recorder project's compose file:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml up -d web
+# (always name the service; see docs/operations.md). The web app never writes analysis files.
+services:
+  web:
+    environment:
+      WAA_ANALYSIS: /data/analysis
+    volumes:
+      - ${WAA_DATA_DIR:-../data}/analysis:/data/analysis:ro
+```
+
 In `.github/workflows/ci.yml`, in the `docker` job, add after the existing two `docker build` lines (the `ldd` checks prove the images carry the libraries whisper.cpp links; `libcuda` itself comes from the driver at run time, so it is not checked):
 ```yaml
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f docker/Dockerfile -t webaudioarchive:ci .
+      - run: docker build -f docker/Dockerfile.web -t webaudioarchive-web:ci .
       - run: docker build -f docker/Dockerfile.analysis --target cpu -t webaudioarchive-analysis:ci .
       - run: docker run --rm --entrypoint sh webaudioarchive-analysis:ci -c "! ldd /app/runtimes/linux-x64/libggml-cpu-whisper.so | grep -E 'libgomp[^ ]* => not found'"
       - run: docker build -f docker/Dockerfile.analysis --target cuda -t webaudioarchive-analysis:ci-cuda .
       - run: docker run --rm --entrypoint sh webaudioarchive-analysis:ci-cuda -c "! ldd /app/runtimes/cuda/linux-x64/libggml-cuda-whisper.so | grep -E 'lib(cudart|cublas)[^ ]* => not found'"
-      - run: docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml config --quiet
+      - run: docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml config --quiet
+      - run: docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml config --quiet
 ```
+
+Add the "Analysis container" section to `docs/operations.md` (the project, the read-only and write rules, the 90 s stop grace, the start commands, the `WAA_WEB_CACHE_VOLUME` note and the web override command with how it merges with the existing web service).
 
 - [ ] **Step 5: Run the tests, then build both targets locally**
 
-Run: `dotnet test --filter FullyQualifiedName~DeploymentFilesTests`
-Expected: PASS, 6 tests.
+Run: `dotnet test --filter FullyQualifiedName~DeploymentFilesTests` Expected: PASS, 9 tests.
 
-Run:
+Run (`docker compose config` only validates and starts nothing; no compose command may start or recreate anything while recorders are live):
 ```powershell
-docker compose -f docker/docker-compose.yml config --quiet
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml config --quiet
+docker compose -f docker/docker-compose.analysis.yml config --quiet
+docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml config --quiet
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml config --quiet
 docker build -f docker/Dockerfile.analysis --target cpu -t webaudioarchive-analysis:local .
 docker build -f docker/Dockerfile.analysis --target cuda -t webaudioarchive-analysis:cuda .
 docker run --rm --entrypoint sh webaudioarchive-analysis:local -c "ls /app/runtimes; ! ldd /app/runtimes/linux-x64/libggml-cpu-whisper.so | grep -E 'libgomp[^ ]* => not found'"
 docker run --rm --entrypoint sh webaudioarchive-analysis:cuda -c "! ldd /app/runtimes/cuda/linux-x64/libggml-cuda-whisper.so | grep -E 'lib(cudart|cublas)[^ ]* => not found'"
 docker images webaudioarchive-analysis --format "{{.Tag}} {{.Size}}"
-docker compose -f docker/docker-compose.yml ps
+docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
-Expected: both `config` commands print nothing (valid); both builds succeed (the cuda build downloads about 1.3 GB from NVIDIA the first time); `ls` prints `linux-x64` only in the cpu image; the `ldd` checks exit 0; sizes about 380 MB (`local`) and about 1.9 GB (`cuda`), as measured for D18; `ps` still shows `waa-recorder-a`, `waa-recorder-b` and `waa-web` with their original uptime (nothing above restarted them). Starting the service is Task 19.
+Expected: the `config` commands print nothing; both builds succeed (the cuda build downloads about 1.3 GB from NVIDIA the first time); `ls` prints `linux-x64` only; the `ldd` checks exit 0; `ps` shows `waa-recorder-a`, `waa-recorder-b` and `waa-web` with their original uptime. Starting the service is Task 19.
 
 - [ ] **Step 6: Commit**
 
 ```powershell
-git add docker/Dockerfile.analysis docker/docker-compose.yml docker/docker-compose.gpu.yml .github/workflows/ci.yml tests/WebAudioArchive.Tests/Support/RepoFiles.cs tests/WebAudioArchive.Tests/DeploymentFilesTests.cs
-git commit -m "Analysis container (cpu and cuda targets, whisper in process), GPU override, resource limits below the recorders, CI image builds (#76, #77, #85)"
+git add docker/Dockerfile.analysis docker/docker-compose.analysis.yml docker/docker-compose.gpu.yml docker/docker-compose.web-analysis.yml .github/workflows/ci.yml docs/operations.md tests/WebAudioArchive.Tests/Support/RepoFiles.cs tests/WebAudioArchive.Tests/DeploymentFilesTests.cs docs/superpowers/plans/2026-10-16-plan-3-analysis-and-detectors.md
+git commit -m "Analysis container (cpu and cuda targets, whisper in process) in its own compose project, GPU and web overrides, CI image builds (#76, #77, #85)"
 ```
 
 ### Task 17: Web integration points (read-only data API for the player)
@@ -9746,7 +9830,7 @@ The web app gets read-only access to the analysis output so plan 4 can draw mark
 - Modify: `src/WebAudioArchive.Core/Analysis/AnalysisEvent.cs` (`IsReviewOnly`)
 - Create: `src/WebAudioArchive.Web/Analysis/AnalysisReader.cs`, `src/WebAudioArchive.Web/Analysis/AnalysisMarkers.cs`
 - Modify: `src/WebAudioArchive.Web/WebSettings.cs` (add `AnalysisDir`), `src/WebAudioArchive.Web/Program.cs` (register the reader, map three endpoints)
-- **Deferred to Task 16, not done here (another session owns compose):** `docker/docker-compose.yml`, web service `environment`: `WAA_ANALYSIS: /data/analysis` plus a comment (the web container already mounts the whole data folder read-only at `/data`).
+- **Done in Task 16 (another session owns docker-compose.yml, so it is not edited):** `docker/docker-compose.web-analysis.yml` adds `WAA_ANALYSIS: /data/analysis` and a read-only `data/analysis` mount to the web service; merge it with the recorder project's file (see `docs/operations.md`).
 - Test: `tests/WebAudioArchive.Tests/AnalysisWebTests.cs`
 
 **Review changes to the first draft (binding):**
@@ -10681,7 +10765,7 @@ with the web Player and write every filler, swear, clip and dead air you hear in
 data/analysis/validation/labels-<date>.csv (columns type,startUtc,endUtc,note; UTC times ending in Z; types filler,
 swear, clipping, dead-air). Then run, for the same range:
 
-    docker compose -f docker/docker-compose.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --validate /analysis/validation/labels-<date>.csv <fromUtc> <toUtc>
+    docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --validate /analysis/validation/labels-<date>.csv <fromUtc> <toUtc>
 
 and paste the two tables here with the date, the range, the presenters' show names and the model in use.
 
@@ -10709,7 +10793,7 @@ git commit -m "Detector validation: labelled synthetic sample in CI, --validate 
 Run:
 ```powershell
 docker compose -f docker/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}"
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
 docker compose -f docker/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}"
 docker exec waa-analysis nvidia-smi --query-gpu=name,driver_version,memory.used --format=csv
 curl.exe -s http://127.0.0.1:8095/healthz
@@ -10722,7 +10806,7 @@ Run (any closed hour from recorder A):
 ```powershell
 $seg = (Get-ChildItem data/a/burst/master -Recurse -Filter *.mp3 | Sort-Object LastWriteTime | Select-Object -Last 2 | Select-Object -First 1)
 $rel = $seg.FullName.Substring((Resolve-Path data/a).Path.Length).Replace('\', '/')
-docker compose -f docker/docker-compose.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --benchmark "/data/a$rel" 600
+docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --benchmark "/data/a$rel" 600
 nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv
 ```
 Expected: a line `benchmark: whisper.net 1.9.1 (cuda) ggml-large-v3-turbo-q8_0: 600.0 s of audio in 2 chunks, decode ... s, transcribe ... s, realtime factor 0.0xx (...)`. The engine must say `(cuda)`; `(cpu)` means the CUDA runtime did not load (see Step 1). Record the figure. Pass: realtime factor at most 0.2 (5 times faster than real time, so a day of audio takes under 5 hours); the D18 spike measured 0.035 (28x) for speech in a container. If it is above 0.2, check that the host CPU is not saturated (whisper.cpp's threads starve under full load, D18) and try `WAA_WHISPER_THREADS` 2 or 6; record each figure. Run the benchmark a second time while Ollama is enriching (watch `docker logs -f waa-analysis` for "Enriched") and record that figure too: it shows the cost of sharing the GPU.
@@ -10746,13 +10830,13 @@ Expected: `gaps=0` for every line (or the same gaps as before analysis started, 
 
 Run:
 ```powershell
-$env:WAA_MIN_FREE_GB = "100000"; docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d analysis
+$env:WAA_MIN_FREE_GB = "100000"; docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d analysis
 Start-Sleep -Seconds 90; curl.exe -s http://127.0.0.1:8095/healthz
 Remove-Item Env:WAA_MIN_FREE_GB
-$env:WAA_OLLAMA_URL = "http://host.docker.internal:1"; docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d analysis
+$env:WAA_OLLAMA_URL = "http://host.docker.internal:1"; docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d analysis
 Start-Sleep -Seconds 120; Get-ChildItem data/analysis/burst/shows -Recurse -Filter enrichment.json | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content
 Remove-Item Env:WAA_OLLAMA_URL
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d analysis
+docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d analysis
 ```
 Expected: with the huge threshold `/healthz` says `"status":"paused"` and `"paused":"free disk below ..."` and no job runs; with Ollama unreachable a newly finished show's `enrichment.json` is `"status":"pending"` with `nextAttemptUtc`; after the last command both recover (the pending show becomes `done` on a later pass). The recorders were never restarted (check `ps` as in Step 1).
 
@@ -10775,7 +10859,7 @@ scratch, decodes the copy, and writes only under `data/analysis`. All times are 
 
 First time, or after a change to analysis (always name the service; never touch the recorders):
 
-    docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
 
 Without an NVIDIA GPU leave out the second `-f` file: the image is then the cpu target and whisper runs on the CPU with
 `base.en`, which is far slower and needs a host that is not otherwise busy (a day of audio can take longer than a day;
@@ -10830,9 +10914,9 @@ The player markers and segments are built from these in plan 4.
 
 ## Commands
 
-    docker compose -f docker/docker-compose.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --benchmark /data/a/burst/master/<yyyy>/<MM-dd>/<HHmmss>.mp3 600
-    docker compose -f docker/docker-compose.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --rebuild
-    docker compose -f docker/docker-compose.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --validate /analysis/validation/<labels>.csv <fromUtc> <toUtc>
+    docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --benchmark /data/a/burst/master/<yyyy>/<MM-dd>/<HHmmss>.mp3 600
+    docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --rebuild
+    docker compose -f docker/docker-compose.analysis.yml exec analysis dotnet WebAudioArchive.Analysis.Service.dll --validate /analysis/validation/<labels>.csv <fromUtc> <toUtc>
 
 ## Settings (environment)
 
@@ -10863,7 +10947,7 @@ In `docs/operations.md` append:
 
 Container `waa-analysis` (whisper.cpp runs inside it), separate from the recorders and the web app. Start or upgrade only it:
 
-    docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
 
 They read `data/a` and `data/b` read-only and write only `data/analysis` (the web app reads it read-only through its
 `/data` mount, `WAA_ANALYSIS=/data/analysis`). Analysis runs at nice 10 with low CPU shares, at most 6 CPUs and 6 GB,

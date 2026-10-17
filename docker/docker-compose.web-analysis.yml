@@ -1,0 +1,10 @@
+# Web override: lets the web app read the analysis output (events, transcripts, shows). It adds only an environment
+# setting and a read-only mount to the web service, and is meant to be merged with the recorder project's compose file:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml up -d web
+# (always name the service; see docs/operations.md). The web app never writes analysis files.
+services:
+  web:
+    environment:
+      WAA_ANALYSIS: /data/analysis
+    volumes:
+      - ${WAA_DATA_DIR:-../data}/analysis:/data/analysis:ro
