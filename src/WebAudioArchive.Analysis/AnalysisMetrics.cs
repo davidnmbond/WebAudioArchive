@@ -1,3 +1,4 @@
+using WebAudioArchive.Core.Analysis;
 using WebAudioArchive.Analysis.Work;
 
 namespace WebAudioArchive.Analysis;

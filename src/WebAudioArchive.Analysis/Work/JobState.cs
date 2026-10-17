@@ -2,14 +2,6 @@ using WebAudioArchive.Core.Analysis;
 
 namespace WebAudioArchive.Analysis.Work;
 
-public static class JobStatus
-{
-    public const string Running = "running";
-    public const string Waiting = "waiting";
-    public const string Done = "done";
-    public const string Failed = "failed";
-}
-
 /// <summary>
 /// state.json beside a segment's results: what it was made from (fingerprint and versions), how far it got (chunks
 /// done) and, when it failed or is waiting, why and when to try again. A crash leaves "running", which resumes.

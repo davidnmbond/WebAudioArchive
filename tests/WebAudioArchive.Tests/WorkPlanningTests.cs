@@ -1,3 +1,4 @@
+using WebAudioArchive.Core.Analysis;
 using Microsoft.Extensions.Logging.Abstractions;
 using WebAudioArchive.Analysis.Settings;
 using WebAudioArchive.Analysis.Work;
