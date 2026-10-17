@@ -136,6 +136,51 @@ public sealed class MergedHourWriterTests : IDisposable
     }
 
     [Fact]
+    public void A_sidecar_that_cannot_be_written_leaves_no_audio_published()
+    {
+        var plan = PlanMixed();
+        Directory.CreateDirectory(Path.ChangeExtension(Mp3, ".json")); // a directory where the sidecar must go
+
+        Assert.ThrowsAny<Exception>(() => MergedHourWriter.Write(plan, Merged, "burst"));
+
+        Assert.False(File.Exists(Mp3));
+        Assert.False(File.Exists(Mp3 + ".part"));
+        Assert.False(File.Exists(Path.ChangeExtension(Mp3, ".json") + ".tmp"));
+    }
+
+    [Fact]
+    public void A_tail_that_cannot_be_found_starts_the_hour_by_time_and_the_sidecar_says_so()
+    {
+        Hours("a", hours: 3);
+        var plan = HourMerger.Plan(T0, Scan("a"), [], [1UL, 2UL, 3UL])!;
+        Assert.True(plan.StartedByTime);
+        Assert.True(MergedHourWriter.Write(plan, Merged, "burst").Merge!.JoinedByTime);
+        Assert.False(HourMerger.Plan(T0, Scan("a"), [], [])!.StartedByTime);
+    }
+
+    [Fact]
+    public void Hours_joined_after_dead_air_that_began_long_before_the_boundary_repeat_and_drop_nothing()
+    {
+        // 190 s of silence starting 110 s before 11:00: the tail's run is far longer than the 30 s read margin.
+        var silence = (SeqAt(3490), SeqAt(3790));
+        Hours("a", hours: 4, silence: silence);
+        Hours("b", hours: 4, silence: silence);
+        Skew("b", 0.4);
+
+        var first = HourMerger.Plan(T0, [], Scan("b"), [])!;
+        MergedHourWriter.Write(first, Merged, "burst");
+        var second = HourMerger.Plan(T0.AddHours(1), Scan("a"), Scan("b"), MergedHourWriter.Tail(Mp3))!;
+
+        Assert.False(second.StartedByTime);
+        var one = SegmentFiles.Seqs(File.ReadAllBytes(Mp3));
+        var two = SegmentFiles.Seqs([.. second.Pieces.SelectMany(p => File.ReadAllBytes(p.Source.AudioPath)[(int)p.StartByte..(int)p.EndByte])]);
+        var joined = one.Concat(two).ToList();
+        var expected = Enumerable.Range(one[0], joined.Count)
+            .Select(n => n >= silence.Item1 && n < silence.Item2 ? SegmentFiles.SilenceSeq : n);
+        Assert.Equal(expected, joined);
+    }
+
+    [Fact]
     public void Tail_is_the_trailing_run_of_identical_frames_and_the_frames_before_it()
     {
         var silence = (SeqAt(3590), SeqAt(3700));

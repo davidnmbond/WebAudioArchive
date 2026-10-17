@@ -17,13 +17,14 @@ public sealed record MergeSource(string Recorder, string File, int FirstFrame, i
 /// <summary>A source file used by a merge, with its checksum.</summary>
 public sealed record MergeInput(string Recorder, string File, string Sha256, long Bytes);
 
-/// <summary>How a merged hour was built from the A and B recordings. Sha256 is the checksum of the merged audio.</summary>
+/// <summary>How a merged hour was built from the A and B recordings. Sha256 is the checksum of the merged audio. JoinedByTime is true when the hour could not be joined to the previous one by its frames and started at the clock time instead.</summary>
 public sealed record MergeInfo(
     IReadOnlyList<MergeSource> Sources,
     IReadOnlyList<MergeInput> Inputs,
     string Sha256,
     int FramesFromA,
-    int FramesFromB);
+    int FramesFromB,
+    bool JoinedByTime = false);
 
 /// <summary>
 /// Sidecar for one master segment. EndedBy is hour-boundary, shutdown or crash. A merged hour has Instance "merged",

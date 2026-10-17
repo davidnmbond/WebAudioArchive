@@ -15,7 +15,7 @@ public sealed record MergedPiece(
 /// What a merged hour is made of: its pieces in stream order, the stretches neither recorder holds (reason
 /// <see cref="HourMerger.MissingReason"/>) and the hash of every frame in order, which the written file must match.
 /// </summary>
-public sealed record MergedHourPlan(DateTimeOffset Hour, IReadOnlyList<MergedPiece> Pieces, IReadOnlyList<SegmentGap> Missing, IReadOnlyList<ulong> FrameHashes);
+public sealed record MergedHourPlan(DateTimeOffset Hour, IReadOnlyList<MergedPiece> Pieces, IReadOnlyList<SegmentGap> Missing, IReadOnlyList<ulong> FrameHashes, bool StartedByTime = false);
 
 /// <summary>
 /// Plans one merged UTC hour from recorders A and B (issue #104). Their frames are listed and merged by identity with
@@ -32,6 +32,9 @@ public static class HourMerger
     /// <summary>Frames are read this far either side of the hour so the recorders line up at its edges and the previous hour's tail can be found.</summary>
     static readonly TimeSpan Reach = TimeSpan.FromSeconds(30);
 
+    /// <summary>A generous upper bound on a frame's duration, to read back far enough to hold the whole previous tail.</summary>
+    const double TailFrameSeconds = 0.04;
+
     static readonly TimeSpan OneHour = TimeSpan.FromHours(1);
 
     /// <param name="Index">Whole frames before this one in its file.</param>
@@ -47,8 +50,9 @@ public static class HourMerger
     {
         hour = hour.ToUniversalTime();
         var end = hour + OneHour;
-        var fa = Frames(a, hour - Reach, end + Reach);
-        var fb = Frames(b, hour - Reach, end + Reach);
+        var from = hour - Reach - TimeSpan.FromSeconds(previousTail.Count * TailFrameSeconds);
+        var fa = Frames(a, from, end + Reach);
+        var fb = Frames(b, from, end + Reach);
         var inA = fa.Count(f => f.EstUtc >= hour && f.EstUtc < end);
         var inB = fb.Count(f => f.EstUtc >= hour && f.EstUtc < end);
         if (inA == 0 && inB == 0) return null;
@@ -59,7 +63,7 @@ public static class HourMerger
         var ordered = Ordered(merged, p, s);
         var clock = BoundaryClock(ordered, aPrimary, fa, fb);
 
-        var first = Start(ordered, clock, hour, previousTail);
+        var (first, startedByTime) = Start(ordered, clock, hour, previousTail);
         var last = clock.FindLastIndex(t => t < end);
         if (first < 0 || last < first) return null;
         var window = ordered.GetRange(first, last - first + 1);
@@ -84,7 +88,7 @@ public static class HourMerger
             start = k;
         }
 
-        return new MergedHourPlan(hour, pieces, Missing(merged, hour, end, pieces), [.. window.Select(f => f.Ref.Hash)]);
+        return new MergedHourPlan(hour, pieces, Missing(merged, hour, end, pieces), [.. window.Select(f => f.Ref.Hash)], startedByTime);
     }
 
     /// <summary>
@@ -111,11 +115,11 @@ public static class HourMerger
     /// starts right after it; a tail of identical frames (silence) occurs at several places, and the one nearest the
     /// boundary by time is taken.
     /// </summary>
-    static int Start(List<SourceFrame> ordered, List<DateTimeOffset> clock, DateTimeOffset hour, IReadOnlyList<ulong> previousTail)
+    static (int Index, bool ByTime) Start(List<SourceFrame> ordered, List<DateTimeOffset> clock, DateTimeOffset hour, IReadOnlyList<ulong> previousTail)
     {
         var byTime = clock.FindIndex(t => t >= hour);
         var n = previousTail.Count;
-        if (n == 0) return byTime;
+        if (n == 0) return (byTime, false);
 
         var tail = previousTail;
         var best = -1;
@@ -127,7 +131,7 @@ public static class HourMerger
             if (best < 0 || (byTime >= 0 && Math.Abs(i - byTime) < Math.Abs(best - byTime))) best = i;
         }
 
-        return best >= 0 ? best : byTime;
+        return best >= 0 ? (best, false) : (byTime, true);
     }
 
     /// <summary>

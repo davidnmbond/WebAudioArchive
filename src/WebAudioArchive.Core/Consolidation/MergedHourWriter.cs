@@ -40,8 +40,20 @@ public static class MergedHourWriter
                 if (CheckSource(source) != input) throw new MergeVerificationException($"source {source.Recorder} {source.RelativeFile} changed while the hour was written");
 
             var meta = BuildMeta(plan, station, Path.GetFileName(mp3), bytes, before, Sha256(part));
-            SegmentMetaStore.Write(Path.ChangeExtension(mp3, ".json"), meta);
+            // Audio first, then the sidecar readers find it by: a sidecar never describes audio that is not there.
             File.Move(part, mp3, overwrite: true);
+            var json = Path.ChangeExtension(mp3, ".json");
+            try
+            {
+                SegmentMetaStore.Write(json, meta);
+            }
+            catch
+            {
+                File.Delete(mp3);
+                if (File.Exists(json + ".tmp")) File.Delete(json + ".tmp");
+                throw;
+            }
+
             return meta;
         }
         catch
@@ -80,7 +92,8 @@ public static class MergedHourWriter
             inputs,
             sha256,
             plan.Pieces.Where(p => p.Recorder == "a").Sum(p => p.Frames),
-            plan.Pieces.Where(p => p.Recorder != "a").Sum(p => p.Frames));
+            plan.Pieces.Where(p => p.Recorder != "a").Sum(p => p.Frames),
+            plan.StartedByTime);
         return new SegmentMeta(
             1, "merged", station, file, plan.Pieces[0].FromUtc, plan.Pieces[^1].ToUtc, bytes, frames, audioSeconds,
             first.Format, null, [], plan.Missing, "hour-boundary", merge);
