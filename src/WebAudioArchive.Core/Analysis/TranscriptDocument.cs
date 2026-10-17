@@ -1,0 +1,51 @@
+using System.Text.Json.Serialization;
+
+namespace WebAudioArchive.Core.Analysis;
+
+/// <summary>A word with its times in seconds from the start of the segment's audio (map to UTC with the document's timeline).</summary>
+public sealed record TranscriptWord(string Text, double Start, double End, double Probability);
+
+/// <summary>
+/// One whisper segment. <see cref="Suppressed"/> is null for speech the detectors use, or the reason it is ignored
+/// (non-speech, no-speech, known-hallucination, repetition). Suppressed segments are kept so a person can see them.
+/// </summary>
+public sealed record TranscriptSegment(
+    double Start,
+    double End,
+    string Text,
+    double NoSpeechProb,
+    double AvgLogProb,
+    string? Suppressed,
+    IReadOnlyList<TranscriptWord> Words);
+
+/// <summary>transcript.json: the transcript of one master segment. Times are offsets into its audio; the timeline maps them to UTC.</summary>
+public sealed record TranscriptDocument(
+    int Schema,
+    string Station,
+    string Recorder,
+    string Instance,
+    string JobId,
+    string SourceFile,
+    DateTimeOffset SegmentStartUtc,
+    DateTimeOffset SegmentEndUtc,
+    double AudioSeconds,
+    IReadOnlyList<TimelineAnchor> Timeline,
+    string Engine,
+    string Model,
+    string Language,
+    string TranscriptVersion,
+    string Decoder,
+    DateTimeOffset CreatedUtc,
+    double TranscribeSeconds,
+    IReadOnlyList<TranscriptSegment> Segments)
+{
+    public const int CurrentSchema = 1;
+
+    public DateTimeOffset ToUtc(double audioOffset) => SegmentTimeline.ToUtc(Timeline, audioOffset);
+
+    [JsonIgnore]
+    public DateTimeOffset AudioFromUtc => ToUtc(0);
+
+    [JsonIgnore]
+    public DateTimeOffset AudioToUtc => ToUtc(AudioSeconds);
+}
