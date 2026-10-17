@@ -1,0 +1,19 @@
+{
+  "version": "2026-10-16.1",
+  "clipping": { "threshold": 0.99, "minRunSamples": 3, "mergeWithinMs": 250, "mediumMs": 100 },
+  "deadAir": { "thresholdDbfs": -50, "minSeconds": 5, "severeSeconds": 30 },
+  "swearing": { "wordList": "swearwords.json", "watershedStart": "21:00", "watershedEnd": "05:30" },
+  "fillers": { "words": ["um", "uh", "er", "erm", "ah", "hmm"], "countYouKnow": false },
+  "transcription": {
+    "language": "en",
+    "chunkSeconds": 300,
+    "boundarySearchSeconds": 8,
+    "glossary": ["Burst Radio", "Burst", "Backseat Aux"],
+    "verbatimPrompt": "Um, so, er, welcome back to Burst Radio. Uh, hmm, erm, right, here's the next one.",
+    "maxNoSpeechProb": 0.6,
+    "minAvgLogProb": -1.0,
+    "hallucinations": ["thank you for watching", "thanks for watching", "subtitles by the amara org community", "please subscribe", "you"],
+    "maxRepeats": 3
+  },
+  "enrichment": { "promptDir": "prompts", "promptName": "enrich-v1", "numCtx": 32768, "maxTranscriptChars": 60000, "seed": 42, "temperature": 0.1, "maxItems": 40 }
+}

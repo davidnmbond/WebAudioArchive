@@ -1,0 +1,10 @@
+{
+  "version": "2026-10-16.1",
+  "suffixes": ["s", "es", "ed", "er", "ers", "in", "ing", "y"],
+  "tiers": {
+    "mild": ["arse", "arsey", "bloody", "bugger", "crap", "crappy", "damn", "piss", "sod"],
+    "strong": ["arsehole", "asshole", "bastard", "bellend", "bitch", "bollocks", "bullshit", "dick", "dickhead", "knob", "knobhead", "prick", "shit", "shite", "shitty", "twat", "wanker"],
+    "severe": ["cunt", "fuck", "motherfucker"]
+  },
+  "allow": ["dicker", "dicky", "knobs", "knobby", "pricked", "pricker", "pricking", "pricky", "sods"]
+}
