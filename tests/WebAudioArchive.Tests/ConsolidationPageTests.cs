@@ -24,6 +24,8 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
     readonly List<(HttpMethod Method, string Path, string Body)> _calls = [];
     string _healthJson = Healthy;
     bool _unreachable;
+    TimeSpan _deletionDelay = TimeSpan.Zero;
+    bool _deletionFailsAfterSend;
 
     const string Healthy = """
         { "station": "burst", "mode": "hold", "lastMergedHourUtc": "2026-10-15T11:00:00+01:00", "backlogHours": 3, "waitingForAnalysis": 2,
@@ -67,7 +69,10 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
             b.UseSetting("WAA_CONSOLIDATOR", "http://consolidator:8080");
             b.UseSetting("WAA_CACHE", Path.Combine(_root, "cache"));
             b.ConfigureTestServices(services =>
-                services.AddHttpClient(ConsolidatorClient.HttpClientName).ConfigurePrimaryHttpMessageHandler(() => _consolidator));
+            {
+                services.AddHttpClient(ConsolidatorClient.HttpClientName).ConfigurePrimaryHttpMessageHandler(() => _consolidator);
+                services.AddHttpClient(ConsolidatorClient.DeletionsHttpClientName).ConfigurePrimaryHttpMessageHandler(() => new SlowDeletions(this) { InnerHandler = _consolidator });
+            });
         });
         _client = _factory.CreateClient();
         return Task.CompletedTask;
@@ -80,6 +85,18 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
     }
 
+
+    // Sits in front of the stub for deletions only: it can take longer than the 3 s health timeout, or fail after the request was sent.
+    sealed class SlowDeletions(ConsolidationPageTests owner) : DelegatingHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (owner._deletionDelay > TimeSpan.Zero) await Task.Delay(owner._deletionDelay, cancellationToken);
+            var response = await base.SendAsync(request, cancellationToken);
+            if (owner._deletionFailsAfterSend) throw new HttpRequestException("The connection was closed before the reply arrived");
+            return response;
+        }
+    }
     static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
 
     // Deletes everything except recorder b's file, which the consolidator refuses.
@@ -160,7 +177,10 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
         Assert.Equal("/deletions", post.Path);
         using var doc = JsonDocument.Parse(post.Body);
         Assert.Equal("loopback", doc.RootElement.GetProperty("confirmedBy").GetString());
-        Assert.Equal(2, doc.RootElement.GetProperty("items").GetArrayLength());
+        var posted = doc.RootElement.GetProperty("items").EnumerateArray()
+            .Select(i => (i.GetProperty("recorder").GetString(), i.GetProperty("file").GetString())).ToList();
+        Assert.Equal([("a", "2026/10-15/100000.mp3"), ("b", "2026/10-15/100000.mp3")], posted);
+        Assert.DoesNotContain(("a", "2026/10-16/090000.mp3"), posted); // chosen by nobody, so not sent
         Assert.Equal(2, review.Results.Count);
         Assert.True(review.Results.Single(r => r.Recorder == "a").Deleted);
         var refused = review.Results.Single(r => r.Recorder == "b");
@@ -168,6 +188,57 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
         Assert.Equal("the last recheck is older than 24 hours", refused.Reason);
         Assert.Empty(review.Selected);
         Assert.False(review.Confirming);
+    }
+
+    [Fact]
+    public async Task A_deletion_slower_than_the_health_timeout_still_shows_each_result()
+    {
+        var review = new ConsolidationReview(Client());
+        await review.LoadAsync(CancellationToken.None);
+        review.Toggle(review.Items.First(i => i.Recorder == "a"));
+        review.RequestConfirmation();
+        _deletionDelay = TimeSpan.FromSeconds(3.5); // longer than the 3 s used for /healthz and /held
+
+        await review.ConfirmAsync("loopback", CancellationToken.None);
+
+        Assert.Null(review.Error);
+        Assert.Null(review.UnknownOutcome);
+        Assert.True(Assert.Single(review.Results).Deleted);
+    }
+
+    [Fact]
+    public async Task A_deletion_that_fails_after_it_was_sent_reports_an_unknown_outcome_and_reloads_the_list()
+    {
+        var review = new ConsolidationReview(Client());
+        await review.LoadAsync(CancellationToken.None);
+        review.Toggle(review.Items[0]);
+        review.RequestConfirmation();
+        _deletionFailsAfterSend = true;
+        var heldReads = _calls.Count(c => c.Path == "/held");
+
+        await review.ConfirmAsync("loopback", CancellationToken.None);
+
+        Assert.Single(_calls, c => c.Method == HttpMethod.Post);
+        Assert.Contains("unknown", review.UnknownOutcome);
+        Assert.Contains("reloaded", review.UnknownOutcome);
+        Assert.Null(review.Error); // not "could not reach", as if nothing had happened
+        Assert.Empty(review.Results);
+        Assert.Equal(heldReads + 1, _calls.Count(c => c.Path == "/held"));
+        Assert.Empty(review.Selected);
+    }
+
+    [Fact]
+    public async Task A_repeated_confirmation_is_refused_and_posts_nothing_more()
+    {
+        var review = new ConsolidationReview(Client());
+        await review.LoadAsync(CancellationToken.None);
+        review.Toggle(review.Items[0]);
+        review.RequestConfirmation();
+        await review.ConfirmAsync("loopback", CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => review.ConfirmAsync("loopback", CancellationToken.None));
+
+        Assert.Single(_calls, c => c.Method == HttpMethod.Post);
     }
 
     [Fact]

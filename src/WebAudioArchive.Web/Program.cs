@@ -63,6 +63,8 @@ builder.Services.AddHostedService<ScheduleRefresher>();
 builder.Services.AddHttpClient(ScheduleService.HttpClientName, c => c.Timeout = ScheduleService.FetchTimeout + TimeSpan.FromSeconds(5));
 builder.Services.AddHttpClient(StatusService.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(3));
 builder.Services.AddHttpClient(ConsolidatorClient.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(3));
+// Deletions can take minutes (every held original is hashed first); ConsolidatorClient bounds them itself.
+builder.Services.AddHttpClient(ConsolidatorClient.DeletionsHttpClientName, c => c.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddPanoramicDataBlazor();
 

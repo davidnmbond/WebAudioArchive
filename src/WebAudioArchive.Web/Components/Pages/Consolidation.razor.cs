@@ -42,6 +42,7 @@ public sealed partial class Consolidation
 
     async Task ConfirmAsync()
     {
+        if (Busy || !Review.Confirming) return; // a repeated click queued before the first render
         Busy = true;
         try
         {

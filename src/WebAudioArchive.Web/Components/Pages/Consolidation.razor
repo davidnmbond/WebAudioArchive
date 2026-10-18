@@ -24,6 +24,11 @@
     <div class="alert alert-warning" role="alert" id="consolidation-error">Could not reach the consolidator: @Review.Error</div>
 }
 
+@if (Review.UnknownOutcome is not null)
+{
+    <div class="alert alert-danger" role="alert" id="consolidation-unknown">@Review.UnknownOutcome</div>
+}
+
 @if (Review.Confirming)
 {
     <section class="card border-2 border-danger mb-3" id="consolidation-confirm" aria-label="Confirm deletion">

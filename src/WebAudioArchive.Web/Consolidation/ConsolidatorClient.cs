@@ -69,6 +69,12 @@ public sealed class ConsolidatorClient(WebSettings settings, IHttpClientFactory 
 {
     public const string HttpClientName = "consolidator";
 
+    /// <summary>Deletions have their own client: the consolidator re-hashes every held original before deleting, which takes far longer than a health read.</summary>
+    public const string DeletionsHttpClientName = "consolidator-deletions";
+
+    /// <summary>How long a deletion request may take before its outcome is reported as unknown.</summary>
+    public static readonly TimeSpan DeletionTimeout = TimeSpan.FromMinutes(10);
+
     static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public bool IsConfigured => settings.ConsolidatorUrl is not null;
@@ -97,22 +103,25 @@ public sealed class ConsolidatorClient(WebSettings settings, IHttpClientFactory 
 
     /// <summary>The held originals the consolidator says are ready to delete. Throws <see cref="ConsolidatorException"/> when it cannot be read.</summary>
     public async Task<IReadOnlyList<HeldItem>> ReadyAsync(CancellationToken ct) =>
-        await SendAsync<List<HeldItem>>(HttpMethod.Get, "/held", null, ct) ?? [];
+        await SendAsync<List<HeldItem>>(HttpClientName, null, HttpMethod.Get, "/held", null, ct) ?? [];
 
     /// <summary>Sends the confirmed deletions; each item comes back with its own result.</summary>
     public async Task<IReadOnlyList<DeletionResult>> DeleteAsync(string confirmedBy, IReadOnlyList<HeldItem> items, CancellationToken ct)
     {
         var body = new { confirmedBy, items = items.Select(i => new { recorder = i.Recorder, file = i.File }).ToList() };
-        return await SendAsync<List<DeletionResult>>(HttpMethod.Post, "/deletions", body, ct) ?? [];
+        return await SendAsync<List<DeletionResult>>(DeletionsHttpClientName, DeletionTimeout, HttpMethod.Post, "/deletions", body, ct) ?? [];
     }
 
-    async Task<T?> SendAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct)
+    async Task<T?> SendAsync<T>(string clientName, TimeSpan? timeout, HttpMethod method, string path, object? body, CancellationToken callerCt)
     {
         if (settings.ConsolidatorUrl is null) throw new ConsolidatorException("WAA_CONSOLIDATOR is not set.");
         var url = new Uri(settings.ConsolidatorUrl, path);
         try
         {
-            using var client = http.CreateClient(HttpClientName);
+            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(callerCt);
+            if (timeout is { } t) timeoutSource.CancelAfter(t);
+            var ct = timeoutSource.Token;
+            using var client = http.CreateClient(clientName);
             using var request = new HttpRequestMessage(method, url);
             if (body is not null) request.Content = JsonContent.Create(body, options: Json);
             using var response = await client.SendAsync(request, ct);
@@ -136,6 +145,8 @@ public sealed class ConsolidationReview(ConsolidatorClient client)
 
     public IReadOnlyList<HeldItem> Items { get; private set; } = [];
     public string? Error { get; private set; }
+    /// <summary>Set when a deletion request failed after it may have been sent: nothing is known about what was deleted.</summary>
+    public string? UnknownOutcome { get; private set; }
     public bool Confirming { get; private set; }
     public IReadOnlyList<DeletionResult> Results { get; private set; } = [];
 
@@ -184,10 +195,15 @@ public sealed class ConsolidationReview(ConsolidatorClient client)
         }
         catch (ConsolidatorException ex)
         {
+            // The request may have reached the consolidator and some or all files may be gone: say so, and show what is there now.
             Results = [];
-            Error = ex.Message;
+            UnknownOutcome = $"The outcome of the deletion is unknown ({ex.Message}). The consolidator may have deleted some or all of the chosen originals; the list below has been reloaded and shows what is still held.";
+            _selected.Clear();
+            await LoadAsync(ct);
             return;
         }
+
+        UnknownOutcome = null;
 
         _selected.Clear();
         await LoadAsync(ct);
