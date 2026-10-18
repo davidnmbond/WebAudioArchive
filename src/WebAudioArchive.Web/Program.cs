@@ -103,15 +103,13 @@ app.MapGet("/api/clip", async (HttpRequest req, ClipService clips) =>
     }
 });
 
-app.MapGet("/media/clip/{id}.mp3", (string id, HttpRequest req, WebSettings s) =>
+app.MapGet("/media/clip/{id}.mp3", (string id, HttpRequest req, ClipService clips) =>
 {
-    // Only a 32 character lower-case hex id reaches the file system, and only inside the cache directory.
-    if (!ClipBuilder.IsValidId(id)) return Results.NotFound();
-    var path = ClipBuilder.PathFor(s.CacheDir, id);
-    if (!File.Exists(path)) return Results.NotFound();
-    var download = req.Query["download"] == "1";
-    var name = download ? ClipBuilder.ReadInfo(s.CacheDir, id)?.DownloadName ?? $"{s.Station}_{id}.mp3" : null;
-    return Results.File(path, "audio/mpeg", name, enableRangeProcessing: true);
+    // Only a 32 character lower-case hex id reaches the file system, as a manifest in the cache directory; the audio is
+    // streamed from the segment files it names, which must be in the recorders' folders.
+    if (clips.Open(id) is not { } clip) return Results.NotFound();
+    var name = req.Query["download"] == "1" ? clip.Manifest.DownloadName : null;
+    return Results.File(clip.Stream, "audio/mpeg", name, enableRangeProcessing: true);
 });
 
 // Analysis results (plan 3), read-only, all times UTC. The player pages use them in plan 4.

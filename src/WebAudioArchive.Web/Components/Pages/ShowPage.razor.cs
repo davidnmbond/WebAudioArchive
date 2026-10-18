@@ -56,7 +56,6 @@ public sealed partial class ShowPage
     TimeSpan? StartAt { get; set; }
     List<string> Warnings { get; } = [];
     string? Error { get; set; }
-    bool Busy { get; set; }
     int MarginMinutes { get; set; } = 5;
     string Recorder { get; set; } = "auto";
     DateTimeOffset? At { get; set; }
@@ -100,13 +99,12 @@ public sealed partial class ShowPage
         if (Show is null) return;
 
         Coverage = ShowCoverage.Classify(Show, Catalog.All(), Time.GetUtcNow());
-        if (Coverage.State != ShowState.Future) await PrepareAsync();
+        if (Coverage.State != ShowState.Future) Prepare();
     }
 
-    async Task PrepareAsync()
+    void Prepare()
     {
         if (Show is null) return;
-        Busy = true;
         Error = null;
         Warnings.Clear();
         try
@@ -114,9 +112,8 @@ public sealed partial class ShowPage
             var now = Time.GetUtcNow();
             Coverage = ShowCoverage.Classify(Show, Catalog.All(), now);
             var request = ShowTimeline.Request(Show, MarginMinutes, Recorder, now);
-            // A clip already in the cache (always, after the prerender built it) is shown in this same render, so the page
-            // does not draw the busy overlay without a player and then the player; only a new clip is built off the render thread.
-            var clip = Clips.TryPrepareCached(null, request) ?? await Task.Run(() => Clips.Prepare(null, request));
+            // Nothing is copied (the clip is streamed from the segments when played), so this is quick enough for the render.
+            var clip = Clips.Prepare(null, request);
             if (Coverage.State == ShowState.Partial)
                 Warnings.Add("Only part of this show was recorded; the player plays what exists, joined across the gaps.");
             else if (Coverage.NeedsBoth)
@@ -139,10 +136,6 @@ public sealed partial class ShowPage
             Timeline = null;
             Error = "The clip could not be built as whole MP3 frames: " + ex.Message;
             Log.LogError(ex, "Clip integrity failure for show {Id}", Id);
-        }
-        finally
-        {
-            Busy = false;
         }
     }
 

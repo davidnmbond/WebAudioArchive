@@ -89,7 +89,7 @@ public sealed class WebAppTests : IAsyncLifetime
         Assert.Equal("a", json.GetProperty("recorder").GetString());
         Assert.Equal("burst_20261015T155930Z_20261015T160030Z_A.mp3", json.GetProperty("downloadName").GetString());
         Assert.InRange(json.GetProperty("seconds").GetDouble(), 59.95, 60.1);
-        Assert.Equal(new FileInfo(Path.Combine(Cache, id + ".mp3")).Length, json.GetProperty("bytes").GetInt64());
+        Assert.Equal((await _client.GetByteArrayAsync($"/media/clip/{id}.mp3")).Length, json.GetProperty("bytes").GetInt64());
         Assert.EndsWith("Z", json.GetProperty("from").GetString());
         Assert.InRange((DateTimeOffset.Parse(json.GetProperty("from").GetString()!) - T0.AddSeconds(3570)).TotalSeconds, -0.05, 0.001);
         Assert.InRange((DateTimeOffset.Parse(json.GetProperty("to").GetString()!) - T0.AddSeconds(3630)).TotalSeconds, -0.001, 0.05);
@@ -117,7 +117,8 @@ public sealed class WebAppTests : IAsyncLifetime
         var json = await ClipJson("from=2026-10-15T15:55:00Z&to=2026-10-15T15:55:20Z");
         var url = json.GetProperty("url").GetString()!;
         var length = json.GetProperty("bytes").GetInt64();
-        var file = await File.ReadAllBytesAsync(Path.Combine(Cache, json.GetProperty("id").GetString() + ".mp3"));
+        var file = await _client.GetByteArrayAsync(url);
+        Assert.Equal(length, file.Length);
 
         var full = await _client.GetAsync(url);
         Assert.Equal(HttpStatusCode.OK, full.StatusCode);
@@ -279,6 +280,9 @@ public sealed class WebAppTests : IAsyncLifetime
         Assert.Contains("h1:focus", css);
         Assert.Contains("outline: none", css);
         Assert.Contains("var(--bs-", css);
+        // Parts of the clip the browser has not loaded yet are striped on the seek bar.
+        Assert.Contains("repeating-linear-gradient", css);
+        Assert.Contains(".pdmp-buffered", css);
         Assert.DoesNotMatch("#[0-9a-fA-F]{3,6}\\b", css);
     }
 
@@ -437,23 +441,21 @@ public sealed class WebAppTests : IAsyncLifetime
     }
 
     [Fact]
-    public void A_cached_clip_is_found_without_building_and_a_new_one_is_not()
+    public void Preparing_a_clip_copies_no_audio_and_the_same_request_gives_the_same_clip()
     {
         var clips = _factory.Services.GetRequiredService<web::WebAudioArchive.Web.Clips.ClipService>();
         var request = web::WebAudioArchive.Web.Clips.ClipService.ParseQuery("2026-10-15T15:55:00Z", "2026-10-15T15:55:20Z", null, null, "auto");
 
-        Assert.Null(clips.TryPrepareCached(null, request));
-        Assert.False(Directory.Exists(Cache) && Directory.EnumerateFiles(Cache, "*.mp3").Any()); // nothing was built
+        var first = clips.Prepare(null, request);
+        var again = clips.Prepare(null, request);
 
-        var built = clips.Prepare(null, request);
-        var cached = clips.TryPrepareCached(null, request);
-
-        Assert.NotNull(cached);
-        Assert.True(cached.File.Reused);
-        Assert.Equal(built.File.Id, cached.File.Id);
-        Assert.Equal(built.Url, cached.Url);
-        Assert.Equal(built.File.Bytes, cached.File.Bytes);
-        Assert.Throws<web::WebAudioArchive.Web.Clips.ClipException>(() => clips.TryPrepareCached("other", request));
+        // The clip is streamed from the segments: the cache holds a small manifest, never an MP3.
+        Assert.Empty(Directory.EnumerateFiles(Cache, "*.mp3"));
+        Assert.InRange(new FileInfo(Path.Combine(Cache, first.File.Id + ".json")).Length, 1, 8192);
+        Assert.Equal(first.File.Id, again.File.Id);
+        Assert.Equal(first.Url, again.Url);
+        Assert.Equal(first.File.Bytes, again.File.Bytes);
+        Assert.Throws<web::WebAudioArchive.Web.Clips.ClipException>(() => clips.Prepare("other", request));
     }
 
     [Fact]

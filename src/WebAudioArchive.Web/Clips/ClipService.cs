@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace WebAudioArchive.Web.Clips;
 
-/// <summary>A prepared clip: the cached file plus the plan it came from.</summary>
+/// <summary>A prepared clip: its id, length and download name, plus the plan it came from.</summary>
 public sealed record PreparedClip(string Station, ClipFile File, ClipPlan Plan)
 {
     public string Url => $"/media/clip/{File.Id}.mp3";
@@ -35,31 +35,26 @@ public sealed record PreparedClip(string Station, ClipFile File, ClipPlan Plan)
 }
 
 /// <summary>
-/// The one way into clip making, used by both the API and the Player page. Station and recorder are checked against
+/// The one way into clip making, used by both the API and the show page. Station and recorder are checked against
 /// the configuration and nothing the user typed is ever used as a path.
 /// </summary>
 public sealed class ClipService(WebSettings settings, SegmentCatalog catalog, TimeProvider time, ILogger<ClipService> log)
 {
-    readonly ClipBuilder _builder = new(settings.CacheDir, log);
+    readonly ClipStore _store = new(settings.CacheDir, settings.Recorders.Select(r => Path.Combine(r.Root, settings.Station, "master")).ToList(), log);
 
+    /// <summary>
+    /// Plans the clip and keeps its manifest. No audio is copied (it is streamed from the segments when played), so this
+    /// is quick enough for a page to call in its render.
+    /// </summary>
     public PreparedClip Prepare(string? station, ClipRequest request)
     {
         var plan = Plan(station, request);
-        var file = _builder.Build(settings.Station, plan);
+        var file = _store.Register(settings.Station, plan);
         return new PreparedClip(settings.Station, file, plan);
     }
 
-    /// <summary>
-    /// The clip for this request when it is already in the cache, without building anything (planning only reads the
-    /// catalog), so a page can show it in the same render rather than drawing a busy state first and the player after.
-    /// Null when the clip would have to be built; then call <see cref="Prepare"/> off the render thread. Invalid requests
-    /// throw <see cref="ClipException"/> as <see cref="Prepare"/> does.
-    /// </summary>
-    public PreparedClip? TryPrepareCached(string? station, ClipRequest request)
-    {
-        var plan = Plan(station, request);
-        return _builder.TryReuse(settings.Station, plan) is { } file ? new PreparedClip(settings.Station, file, plan) : null;
-    }
+    /// <summary>The clip's manifest and a stream over its audio, or null when there is no such clip.</summary>
+    public (ClipManifest Manifest, ClipStream Stream)? Open(string id) => _store.Open(id);
 
     ClipPlan Plan(string? station, ClipRequest request)
     {

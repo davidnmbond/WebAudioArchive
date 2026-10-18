@@ -15,7 +15,7 @@ public sealed class CacheHousekeeper(WebSettings settings, TimeProvider time, IL
         {
             try
             {
-                ClipCache.Housekeep(settings.CacheDir, time.GetUtcNow(), settings.CacheMaxAge, settings.CacheMaxBytes, log);
+                ClipCache.Housekeep(settings.CacheDir, time.GetUtcNow(), settings.CacheMaxAge, log);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -48,7 +48,6 @@ public static class ClipJson
         to = c.Plan.EndUtc.UtcDateTime,
         seconds = Math.Round(c.File.Seconds, 3),
         bytes = c.File.Bytes,
-        reused = c.File.Reused,
         warnings = c.Plan.Warnings,
         notes = c.Plan.Notes,
         coverageSeconds = c.Plan.CoverageSeconds.ToDictionary(kv => kv.Key, kv => Math.Round(kv.Value, 1)),

@@ -18,7 +18,6 @@ public sealed class SettingsException(string message) : Exception(message);
 public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderSettings> Recorders, string CacheDir)
 {
     public TimeSpan CacheMaxAge { get; init; } = TimeSpan.FromHours(24);
-    public long CacheMaxBytes { get; init; } = 2L * 1024 * 1024 * 1024;
     public int DefaultMarginMinutes { get; init; } = 5;
 
     /// <summary>The analysis output folder (WAA_ANALYSIS, read-only), or null when analysis is not set up.</summary>
