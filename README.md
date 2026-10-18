@@ -6,7 +6,7 @@ reporting. Burst Radio is the primary use case.
 Recordings are private archive copies and must not be republished. Nothing in this repository contains
 recordings, credentials or user data.
 
-Design: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`.
+Design overview with diagrams: [DESIGN.md](DESIGN.md). Detailed spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`.
 
 ## Run
 
