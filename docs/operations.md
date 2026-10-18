@@ -3,12 +3,14 @@
 ## Run
 
 The recorders are their own compose project (`waa-recorders`), so building or restarting anything else never recreates them.
-Start them first (they create the shared network `waa`), then the rest:
+First install only (no recorders running yet): start the recorders first (they create the shared network `waa`), then the rest:
 
     docker compose -f docker/docker-compose.recorders.yml up -d --build recorder-a recorder-b
     docker compose -f docker/docker-compose.yml up -d --build web consolidator
 
-Always name the services, and never use `--remove-orphans`.
+This starts both recorders together, so use it only when neither is recording. For every later change, upgrade one
+recorder at a time as described under "Dual recording (A and B)", and never stop both together. Always name the
+services, and never use `--remove-orphans`.
 
 Set `WAA_INSTANCE_ID` (for example `home` or `cluster`) and `WAA_DATA_DIR` in the environment or a `.env` file
 beside the compose file. On Linux the data folder must be writable by uid 1654.
@@ -47,8 +49,8 @@ makes clips on request); no disk-space guard (plan 5). Two instances are indepen
   `startUtc`, not by file name (`103000-1.mp3` sorts before `103000.mp3`).
 
 - Upgrading the container interrupts recording for the length of a restart (seconds); the break is recorded as a gap
-  in the sidecar. Splitting the recorder from the rest and running A/B recorders to avoid this is specified in
-  spec section 3.13 and is not built yet.
+  in the sidecar. The recorders are split from the rest (their own compose project) and run as A and B, upgraded one
+  at a time, so the other keeps recording during a restart (see Dual recording).
 
 ## Dual recording (A and B)
 
@@ -289,18 +291,18 @@ Commands (always from the repository root, always naming the service; these neve
     # test against the other server: WAA_WHISPER_URL=http://pdl-rune-01.panoramicdata.com:8080 docker compose ... up -d analysis
     curl http://127.0.0.1:8095/healthz
 
-The `docker_web-cache` volume belongs to the recorder project (named after its compose project plus `_web-cache`).
-When that project is restructured or renamed, find the new name with `docker volume ls` and set
+The `docker_web-cache` volume belongs to the main project in `docker/docker-compose.yml` (named after its implicit compose project
+plus `_web-cache`). When that project is restructured or renamed, find the new name with `docker volume ls` and set
 `WAA_WEB_CACHE_VOLUME` to it in the shell or in `.env`.
 
 **Showing the analysis in the web app.** The web service needs `WAA_ANALYSIS=/data/analysis` and a read-only view of
 `data/analysis`. That is `docker/docker-compose.web-analysis.yml`, which adds only those two things to the `web`
-service. It must be merged with the existing web service definition (the recorder project's file), never used alone:
+service. It must be merged with the existing web service definition (the web app's file, `docker/docker-compose.yml`), never used alone:
 
     docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml up -d web
 
 (Name only `web`: this recreates the web container, which is rebuilt on its own and never touches a recorder. Do it
-when you may interrupt the web app for a few seconds.) If the recorder project's compose file has moved by then, use
+when you may interrupt the web app for a few seconds.) If that compose file has moved by then, use
 its new path in place of `docker/docker-compose.yml`. The current web service already mounts `data/` read-only, so
 `data/analysis` is visible read-only there; the override makes the mount and the setting explicit.
 
