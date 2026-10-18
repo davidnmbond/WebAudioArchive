@@ -13,6 +13,9 @@ public sealed record FailureSource(string Recorder, string File, string Sha256);
 /// <summary>An hour whose merged copy failed verification, stored in &lt;merged&gt;/&lt;station&gt;/failures.json.</summary>
 public sealed record ConsolidationFailure(DateTimeOffset HourUtc, string Reason, DateTimeOffset Utc, IReadOnlyList<FailureSource> Sources);
 
+/// <summary>An hour that was planned and held no frame from either recorder, stored in &lt;merged&gt;/&lt;station&gt;/empty.json with its sources then.</summary>
+public sealed record EmptyHour(DateTimeOffset HourUtc, DateTimeOffset Utc, IReadOnlyList<FailureSource> Sources);
+
 public sealed record FailureSummary(DateTimeOffset HourUtc, string Reason);
 
 /// <summary>What /healthz reports. Failures are reported here, never as an unhealthy status.</summary>
@@ -79,7 +82,9 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
 
     string FailuresFile => Path.Combine(settings.MergedStationDir, "failures.json");
 
-    string DeletionsLog => Path.Combine(settings.MergedStationDir, "deletions.jsonl");
+    string EmptyFile => Path.Combine(settings.MergedStationDir, "empty.json");
+
+    string DeletionsLog =>Path.Combine(settings.MergedStationDir, "deletions.jsonl");
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -146,23 +151,51 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         var eligible = Eligibility.Hours(a, b, merged, open, now, Settled);
         var waiting = settings.AnalysisRoot is null ? 0 : Eligibility.Hours(a, b, merged, open, now, _ => true).Count - eligible.Count;
         var failures = Failures().ToDictionary(f => f.HourUtc);
+        var empties = ReadEmpty();
+        var emptiesChanged = false;
 
-        var done = 0;
-        var stopped = false;
+        // Oldest first. Merging stops at the earliest unresolved failure, so the hour after it is merged only once the
+        // failed hour is, and joins it by its tail; until then the later hours count in the backlog.
+        var settledHours = 0;
         foreach (var hour in eligible)
         {
             ct.ThrowIfCancellationRequested();
             if (failures.TryGetValue(hour, out var failed))
             {
-                if (SameInputs(failed.Sources, Inputs(hour, a, b))) continue;
+                if (SameInputs(failed.Sources, Inputs(hour, a, b)))
+                {
+                    logger.LogWarning("{Hour:O}: failed and unchanged since; merging waits here until a source changes or a retry is asked for", hour);
+                    break;
+                }
+
                 logger.LogInformation("{Hour:O}: a source has changed since it failed; trying it again", hour);
                 Retry(hour);
+                failures.Remove(hour);
+            }
+            else if (failures.Keys.Any(f => f < hour && !merged.Contains(f)))
+            {
+                break;
+            }
+
+            if (empties.TryGetValue(hour, out var known))
+            {
+                if (SameInputs(known.Sources, Inputs(hour, a, b, TimeSpan.Zero)))
+                {
+                    settledHours++;
+                    continue;
+                }
+
+                empties.Remove(hour);
+                emptiesChanged = true;
             }
 
             var plan = HourMerger.Plan(hour, a, b, PreviousTail(hour));
             if (plan is null)
             {
-                logger.LogWarning("{Hour:O}: neither recorder holds a frame in the hour; nothing to merge", hour);
+                logger.LogInformation("{Hour:O}: neither recorder holds a frame in the hour; recorded as empty", hour);
+                empties[hour] = new EmptyHour(hour, now, Inputs(hour, a, b, TimeSpan.Zero));
+                emptiesChanged = true;
+                settledHours++;
                 continue;
             }
 
@@ -170,22 +203,23 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
             {
                 MergedHourWriter.Write(plan, settings.MergedMasterDir, settings.Station);
                 merged.Add(hour);
-                done++;
+                settledHours++;
                 logger.LogInformation("{Hour:O}: merged from {Pieces} piece(s), {Missing} stretch(es) missing from both", hour, plan.Pieces.Count, plan.Missing.Count);
             }
             catch (MergeVerificationException ex)
             {
                 Record(new ConsolidationFailure(hour, ex.Message, now, Inputs(hour, a, b)));
-                logger.LogError("{Hour:O}: the merged hour failed verification, the run stops here: {Reason}", hour, ex.Message);
-                stopped = true;
+                logger.LogError("{Hour:O}: the merged hour failed verification; merging stops here: {Reason}", hour, ex.Message);
                 break;
             }
         }
 
-        _last = new RunSummary(now, eligible.Count - done, waiting);
-        if (stopped) return;
+        if (emptiesChanged) WriteEmpty(empties);
+        _last = new RunSummary(now, eligible.Count - settledHours, waiting);
 
-        if (settings.Holds) WithHeld(ct, () => Hold(now, ct));
+        // Holding and rechecks run on every pass, a failed one included, so ready records stay fresh.
+        var unresolved = Failures().Select(f => f.HourUtc).ToHashSet();
+        if (settings.Holds) WithHeld(ct, () => Hold(now, open, unresolved, empties, ct));
         WithHeld(ct, () => Recheck(now, ct));
     }
 
@@ -204,40 +238,93 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         }
     }
 
-    /// <summary>Holds each closed source segment whose merged hours, from the hour before its start to the hour after its end, all exist.</summary>
-    void Hold(DateTimeOffset now, CancellationToken ct)
+    /// <summary>
+    /// Holds each closed source segment when every hour it overlaps is merged and the hour before and the hour after it
+    /// are each merged or resolved empty (<see cref="ResolvedEmpty"/>). Holding.Hold is given the merged hours among
+    /// those, in order, and checks every frame against them.
+    /// </summary>
+    void Hold(DateTimeOffset now, DateTimeOffset? open, IReadOnlySet<DateTimeOffset> failed, Dictionary<DateTimeOffset, EmptyHour> empties, CancellationToken ct)
     {
         var hours = MergedHours();
-        foreach (var source in settings.Sources)
-            foreach (var s in Scan(source))
+        var a = Scan(settings.A);
+        var b = Scan(settings.B);
+        var segments = a.Concat(b).ToList();
+        var resolved = new Dictionary<DateTimeOffset, bool>();
+        bool Neighbour(DateTimeOffset h)
+        {
+            if (hours.Contains(h)) return true;
+            if (!resolved.TryGetValue(h, out var ok)) resolved[h] = ok = ResolvedEmpty(h, now, open, failed, empties, segments, a, b);
+            return ok;
+        }
+
+        foreach (var s in segments)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (s.Meta.EndUtc + Eligibility.MinAge > now || !Settled(s)) continue;
+
+            var first = FloorHour(s.Meta.StartUtc);
+            var last = FloorHour(s.Meta.EndUtc > s.Meta.StartUtc ? s.Meta.EndUtc.AddTicks(-1) : s.Meta.StartUtc);
+            var complete = Neighbour(first.AddHours(-1)) && Neighbour(last.AddHours(1));
+            for (var h = first; h <= last && complete; h = h.AddHours(1)) complete = hours.Contains(h);
+            if (!complete) continue;
+
+            var files = new List<string>();
+            for (var h = first.AddHours(-1); h <= last.AddHours(1); h = h.AddHours(1))
+                if (hours.Contains(h)) files.Add(MergedPath(h));
+
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                if (s.Meta.EndUtc + Eligibility.MinAge > now || !Settled(s)) continue;
-
-                var last = FloorHour(s.Meta.EndUtc > s.Meta.StartUtc ? s.Meta.EndUtc.AddTicks(-1) : s.Meta.StartUtc).AddHours(1);
-                var files = new List<string>();
-                var complete = true;
-                for (var h = FloorHour(s.Meta.StartUtc).AddHours(-1); h <= last && complete; h = h.AddHours(1))
-                {
-                    complete = hours.Contains(h);
-                    files.Add(MergedPath(h));
-                }
-
-                if (!complete) continue;
-                try
-                {
-                    Holding.Hold(s, files, now);
-                    logger.LogInformation("Held {Recorder} {File}", s.Recorder, s.RelativeFile);
-                }
-                catch (HoldingException ex)
-                {
-                    logger.LogWarning("{Recorder} {File}: {Reason}", s.Recorder, s.RelativeFile, ex.Message);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    logger.LogWarning("{Recorder} {File}: not held: {Reason}", s.Recorder, s.RelativeFile, ex.Message);
-                }
+                Holding.Hold(s, files, now);
+                logger.LogInformation("Held {Recorder} {File}", s.Recorder, s.RelativeFile);
             }
+            catch (HoldingException ex)
+            {
+                logger.LogWarning("{Recorder} {File}: {Reason}", s.Recorder, s.RelativeFile, ex.Message);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning("{Recorder} {File}: not held: {Reason}", s.Recorder, s.RelativeFile, ex.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// An unmerged hour that holds nothing to merge and never will: ended <see cref="Eligibility.MinAge"/> ago, no open
+    /// segment starts before its end, no failure is recorded for it, and either no segment of either recorder overlaps it
+    /// or it was planned and held no frame (empty.json) with the same sources since.
+    /// </summary>
+    static bool ResolvedEmpty(
+        DateTimeOffset hour, DateTimeOffset now, DateTimeOffset? open, IReadOnlySet<DateTimeOffset> failed,
+        Dictionary<DateTimeOffset, EmptyHour> empties, List<SourceSegment> segments, IReadOnlyList<SourceSegment> a, IReadOnlyList<SourceSegment> b)
+    {
+        var end = hour.AddHours(1);
+        if (end + Eligibility.MinAge > now) return false;
+        if (open is { } o && o < end) return false;
+        if (failed.Contains(hour)) return false;
+        if (!segments.Any(s => s.Meta.StartUtc < end && s.Meta.EndUtc > hour)) return true;
+        return empties.TryGetValue(hour, out var known) && SameInputs(known.Sources, Inputs(hour, a, b, TimeSpan.Zero));
+    }
+
+    Dictionary<DateTimeOffset, EmptyHour> ReadEmpty()
+    {
+        if (!File.Exists(EmptyFile)) return [];
+        try
+        {
+            return (JsonSerializer.Deserialize<List<EmptyHour>>(File.ReadAllText(EmptyFile), Options) ?? []).ToDictionary(e => e.HourUtc);
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            logger.LogError("{File} could not be read, so its hours are planned again: {Reason}", EmptyFile, ex.Message);
+            return [];
+        }
+    }
+
+    void WriteEmpty(Dictionary<DateTimeOffset, EmptyHour> empties)
+    {
+        Directory.CreateDirectory(settings.MergedStationDir);
+        var tmp = EmptyFile + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(empties.Values.OrderBy(e => e.HourUtc).ToList(), Options));
+        File.Move(tmp, EmptyFile, overwrite: true);
     }
 
     /// <summary>Rechecks held records due for their first check, and ready records whose check is older than <see cref="RecheckReadyAfter"/>.</summary>
@@ -529,11 +616,15 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         return File.Exists(previous) && File.Exists(Path.ChangeExtension(previous, ".json")) ? MergedHourWriter.Tail(previous) : [];
     }
 
-    /// <summary>The source segments a merge of the hour reads, with their checksums now.</summary>
-    static List<FailureSource> Inputs(DateTimeOffset hour, IReadOnlyList<SourceSegment> a, IReadOnlyList<SourceSegment> b)
+    /// <summary>
+    /// The source segments overlapping the hour widened by <paramref name="margin"/> (default <see cref="InputMargin"/>,
+    /// what a merge of the hour reads), with their checksums now. An empty hour uses no margin, so holding the segments
+    /// beside it does not count as a change.
+    /// </summary>
+    static List<FailureSource> Inputs(DateTimeOffset hour, IReadOnlyList<SourceSegment> a, IReadOnlyList<SourceSegment> b, TimeSpan? margin = null)
     {
-        var from = hour - InputMargin;
-        var to = hour.AddHours(1) + InputMargin;
+        var from = hour - (margin ?? InputMargin);
+        var to = hour.AddHours(1) + (margin ?? InputMargin);
         return [.. a.Concat(b)
             .Where(s => s.Meta.StartUtc < to && s.Meta.EndUtc > from)
             .Select(s => new FailureSource(s.Recorder, s.RelativeFile, Sha256(s.AudioPath)))

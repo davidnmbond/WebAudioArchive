@@ -23,7 +23,7 @@ if (args.Contains("--healthcheck"))
 var builder = WebApplication.CreateBuilder(args);
 
 // The consolidator (issue #104) is this image started with --consolidate: it never builds the recorder.
-if (ConsolidatorHost.Requested(args, builder.Configuration)) return await ConsolidatorHost.RunAsync(builder);
+if (ConsolidatorHost.Requested(args)) return await ConsolidatorHost.RunAsync(builder);
 
 var configPath = Setting(builder.Configuration, "WAA_CONFIG", "/config/stations.json");
 var dataRoot = Setting(builder.Configuration, "WAA_DATA", "/data");

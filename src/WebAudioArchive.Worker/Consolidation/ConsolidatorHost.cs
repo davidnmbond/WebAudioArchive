@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using WebAudioArchive.Core.Consolidation;
 using WebAudioArchive.Core.Recording;
 
@@ -9,11 +10,25 @@ namespace WebAudioArchive.Worker.Consolidation;
 /// </summary>
 public static class ConsolidatorHost
 {
-    /// <summary>True for --consolidate on the command line, or the setting consolidate=true (as a test host passes it).</summary>
-    public static bool Requested(string[] args, IConfiguration configuration) =>
-        args.Contains("--consolidate") || string.Equals(configuration["consolidate"], "true", StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// True only for the --consolidate command-line argument. A setting or environment variable never turns a recorder
+    /// into the consolidator, because that would silently stop it recording.
+    /// </summary>
+    public static bool Requested(string[] args) => args.Contains("--consolidate", StringComparer.Ordinal);
 
     public static async Task<int> RunAsync(WebApplicationBuilder builder)
+    {
+        var (app, exitCode) = Build(builder);
+        if (app is null) return exitCode;
+        await app.RunAsync();
+        return 0;
+    }
+
+    /// <summary>
+    /// The consolidator app, or null with the exit code when its settings or folders are wrong (the reasons are written
+    /// to standard error). An <see cref="IClock"/> already registered is kept.
+    /// </summary>
+    public static (WebApplication? App, int ExitCode) Build(WebApplicationBuilder builder)
     {
         string? Get(string name) => builder.Configuration[name] ?? Environment.GetEnvironmentVariable(name);
 
@@ -21,21 +36,21 @@ public static class ConsolidatorHost
         if (settings is null)
         {
             foreach (var e in errors) Console.Error.WriteLine("config error: " + e);
-            return 2;
+            return (null, 2);
         }
 
         var missing = settings.Sources.Select(s => s.Root).Append(settings.MergedRoot).Where(d => !Directory.Exists(d)).ToList();
         if (missing.Count > 0)
         {
             foreach (var d in missing) Console.Error.WriteLine($"data error: {d} does not exist");
-            return 3;
+            return (null, 3);
         }
 
         if (builder.Configuration["urls"] is null && Environment.GetEnvironmentVariable("ASPNETCORE_URLS") is null)
             builder.WebHost.UseUrls($"http://+:{settings.Port}");
 
         builder.Services.AddSingleton(settings);
-        builder.Services.AddSingleton<IClock, SystemClock>();
+        builder.Services.TryAddSingleton<IClock, SystemClock>();
         builder.Services.AddSingleton<ConsolidatorService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<ConsolidatorService>());
 
@@ -54,7 +69,6 @@ public static class ConsolidatorHost
             : service.Retry(hour) ? Results.Ok(new { hourUtc = hour.ToUniversalTime(), retry = true })
             : Results.NotFound(new { hourUtc = hour.ToUniversalTime(), error = "no failure is recorded for that hour" }));
 
-        await app.RunAsync();
-        return 0;
+        return (app, 0);
     }
 }

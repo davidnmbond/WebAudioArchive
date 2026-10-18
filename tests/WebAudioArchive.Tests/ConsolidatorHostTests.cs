@@ -1,9 +1,11 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using WebAudioArchive.Core.Analysis;
 using WebAudioArchive.Core.Consolidation;
@@ -50,26 +52,46 @@ public sealed class ConsolidatorHostTests : IDisposable
                 SegmentFiles.Live(Root(id), "burst", Epoch, start, start + SegmentLength);
     }
 
-    WebApplicationFactory<Program> Host(string mode, ManualClock clock, string analysis = "") =>
-        new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+    /// <summary>
+    /// The consolidator host as --consolidate builds it, on a test server. Built through <see cref="ConsolidatorHost.Build"/>
+    /// directly, because production starts it only for the command-line argument, never for a setting.
+    /// </summary>
+    sealed class TestConsolidator(Dictionary<string, string?> settings, IClock clock) : IAsyncDisposable
+    {
+        WebApplication? _app;
+
+        public async Task<(HttpClient Client, ConsolidatorService Service)> StartAsync()
         {
-            b.UseSetting("consolidate", "true");
-            b.UseSetting("WAA_STATION", "burst");
-            b.UseSetting("WAA_SOURCES", $"a={Root("a")},b={Root("b")}");
-            b.UseSetting("WAA_MERGED", MergedRoot);
-            b.UseSetting("WAA_ANALYSIS", analysis);
-            b.UseSetting("WAA_CONSOLIDATE_MODE", mode);
-            b.ConfigureTestServices(s => s.AddSingleton<IClock>(clock));
-        });
+            var builder = WebApplication.CreateBuilder();
+            builder.Configuration.AddInMemoryCollection(settings);
+            builder.WebHost.UseTestServer();
+            builder.Services.AddSingleton(clock);
+            var (app, exitCode) = ConsolidatorHost.Build(builder);
+            Assert.True(app is not null, $"the consolidator did not build (exit code {exitCode})");
+            _app = app;
+            await app.StartAsync();
+            var service = app.Services.GetRequiredService<ConsolidatorService>();
+            await service.FirstRun.WaitAsync(TimeSpan.FromSeconds(60));
+            return (app.GetTestClient(), service);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_app is not null) await _app.DisposeAsync();
+        }
+    }
+
+    TestConsolidator Host(string mode, ManualClock clock, string analysis = "") => new(new()
+    {
+        ["WAA_STATION"] = "burst",
+        ["WAA_SOURCES"] = $"a={Root("a")},b={Root("b")}",
+        ["WAA_MERGED"] = MergedRoot,
+        ["WAA_ANALYSIS"] = analysis,
+        ["WAA_CONSOLIDATE_MODE"] = mode,
+    }, clock);
 
     /// <summary>Starts the host and waits for the run it does at start.</summary>
-    static async Task<(HttpClient Client, ConsolidatorService Service)> StartAsync(WebApplicationFactory<Program> factory)
-    {
-        var client = factory.CreateClient();
-        var service = factory.Services.GetRequiredService<ConsolidatorService>();
-        await service.FirstRun.WaitAsync(TimeSpan.FromSeconds(60));
-        return (client, service);
-    }
+    static Task<(HttpClient Client, ConsolidatorService Service)> StartAsync(TestConsolidator host) => host.StartAsync();
 
     static async Task<JsonElement> Json(HttpResponseMessage response) =>
         JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
@@ -133,20 +155,20 @@ public sealed class ConsolidatorHostTests : IDisposable
         foreach (var hour in Starts.Select(s => new DateTimeOffset(s.Year, s.Month, s.Day, s.Hour, 0, 0, TimeSpan.Zero)))
             Assert.True(File.Exists(MergedMp3(hour)), hour.ToString("O"));
 
-        // Only the 10:00 segments have merged hours on both sides (09:00 to 11:00); 09:59 needs 08:00 and 11:00 needs 12:00.
+        // Every hour each segment overlaps is merged, and the hours beside them are merged or hold no recording at all (08:00, 12:00).
         foreach (var id in new[] { "a", "b" })
         {
             Assert.False(File.Exists(MasterMp3(id, T0)));
             Assert.True(File.Exists(HeldMp3(id, T0)));
             Assert.True(File.Exists(Holding.RecordPath(HeldMp3(id, T0))));
-            Assert.True(File.Exists(MasterMp3(id, Starts[0])));
-            Assert.True(File.Exists(MasterMp3(id, Starts[2])));
+            Assert.True(File.Exists(HeldMp3(id, Starts[0])));
+            Assert.True(File.Exists(HeldMp3(id, Starts[2])));
         }
 
         var health = await Healthz(client);
         Assert.Equal("hold", health.GetProperty("mode").GetString());
         Assert.Equal(T0.AddHours(1), Utc(health.GetProperty("lastMergedHourUtc")));
-        Assert.Equal(2, health.GetProperty("held").GetInt32());
+        Assert.Equal(6, health.GetProperty("held").GetInt32());
         Assert.Equal(0, health.GetProperty("ready").GetInt32());
         Assert.Equal(0, health.GetProperty("backlogHours").GetInt32());
     }
@@ -206,9 +228,9 @@ public sealed class ConsolidatorHostTests : IDisposable
         clock.Advance(Holding.HoldPeriod);
         await service.RunOnceAsync(CancellationToken.None);
         var ready = await Json(await client.GetAsync("/held"));
-        Assert.Equal(2, ready.GetArrayLength());
+        Assert.Equal(6, ready.GetArrayLength());
         Assert.All(ready.EnumerateArray(), r => Assert.Equal("ready", r.GetProperty("status").GetString()));
-        Assert.Equal(2, (await Healthz(client)).GetProperty("ready").GetInt32());
+        Assert.Equal(6, (await Healthz(client)).GetProperty("ready").GetInt32());
 
         var results = (await Json(await client.PostAsJsonAsync("/deletions", Body(
             ("a", "2026/10-15/100000.mp3"), ("a", "../../escape.mp3"), ("c", "2026/10-15/100000.mp3"))))).EnumerateArray().ToList();
@@ -225,7 +247,7 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.Contains("\"manager\"", File.ReadAllText(Path.Combine(MergedRoot, "burst", "deletions.jsonl")));
 
         var health = await Healthz(client);
-        Assert.Equal(1, health.GetProperty("ready").GetInt32());
+        Assert.Equal(5, health.GetProperty("ready").GetInt32());
         Assert.Equal(aBytes, health.GetProperty("deletedBytes").GetInt64());
 
         // A check older than a day must be renewed first; the hourly run renews it.
@@ -239,7 +261,7 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.True(fresh.GetProperty("deleted").GetBoolean(), fresh.GetProperty("reason").ToString());
         Assert.False(File.Exists(HeldMp3("b", T0)));
         health = await Healthz(client);
-        Assert.Equal(0, health.GetProperty("ready").GetInt32());
+        Assert.Equal(4, health.GetProperty("ready").GetInt32());
         Assert.Equal(aBytes + bBytes, health.GetProperty("deletedBytes").GetInt64());
     }
 
@@ -247,6 +269,8 @@ public sealed class ConsolidatorHostTests : IDisposable
     public async Task A_failed_hour_is_not_retried_until_a_source_changes_or_retry_is_posted()
     {
         Record();
+        // A minute at 10:59 too, so 10:00 runs up to 11:00 and 11:00 can join it by its tail.
+        foreach (var id in new[] { "a", "b" }) SegmentFiles.Live(Root(id), "burst", Epoch, T0.AddMinutes(59), T0.AddHours(1));
         var corrupt = MasterMp3("a", T0);
         var original = File.ReadAllBytes(corrupt);
         File.AppendAllBytes(corrupt, [0, 0, 0, 0]);
@@ -263,6 +287,9 @@ public sealed class ConsolidatorHostTests : IDisposable
         await service.RunOnceAsync(CancellationToken.None);
         Assert.Equal(Now, FailedUtc());
         Assert.False(File.Exists(MergedMp3(T0)));
+        // Merging stops at the unresolved failure: 11:00 waits, so it can later join 10:00 by its tail.
+        Assert.False(File.Exists(MergedMp3(T0.AddHours(1))));
+        Assert.Equal(2, (await Healthz(client)).GetProperty("backlogHours").GetInt32());
 
         // A manager asks: the entry goes and the next run tries again (and fails again, so a new entry).
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/retry", new { hourUtc = "2026-10-15T08:00:00Z" })).StatusCode);
@@ -271,13 +298,129 @@ public sealed class ConsolidatorHostTests : IDisposable
         await service.RunOnceAsync(CancellationToken.None);
         Assert.Equal(Now.AddHours(1), FailedUtc());
         Assert.False(File.Exists(MergedMp3(T0)));
+        Assert.False(File.Exists(MergedMp3(T0.AddHours(1))));
 
-        // The source changes: the hour is tried again, merges, and the failure is cleared.
+        // The source changes: the hour is tried again, merges, and the failure is cleared; 11:00 follows on 10:00's tail.
         File.WriteAllBytes(corrupt, original);
         clock.Advance(TimeSpan.FromHours(1));
         await service.RunOnceAsync(CancellationToken.None);
         Assert.True(File.Exists(MergedMp3(T0)));
+        var eleven = SegmentMetaStore.Read(Path.ChangeExtension(MergedMp3(T0.AddHours(1)), ".json"));
+        Assert.NotNull(eleven?.Merge);
+        Assert.False(eleven.Merge.JoinedByTime);
+        Assert.Equal(0, (await Healthz(client)).GetProperty("backlogHours").GetInt32());
         Assert.Equal(0, (await Healthz(client)).GetProperty("failures").GetArrayLength());
         Assert.Empty(JsonDocument.Parse(File.ReadAllText(failures)).RootElement.EnumerateArray());
+    }
+
+    /// <summary>A and B each record a minute at 10:00 and 11:00 only: nothing at all in 09:00.</summary>
+    void RecordFromTen()
+    {
+        Directory.CreateDirectory(MergedRoot);
+        foreach (var id in new[] { "a", "b" })
+            foreach (var start in Starts.Skip(1))
+                SegmentFiles.Live(Root(id), "burst", Epoch, start, start + SegmentLength);
+    }
+
+    [Fact]
+    public async Task A_segment_beside_an_hour_with_no_recording_is_held()
+    {
+        RecordFromTen();
+        await using var factory = Host("hold", new ManualClock(Now));
+        var (client, _) = await StartAsync(factory);
+
+        Assert.False(File.Exists(MergedMp3(T0.AddHours(-1))));
+        foreach (var id in new[] { "a", "b" })
+        {
+            Assert.True(File.Exists(HeldMp3(id, T0)), id);
+            Assert.False(File.Exists(MasterMp3(id, T0)), id);
+            Assert.True(File.Exists(HeldMp3(id, T0.AddHours(1))), "12:00 holds no recording either");
+        }
+
+        var health = await Healthz(client);
+        Assert.Equal(4, health.GetProperty("held").GetInt32());
+        Assert.Equal(0, health.GetProperty("backlogHours").GetInt32());
+    }
+
+    [Fact]
+    public async Task An_hour_whose_segments_hold_no_frame_is_resolved_empty_and_its_neighbours_are_held()
+    {
+        RecordFromTen();
+        // A segment that closed with no audio at all: the 09:00 hour has a source but nothing to merge.
+        var empty = new DateTimeOffset(2026, 10, 15, 9, 30, 0, TimeSpan.Zero);
+        SegmentFiles.Live(Root("a"), "burst", Epoch, empty, empty);
+
+        await using var factory = Host("hold", new ManualClock(Now));
+        var (client, service) = await StartAsync(factory);
+
+        Assert.False(File.Exists(MergedMp3(T0.AddHours(-1))));
+        var stored = JsonDocument.Parse(File.ReadAllText(Path.Combine(MergedRoot, "burst", "empty.json"))).RootElement;
+        Assert.Equal(T0.AddHours(-1), Utc(Assert.Single(stored.EnumerateArray()).GetProperty("hourUtc")));
+        Assert.True(File.Exists(HeldMp3("a", T0)));
+        Assert.True(File.Exists(HeldMp3("b", T0)));
+        Assert.True(File.Exists(MasterMp3("a", empty)), "the empty segment's own hour is not merged, so it stays");
+        Assert.Equal(0, (await Healthz(client)).GetProperty("backlogHours").GetInt32());
+
+        // Not planned again on the next pass.
+        var written = File.GetLastWriteTimeUtc(Path.Combine(MergedRoot, "burst", "empty.json"));
+        await service.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(written, File.GetLastWriteTimeUtc(Path.Combine(MergedRoot, "burst", "empty.json")));
+        Assert.Equal(0, (await Healthz(client)).GetProperty("backlogHours").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_merged_hour_whose_sidecar_was_never_written_is_merged_again()
+    {
+        Record();
+        await using var factory = Host("merge", new ManualClock(Now));
+        var (client, service) = await StartAsync(factory);
+        var mp3 = MergedMp3(T0);
+        var json = Path.ChangeExtension(mp3, ".json");
+        var good = File.ReadAllBytes(mp3);
+
+        // Killed after the audio was published but before its sidecar: the hour is not merged yet.
+        File.Delete(json);
+        File.WriteAllBytes(mp3, good[..(good.Length / 2)]);
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(json));
+        Assert.Equal(good, File.ReadAllBytes(mp3));
+        Assert.Equal(T0.AddHours(1), Utc((await Healthz(client)).GetProperty("lastMergedHourUtc")));
+    }
+
+    [Fact]
+    public async Task A_consolidate_setting_or_environment_variable_does_not_start_the_consolidator()
+    {
+        Assert.True(ConsolidatorHost.Requested(["--consolidate"]));
+        Assert.False(ConsolidatorHost.Requested([]));
+        Assert.False(ConsolidatorHost.Requested(["--consolidate=true"]));
+
+        Directory.CreateDirectory(_root);
+        var config = Path.Combine(_root, "stations.json");
+        File.WriteAllText(config, """{ "stations": [ { "id": "off", "name": "Off FM", "listenUrl": "http://127.0.0.1:9/", "enabled": false } ] }""");
+        var data = Path.Combine(_root, "data");
+        Directory.CreateDirectory(data);
+
+        var before = Environment.GetEnvironmentVariable("consolidate");
+        Environment.SetEnvironmentVariable("consolidate", "true");
+        try
+        {
+            await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            {
+                b.UseSetting("consolidate", "true");
+                b.UseSetting("WAA_CONFIG", config);
+                b.UseSetting("WAA_DATA", data);
+                b.UseSetting("WAA_INSTANCE_ID", "still-a-recorder");
+            });
+            var client = factory.CreateClient();
+
+            Assert.Null(factory.Services.GetService<ConsolidatorService>());
+            var body = await Json(await client.GetAsync("/healthz"));
+            Assert.Equal("still-a-recorder", body.GetProperty("instance").GetString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("consolidate", before);
+        }
     }
 }
