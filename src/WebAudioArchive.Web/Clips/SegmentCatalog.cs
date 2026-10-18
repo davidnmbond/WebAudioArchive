@@ -72,7 +72,8 @@ public sealed class SegmentCatalog(WebSettings settings, TimeProvider time, ILog
 
     public IReadOnlyList<CatalogSegment> Segments(string recorder)
     {
-        var r = settings.Find(recorder) ?? throw new ArgumentException($"Unknown recorder '{recorder}'", nameof(recorder));
+        var r = (recorder == WebSettings.MergedId && settings.MergedRoot is { } merged ? new RecorderSettings(WebSettings.MergedId, merged, null) : null)
+            ?? settings.Find(recorder) ?? throw new ArgumentException($"Unknown recorder '{recorder}'", nameof(recorder));
         var now = time.GetUtcNow();
         if (_cache.TryGetValue(r.Id, out var hit) && now - hit.At < TimeSpan.FromSeconds(CacheSeconds) && now >= hit.At)
             return hit.List;
@@ -82,8 +83,13 @@ public sealed class SegmentCatalog(WebSettings settings, TimeProvider time, ILog
         return list;
     }
 
-    public IReadOnlyList<RecorderSegments> All() =>
-        settings.Recorders.Select(r => new RecorderSegments(r.Id, Segments(r.Id))).ToList();
+    /// <summary>Every source in preference order: merged first when set (so it wins ties in BestCovered), then the recorders as configured.</summary>
+    public IReadOnlyList<RecorderSegments> All()
+    {
+        var sources = settings.Recorders.Select(r => r.Id).ToList();
+        if (settings.MergedRoot is not null) sources.Insert(0, WebSettings.MergedId);
+        return sources.Select(id => new RecorderSegments(id, Segments(id))).ToList();
+    }
 
     /// <summary>Every readable segment under &lt;root&gt;/&lt;station&gt;/master, in start order, reading every sidecar.</summary>
     public static IReadOnlyList<CatalogSegment> Scan(string root, string station, string recorder, ILogger log) =>

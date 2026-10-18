@@ -13,7 +13,7 @@ public sealed class SettingsException(string message) : Exception(message);
 /// <summary>
 /// Web app settings, read from environment variables (or any configuration source with the same names):
 /// WAA_STATION (default burst), WAA_RECORDERS (a=/data/a,b=/data/b), WAA_RECORDER_HEALTH
-/// (a=http://recorder-a:8080/healthz,...), WAA_CACHE (default /cache).
+/// (a=http://recorder-a:8080/healthz,...), WAA_MERGED (optional, the consolidator's merged root), WAA_CACHE (default /cache).
 /// </summary>
 public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderSettings> Recorders, string CacheDir)
 {
@@ -22,6 +22,12 @@ public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderS
 
     /// <summary>The analysis output folder (WAA_ANALYSIS, read-only), or null when analysis is not set up.</summary>
     public string? AnalysisDir { get; init; }
+
+    /// <summary>Recorder id of the consolidator's merged hours.</summary>
+    public const string MergedId = "merged";
+
+    /// <summary>The consolidator's output root (WAA_MERGED, read-only: data/merged), or null when merged hours are not read.</summary>
+    public string? MergedRoot { get; init; }
 
     public RecorderSettings? Find(string id) => Recorders.FirstOrDefault(r => r.Id == id);
 
@@ -58,9 +64,11 @@ public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderS
 
         var cache = get("WAA_CACHE");
         var analysis = get("WAA_ANALYSIS");
+        var merged = get("WAA_MERGED");
         return new WebSettings(station, recorders, string.IsNullOrWhiteSpace(cache) ? "/cache" : cache.Trim())
         {
             AnalysisDir = string.IsNullOrWhiteSpace(analysis) ? null : analysis.Trim(),
+            MergedRoot = string.IsNullOrWhiteSpace(merged) ? null : merged.Trim(),
         };
     }
 

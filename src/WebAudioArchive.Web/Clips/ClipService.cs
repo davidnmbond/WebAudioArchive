@@ -60,8 +60,10 @@ public sealed class ClipService(WebSettings settings, SegmentCatalog catalog, Ti
     {
         if (station is not null && station != settings.Station)
             throw new ClipException(400, $"Unknown station '{station}'. This app serves '{settings.Station}'.");
-        if (request.Recorder != "auto" && settings.Find(request.Recorder) is null)
-            throw new ClipException(400, $"Unknown recorder '{request.Recorder}'. Use auto or one of: {string.Join(", ", settings.Recorders.Select(r => r.Id))}.");
+        var known = settings.Recorders.Select(r => r.Id).ToList();
+        if (settings.MergedRoot is not null) known.Insert(0, WebSettings.MergedId);
+        if (request.Recorder != "auto" && !known.Contains(request.Recorder))
+            throw new ClipException(400, $"Unknown recorder '{request.Recorder}'. Use auto or one of: {string.Join(", ", known)}.");
 
         return ClipPlanner.Plan(request, catalog.All(), time.GetUtcNow(), ClipPlanner.DefaultMaxClip);
     }

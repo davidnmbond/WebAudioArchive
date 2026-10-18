@@ -78,6 +78,7 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 .show-future { --pd-calendar-item-bg: var(--bs-secondary-bg); --pd-calendar-item-fg: var(--bs-body-color); }
 .rec-a { --pd-calendar-item-bg: var(--bs-primary-bg-subtle); --pd-calendar-item-fg: var(--bs-primary-text-emphasis); }
 .rec-b { --pd-calendar-item-bg: var(--bs-info-bg-subtle); --pd-calendar-item-fg: var(--bs-info-text-emphasis); }
+.rec-merged { --pd-calendar-item-bg: var(--bs-success-bg-subtle); --pd-calendar-item-fg: var(--bs-success-text-emphasis); }
 .rec-gap { --pd-calendar-item-bg: var(--bs-danger); --pd-calendar-item-fg: var(--bs-white); }
 /* Missing from every recorder: the worst case, so it is drawn heavier than one recorder's gap. */
 .rec-missing { --pd-calendar-item-bg: var(--bs-danger-text-emphasis); --pd-calendar-item-fg: var(--bs-body-bg); }

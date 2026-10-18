@@ -51,7 +51,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
         var all = catalog.All();
         foreach (var r in all)
         {
-            var label = r.Recorder.ToUpperInvariant();
+            var label = r.Recorder == WebSettings.MergedId ? "M" : r.Recorder.ToUpperInvariant();
             CatalogSegment? previous = null;
             foreach (var s in r.Segments)
             {
