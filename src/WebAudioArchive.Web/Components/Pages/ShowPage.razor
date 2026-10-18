@@ -113,8 +113,8 @@ else
                         <PDComboBox TItem="RecorderChoice" Items="RecorderChoices" SelectedItem="SelectedRecorder" SelectedItemChanged="OnRecorderChanged"
                                     ItemToId="c => c.Id" ItemToString="c => c.Text" Filter="RecorderChoice.Matches" />
                     </div>
-                    <PDButton Id="show-prepare" Text="@(Busy ? "Preparing..." : "Update")" IconCssClass="fas fa-sync-alt" CssClass="btn-primary" Size="ButtonSizes.Small"
-                              ToolTip="Rebuild the timeline with this margin and recorder" IsEnabled="@(!Busy)" Click="_ => PrepareAsync()" />
+                    <PDButton Id="show-prepare" Text="Update" IconCssClass="fas fa-sync-alt" CssClass="btn-primary" Size="ButtonSizes.Small"
+                              ToolTip="Rebuild the timeline with this margin and recorder" Click="_ => Prepare()" />
                 </div>
             }
         </div>
@@ -137,117 +137,113 @@ else
             </div>
         }
 
-        <div class="show-body">
-            <PDBusyOverlay IsBusy="@Busy" OverlayCssClass="fas fa-spinner fa-spin fa-2x">
-                @if (Clip is not null && Timeline is not null)
-                {
-                    @if (Warnings.Count > 0)
-                    {
-                        <div class="alert alert-warning small py-1 px-2 mb-2" id="show-warnings" role="status">
-                            <i class="fas fa-exclamation-triangle me-1" aria-hidden="true"></i>
-                            @string.Join(" ", Warnings)
+        @if (Clip is not null && Timeline is not null)
+        {
+            @if (Warnings.Count > 0)
+            {
+                <div class="alert alert-warning small py-1 px-2 mb-2" id="show-warnings" role="status">
+                    <i class="fas fa-exclamation-triangle me-1" aria-hidden="true"></i>
+                    @string.Join(" ", Warnings)
+                </div>
+            }
+
+            <ClipPlayer @ref="_player" Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds"
+                        Timeline="@ClipTimeline" Markers="@Markers" Segments="@Timeline.Segments"
+                        RangeStart="@Timeline.RangeStart" RangeEnd="@Timeline.RangeEnd" StartAt="@StartAt" PositionChanged="OnPosition"
+                        Title="@($"{Show.Title}: recorder {Clip.Plan.Recorder.ToUpperInvariant()}, {MarginMinutes} minute margins")" />
+
+            <div class="show-split mt-2" id="show-split">
+                <PDSplitter Direction="SplitDirection.Horizontal" GutterSize="8" CssClass="border rounded">
+                    <PDSplitPanel Size="2" MinSize="200">
+                        <div class="show-pane" id="show-events">
+                            <div class="show-pane-head">
+                                <span class="fw-semibold">Events</span>
+                                <span class="badge text-bg-secondary">@Events.Count</span>
+                            </div>
+                            <ul class="list-unstyled mb-0 show-event-list">
+                                @foreach (var e in Events)
+                                {
+                                    <li>
+                                        <button type="button" class="@EventCss(e)" data-kind="@e.Kind" data-id="@e.Id" style="--waa-kind: @ShowEvents.KindColor(e.Kind)"
+                                                title="@e.Detail" @onclick="() => SelectAsync(e)">
+                                            <span class="show-event-time">@Clock(e.Start)</span>
+                                            <span class="show-event-kind">@ShowEvents.KindLabel(e.Kind)</span>
+                                            <span class="show-event-label">@e.Label</span>
+                                            <span class="show-event-utc">@ClipMarkers.Time(e.StartUtc)</span>
+                                        </button>
+                                    </li>
+                                }
+                            </ul>
                         </div>
-                    }
-
-                    <ClipPlayer @ref="_player" Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds"
-                                Timeline="@ClipTimeline" Markers="@Markers" Segments="@Timeline.Segments"
-                                RangeStart="@Timeline.RangeStart" RangeEnd="@Timeline.RangeEnd" StartAt="@StartAt" PositionChanged="OnPosition"
-                                Title="@($"{Show.Title}: recorder {Clip.Plan.Recorder.ToUpperInvariant()}, {MarginMinutes} minute margins")" />
-
-                    <div class="show-split mt-2" id="show-split">
-                        <PDSplitter Direction="SplitDirection.Horizontal" GutterSize="8" CssClass="border rounded">
-                            <PDSplitPanel Size="2" MinSize="200">
-                                <div class="show-pane" id="show-events">
+                    </PDSplitPanel>
+                    <PDSplitPanel Size="3" MinSize="240">
+                        <div class="show-pane" id="show-detail">
+                            @if (Selected is { IsSong: true } song)
+                            {
+                                <section id="show-song" aria-label="Song">
                                     <div class="show-pane-head">
-                                        <span class="fw-semibold">Events</span>
-                                        <span class="badge text-bg-secondary">@Events.Count</span>
+                                        <span class="fw-semibold"><i class="fas fa-music me-1" aria-hidden="true"></i>Song</span>
+                                        <PDButton Text="Transcript" IconCssClass="fas fa-align-left" Size="ButtonSizes.Small" CssClass="btn-outline-secondary ms-auto"
+                                                  ToolTip="Show the transcript" Click="_ => ClearSelection()" />
                                     </div>
-                                    <ul class="list-unstyled mb-0 show-event-list">
-                                        @foreach (var e in Events)
+                                    <div class="p-2">
+                                        @if (Evidence(song, "artworkUrl", "artwork") is { } art && art.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                                         {
-                                            <li>
-                                                <button type="button" class="@EventCss(e)" data-kind="@e.Kind" data-id="@e.Id" style="--waa-kind: @ShowEvents.KindColor(e.Kind)"
-                                                        title="@e.Detail" @onclick="() => SelectAsync(e)">
-                                                    <span class="show-event-time">@Clock(e.Start)</span>
-                                                    <span class="show-event-kind">@ShowEvents.KindLabel(e.Kind)</span>
-                                                    <span class="show-event-label">@e.Label</span>
-                                                    <span class="show-event-utc">@ClipMarkers.Time(e.StartUtc)</span>
-                                                </button>
-                                            </li>
+                                            <img src="@art" alt="Artwork" class="show-song-art rounded mb-2" referrerpolicy="no-referrer" />
                                         }
-                                    </ul>
-                                </div>
-                            </PDSplitPanel>
-                            <PDSplitPanel Size="3" MinSize="240">
-                                <div class="show-pane" id="show-detail">
-                                    @if (Selected is { IsSong: true } song)
-                                    {
-                                        <section id="show-song" aria-label="Song">
-                                            <div class="show-pane-head">
-                                                <span class="fw-semibold"><i class="fas fa-music me-1" aria-hidden="true"></i>Song</span>
-                                                <PDButton Text="Transcript" IconCssClass="fas fa-align-left" Size="ButtonSizes.Small" CssClass="btn-outline-secondary ms-auto"
-                                                          ToolTip="Show the transcript" Click="_ => ClearSelection()" />
-                                            </div>
-                                            <div class="p-2">
-                                                @if (Evidence(song, "artworkUrl", "artwork") is { } art && art.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                                                {
-                                                    <img src="@art" alt="Artwork" class="show-song-art rounded mb-2" referrerpolicy="no-referrer" />
-                                                }
-                                                <div class="h5 mb-0" id="show-song-title">@(Evidence(song, "title") ?? song.Label)</div>
-                                                @if (Evidence(song, "artist") is { } artist)
-                                                {
-                                                    <div class="mb-2" id="show-song-artist">@artist</div>
-                                                }
-                                                <dl class="row small mb-0">
-                                                    <dt class="col-4">From</dt><dd class="col-8 utc">@Utc(song.StartUtc)</dd>
-                                                    <dt class="col-4">To</dt><dd class="col-8 utc">@Utc(song.EndUtc)</dd>
-                                                    <dt class="col-4">In the clip</dt><dd class="col-8">@Clock(song.Start) to @Clock(song.End)</dd>
-                                                    @if (song.Source is { } s)
-                                                    {
-                                                        <dt class="col-4">Confidence</dt><dd class="col-8">@s.Confidence.ToString("0.00", CultureInfo.InvariantCulture)</dd>
-                                                        <dt class="col-4">Detector</dt><dd class="col-8">@s.Detector @s.DetectorVersion (@s.Source, recorder @s.Recorder.ToUpperInvariant())</dd>
-                                                        @foreach (var (k, v) in (s.Evidence ?? new Dictionary<string, string>()).Where(kv => kv.Key is not ("title" or "artist" or "artworkUrl" or "artwork")))
-                                                        {
-                                                            <dt class="col-4">@k</dt><dd class="col-8 text-break">@v</dd>
-                                                        }
-                                                    }
-                                                </dl>
-                                                <p class="small text-body-secondary mt-2 mb-0">Song times are approximate.</p>
-                                            </div>
-                                        </section>
-                                    }
-                                    else
-                                    {
-                                        <div class="show-pane-head">
-                                            <span class="fw-semibold">Transcript</span>
-                                            <span class="badge text-bg-secondary">@Lines.Count</span>
-                                            @if (Selected is not null)
-                                            {
-                                                <span class="small text-body-secondary text-truncate">@ShowEvents.KindLabel(Selected.Kind): @Selected.Label</span>
-                                            }
-                                        </div>
-                                        @if (AnalysisNote is not null)
+                                        <div class="h5 mb-0" id="show-song-title">@(Evidence(song, "title") ?? song.Label)</div>
+                                        @if (Evidence(song, "artist") is { } artist)
                                         {
-                                            <p class="small text-body-secondary p-2 mb-0" id="show-analysis-note">@AnalysisNote</p>
+                                            <div class="mb-2" id="show-song-artist">@artist</div>
                                         }
-                                        <ol class="list-unstyled mb-0" id="show-transcript">
-                                            @foreach (var l in Lines)
+                                        <dl class="row small mb-0">
+                                            <dt class="col-4">From</dt><dd class="col-8 utc">@Utc(song.StartUtc)</dd>
+                                            <dt class="col-4">To</dt><dd class="col-8 utc">@Utc(song.EndUtc)</dd>
+                                            <dt class="col-4">In the clip</dt><dd class="col-8">@Clock(song.Start) to @Clock(song.End)</dd>
+                                            @if (song.Source is { } s)
                                             {
-                                                <li class="@LineCss(l)" data-line="@l.Index">
-                                                    <button type="button" @onclick="() => SeekAsync(l.Start)" title="@ClipMarkers.Time(l.StartUtc)">
-                                                        <span class="show-line-time">@Clock(l.Start)</span>
-                                                        <span class="show-line-text">@l.Text</span>
-                                                    </button>
-                                                </li>
+                                                <dt class="col-4">Confidence</dt><dd class="col-8">@s.Confidence.ToString("0.00", CultureInfo.InvariantCulture)</dd>
+                                                <dt class="col-4">Detector</dt><dd class="col-8">@s.Detector @s.DetectorVersion (@s.Source, recorder @s.Recorder.ToUpperInvariant())</dd>
+                                                @foreach (var (k, v) in (s.Evidence ?? new Dictionary<string, string>()).Where(kv => kv.Key is not ("title" or "artist" or "artworkUrl" or "artwork")))
+                                                {
+                                                    <dt class="col-4">@k</dt><dd class="col-8 text-break">@v</dd>
+                                                }
                                             }
-                                        </ol>
+                                        </dl>
+                                        <p class="small text-body-secondary mt-2 mb-0">Song times are approximate.</p>
+                                    </div>
+                                </section>
+                            }
+                            else
+                            {
+                                <div class="show-pane-head">
+                                    <span class="fw-semibold">Transcript</span>
+                                    <span class="badge text-bg-secondary">@Lines.Count</span>
+                                    @if (Selected is not null)
+                                    {
+                                        <span class="small text-body-secondary text-truncate">@ShowEvents.KindLabel(Selected.Kind): @Selected.Label</span>
                                     }
                                 </div>
-                            </PDSplitPanel>
-                        </PDSplitter>
-                    </div>
-                }
-            </PDBusyOverlay>
-        </div>
+                                @if (AnalysisNote is not null)
+                                {
+                                    <p class="small text-body-secondary p-2 mb-0" id="show-analysis-note">@AnalysisNote</p>
+                                }
+                                <ol class="list-unstyled mb-0" id="show-transcript">
+                                    @foreach (var l in Lines)
+                                    {
+                                        <li class="@LineCss(l)" data-line="@l.Index">
+                                            <button type="button" @onclick="() => SeekAsync(l.Start)" title="@ClipMarkers.Time(l.StartUtc)">
+                                                <span class="show-line-time">@Clock(l.Start)</span>
+                                                <span class="show-line-text">@l.Text</span>
+                                            </button>
+                                        </li>
+                                    }
+                                </ol>
+                            }
+                        </div>
+                    </PDSplitPanel>
+                </PDSplitter>
+            </div>
+        }
     }
 }

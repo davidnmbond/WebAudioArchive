@@ -117,8 +117,6 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 .show-details > summary::-webkit-details-marker { display: none; }
 .show-details > summary::after { content: "\25BE"; margin-left: 0.3rem; color: var(--bs-secondary-color); }
 .show-details-pop { position: absolute; z-index: 1050; top: calc(100% + 0.25rem); left: 0; width: min(46rem, calc(100vw - 2rem)); }
-/* PDBusyOverlay is inline-block, which would shrink the player and the splitter to their content. */
-.show-body > .pd-busy-overlay { display: block; }
 .show-split { height: max(18rem, calc(100vh - 21rem)); }
 .show-split .pdsplitter { height: 100%; }
 .show-split .gutter { background-color: var(--bs-tertiary-bg); }
@@ -150,3 +148,13 @@ h1:focus, h1:focus-visible { outline: none; box-shadow: none; }
 .show-event-utc { flex: none; font-size: 0.75rem; color: var(--bs-secondary-color); }
 .show-song-art { width: 8rem; height: 8rem; object-fit: cover; }
 @media (max-width: 575.98px) { .show-event-utc { display: none; } }
+
+/* Seek bar: clips stream from the segments, so the parts the browser has not loaded yet are striped and what it has
+   loaded is solid. The show's shaded range is drawn as an outline above the loaded parts so both stay visible. */
+.clip-player .pdmp-track::before {
+    background: repeating-linear-gradient(-45deg, var(--bs-secondary-bg) 0 4px, var(--bs-border-color) 4px 8px);
+}
+.clip-player .pdmp-buffered { background: var(--bs-secondary-color); opacity: 0.5; }
+.clip-player .pdmp-range { z-index: 1; background: transparent; }
+.clip-player .pdmp-progress { z-index: 2; }
+.clip-player .pdmp-seek { z-index: 3; }

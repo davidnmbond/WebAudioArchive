@@ -134,7 +134,7 @@ public sealed partial class ShowPage
         {
             Clip = null;
             Timeline = null;
-            Error = "The clip could not be built as whole MP3 frames: " + ex.Message;
+            Error = "The clip is not whole MP3 frames at a join between segments: " + ex.Message;
             Log.LogError(ex, "Clip integrity failure for show {Id}", Id);
         }
     }
