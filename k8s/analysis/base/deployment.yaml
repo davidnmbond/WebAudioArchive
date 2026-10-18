@@ -1,0 +1,159 @@
+# The analysis service: one pod, CPU only, below everything else. See docs/analysis.md and DESIGN.md.
+#
+# Why one replica with Recreate: the service takes a lock file in /analysis and refuses to start while another copy runs, so
+# a rolling update would crash the new pod. A PodDisruptionBudget is not provided: with one replica minAvailable 1 would
+# block every node drain for ever and maxUnavailable 1 allows what is allowed anyway; analysis is batch work that resumes
+# where it stopped (a graceful stop restores the job attempts), so a drain may evict it.
+#
+# Probes (the service has no purely-alive endpoint yet, see the issue to add /livez): /healthz returns 503 for lagging,
+# failing and stalled, and 200 for ok, catching-up and paused, so it is an alarm for monitoring, never a reason to restart.
+# Therefore the startup and liveness probes are TCP checks on the port (they fail only when the process is not listening)
+# and /healthz is used for readiness only (a not ready pod just leaves the Service endpoints, nothing is restarted).
+#
+# No fsGroup: it would recursively chown every volume that is not mounted read only. The recordings are read only, but the
+# rule is that nothing here may be able to change them; the analysis claim is prepared once instead (README).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waa-analysis
+  labels:
+    app.kubernetes.io/name: waa-analysis
+    app.kubernetes.io/component: analysis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: waa-analysis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: waa-analysis
+        app.kubernetes.io/component: analysis
+    spec:
+      serviceAccountName: waa-analysis
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: analysis-low
+      # A graceful stop finishes or aborts the current chunk and restores the job attempts (compose uses 90 s too).
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: analysis
+          # The overlay sets the real registry, name and tag (images: in its kustomization.yaml).
+          image: webaudioarchive-analysis:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: waa-analysis-settings
+            - secretRef:
+                name: waa-analysis-secrets
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            # The compose file allows 6 CPUs and 6 GiB at cpu_shares 256 (about a quarter of a normal weight). Requests are
+            # low so the pod schedules anywhere and loses every contention; the 2 GiB memory scratch counts in the limit.
+            requests:
+              cpu: 250m
+              memory: 1536Mi
+            limits:
+              cpu: "4"
+              memory: 6Gi
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 2
+          volumeMounts:
+            # Recordings: read only, twice over (the mount and the claim). To add the merged folder later, add a
+            # claim volume and a mount at /data/merged with readOnly: true, and extend WAA_RECORDERS if it is analysed.
+            - name: data-a
+              mountPath: /data/a
+              readOnly: true
+            - name: data-b
+              mountPath: /data/b
+              readOnly: true
+            - name: data-analysis
+              mountPath: /analysis
+            - name: web-cache
+              mountPath: /web-cache
+              readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: scratch
+              mountPath: /scratch
+            # The root filesystem is read only: .NET and ASP.NET write temporary files here.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # PLACEHOLDER claim names: the claims of the recordings, referenced and never created here. Rename in an overlay patch.
+        - name: data-a
+          persistentVolumeClaim:
+            claimName: waa-data-a
+            readOnly: true
+        - name: data-b
+          persistentVolumeClaim:
+            claimName: waa-data-b
+            readOnly: true
+        - name: data-analysis
+          persistentVolumeClaim:
+            claimName: waa-data-analysis
+        # The web app cache claim, only for the saved schedule file.
+        - name: web-cache
+          persistentVolumeClaim:
+            claimName: waa-web-cache
+            readOnly: true
+        # config/analysis and config/stations.json, created from the repository by the command in the README
+        # (a kustomization cannot read files outside its own folder). Keys map to the folder layout the service expects.
+        - name: config
+          configMap:
+            name: waa-analysis-files
+            items:
+              - key: analysis.json
+                path: analysis/analysis.json
+              - key: swearwords.json
+                path: analysis/swearwords.json
+              - key: enrich-v1.system.md
+                path: analysis/prompts/enrich-v1.system.md
+              - key: enrich-v1.user.md
+                path: analysis/prompts/enrich-v1.user.md
+              - key: enrich-v1.schema.json
+                path: analysis/prompts/enrich-v1.schema.json
+              - key: stations.json
+                path: stations.json
+        - name: scratch
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

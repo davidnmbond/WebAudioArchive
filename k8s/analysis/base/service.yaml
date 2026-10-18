@@ -1,0 +1,13 @@
+# ClusterIP only: /healthz today and the read-only analysis API when the web app consumes it. Never exposed outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: waa-analysis
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: waa-analysis
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

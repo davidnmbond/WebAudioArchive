@@ -194,7 +194,7 @@ All published ports are on 127.0.0.1. The analysis container uses the same image
 and no model files. For development without the network it can point at a throwaway whisper.cpp container on the
 local RTX 3060 (`docker/docker-compose.whisper-dev.yml`, plan 3 Task 21; dev only, never needed in production).
 The analysis container no longer runs Whisper.net: Tasks 20 and 21 replaced it with the HTTP client (`WhisperServerTranscriber`) and a
-CPU-only image. Kubernetes manifests (Task 22) and deploying the server (Task 23) are still to do.
+CPU-only image. The Kubernetes manifests for analysis (Task 22) are in [`k8s/`](k8s/README.md); deploying the server (Task 23) is still to do.
 
 ### Kubernetes (production, no GPU nodes)
 

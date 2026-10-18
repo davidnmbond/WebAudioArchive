@@ -1,0 +1,59 @@
+# Copy this folder (for example to k8s/analysis/overlays/prod) and edit; do not commit real addresses of private servers.
+#   kubectl kustomize k8s/analysis/overlays/prod | kubectl diff -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: webaudioarchive
+resources:
+  - ../../base
+images:
+  - name: webaudioarchive-analysis
+    newName: registry.example.com/webaudioarchive-analysis
+    newTag: "0.0.0-replace-me"
+patches:
+  # Settings: only the keys you change.
+  - target:
+      kind: ConfigMap
+      name: waa-analysis-settings
+    patch: |-
+      - op: replace
+        path: /data/WAA_WHISPER_URL
+        value: http://pdl-rune-01.panoramicdata.com:8080
+      - op: replace
+        path: /data/WAA_OLLAMA_URL
+        value: http://pdl-rune-01.panoramicdata.com:11434
+      - op: replace
+        path: /data/WAA_OLLAMA_MODEL
+        value: qwen3.6:27b
+  # Storage: the analysis claim class (and size if needed).
+  - target:
+      kind: PersistentVolumeClaim
+      name: waa-data-analysis
+    patch: |-
+      - op: add
+        path: /spec/storageClassName
+        value: replace-me-rwx-class
+  # The claim names of the recordings and of the web cache, as they exist in your cluster (the Deployment only references them).
+  - target:
+      kind: Deployment
+      name: waa-analysis
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes/0/persistentVolumeClaim/claimName
+        value: replace-me-data-a
+      - op: replace
+        path: /spec/template/spec/volumes/1/persistentVolumeClaim/claimName
+        value: replace-me-data-b
+      - op: replace
+        path: /spec/template/spec/volumes/3/persistentVolumeClaim/claimName
+        value: replace-me-web-cache
+  # Network: the GPU server addresses (a NetworkPolicy cannot use names).
+  - target:
+      kind: NetworkPolicy
+      name: waa-analysis
+    patch: |-
+      - op: replace
+        path: /spec/egress/1/to/0/ipBlock/cidr
+        value: 192.0.2.10/32
+      - op: replace
+        path: /spec/egress/2/to/0/ipBlock/cidr
+        value: 192.0.2.11/32

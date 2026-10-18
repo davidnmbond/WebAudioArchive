@@ -11858,37 +11858,35 @@ production path.
 
 ### Task 22: Kubernetes manifests for analysis (issue #110)
 
+> **Built (Task 22, 2026-10-18).** Deviations from the first draft of this task, all deliberate: (1) the folder is `k8s/`, not
+> `deploy/k8s/`: `k8s/analysis/base` (namespace agnostic kustomize base: `deployment.yaml`, `service.yaml` ClusterIP, `configmap.yaml`,
+> `pvc.yaml` with the one claim `waa-data-analysis`, `networkpolicy.yaml`, `serviceaccount.yaml`, `priorityclass.yaml` `analysis-low`
+> value -100 with `preemptionPolicy: Never`), `k8s/analysis/base/secret.yaml.example` (placeholders only; the extension keeps it out of
+> `kubectl apply -f` and out of the kustomization), `k8s/analysis/overlays/example` and `k8s/README.md`; (2) the service has no
+> purely-alive endpoint (`/healthz` is 503 for `lagging`, `failing` and `stalled`) and the `--healthcheck --alive` flag of the first draft
+> was not built: startup and liveness are `tcpSocket` on 8080 and only readiness uses `/healthz` (a not-ready pod just leaves the Service),
+> and a follow-up issue asks for `/livez`; (3) no `fsGroup` (it would chown every volume that is not read only; the analysis claim is
+> prepared once for uid 1654, see the README); (4) requests are `cpu: 250m`, `memory: 1536Mi`, limits `cpu: 4`, `memory: 6Gi`, plus a
+> 256 Mi `/tmp` emptyDir because the root filesystem is read only; (5) the `/config` files are a ConfigMap `waa-analysis-files` created
+> from the repository by a documented `kubectl create configmap --from-file` command, because a kustomization cannot read outside its
+> folder; (6) no PodDisruptionBudget (one replica: `minAvailable: 1` would block every drain, and analysis resumes where it stopped);
+> (7) the NetworkPolicy uses `/32` `ipBlock` placeholders from documentation space (a policy cannot match names) and allows ingress only from
+> pods labelled `app.kubernetes.io/name: waa-web`; (8) the web cache claim `waa-web-cache` and the recordings claims `waa-data-a` and
+> `waa-data-b` are placeholder names, referenced and never created; (9) the tests are text checks in `KubernetesManifestTests.cs` (no YAML
+> package was added). Validated offline with `kubectl kustomize` and kubeconform (`-strict`, Kubernetes 1.31.0): 7 of 7 valid, base and overlay.
+
 **Files:**
-- Create: `deploy/k8s/analysis/kustomization.yaml`, `deployment.yaml`, `configmap.yaml`, `secret.example.yaml` (placeholder values only, never real tokens), `networkpolicy.yaml`, `service.yaml`, `pvc.yaml` (claims `data-analysis`; the shared data claims are referenced, not created here), `deploy/k8s/README.md`
+- Create: `k8s/analysis/base/*` and `k8s/analysis/overlays/example/kustomization.yaml` as above, `k8s/README.md`
 - Test: `tests/WebAudioArchive.Tests/KubernetesManifestTests.cs`
 
-- [ ] **Step 1:** Tests first (parse the YAML with a small reader or `YamlDotNet` in the test project only):
-  `Analysis_mounts_recordings_read_only_and_writes_only_analysis`, `Analysis_requests_no_gpu`,
-  `Analysis_kustomization_contains_no_recorder`, `Readiness_uses_healthz_and_liveness_never_fails_on_lag`,
-  `Scratch_is_a_memory_emptydir_of_2Gi`, `Secret_example_holds_no_real_value`.
-- [ ] **Step 2: Deployment.** `replicas: 1`, `strategy: Recreate` (the service lock forbids two), `securityContext`
-  with `runAsUser: 1654`, `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`,
-  `capabilities: drop [ALL]`; `terminationGracePeriodSeconds: 90` (a graceful stop restores the job's attempts);
-  `envFrom` the ConfigMap and the Secret (optional); resources requests `cpu: 1`, `memory: 1536Mi`, limits
-  `cpu: 4`, `memory: 6Gi`; volumes: `data-a`, `data-b`, `data-merged` (readOnly), `data-analysis` (read and write),
-  `web-cache` (readOnly), `config` (ConfigMap of `config/analysis` and `config/stations.json`, readOnly),
-  `scratch` (`emptyDir: {medium: Memory, sizeLimit: 2Gi}`, counted in the memory limit).
-- [ ] **Step 3: Probes.** `startupProbe` and `readinessProbe`: `httpGet /healthz` port 8080 accepting any status
-  below 600 is not possible in Kubernetes, so readiness uses `exec: dotnet WebAudioArchive.Analysis.Service.dll --healthcheck --alive`
-  (a new flag in this task: exits 0 when the process answers, whatever the lag), and there is no liveness probe that
-  can fail on lag; `/healthz` 503 is an alarm for monitoring, never a restart (D16).
-- [ ] **Step 4: ConfigMap.** `WAA_WHISPER_URL=http://pdl-rune-01.panoramicdata.com:8080` (production; the test
-  cluster uses pdl-rune-02), `WAA_WHISPER_ALLOWED_HOSTS`, `WAA_WHISPER_MODEL`, `WAA_OLLAMA_URL`,
-  `WAA_OLLAMA_ALLOWED_HOSTS`, `WAA_OLLAMA_MODEL=qwen3.6:27b` (what pdl-rune-01 has), `WAA_RECORDERS=a=/data/a,b=/data/b`,
-  `WAA_MIN_FREE_GB`, `WAA_LAG_ALARM_HOURS`. If cluster DNS cannot resolve the rune names, use the IPs (private
-  addresses are accepted without the allow-list).
-- [ ] **Step 5: NetworkPolicy.** Egress only to cluster DNS (UDP and TCP 53) and to the rune server's IP on 8080
-  and 11434; ingress only from the web pod (if it ever reads `/healthz`) and the monitoring namespace.
-- [ ] **Step 6: README.** `deploy/k8s/README.md`: the storage class must offer `ReadWriteMany` for the shared data
-  claims (or pin every pod to one node); the recorders have their own kustomization (`deploy/k8s/recorders/`, a
-  separate task in plan 5 or later) with a `PodDisruptionBudget` of `maxUnavailable: 0` each and are applied one at a
-  time, never by `kubectl apply -k deploy/k8s/analysis`; apply analysis with `kubectl apply -k deploy/k8s/analysis`
-  and check with `kubectl -n webaudioarchive logs deploy/analysis` and a port-forward to `/healthz`.
+- [x] **Step 1:** Tests: one replica with Recreate; recordings read only by mount and by claim; only `/analysis`, `/scratch`, `/tmp` writable;
+  scratch a 2 Gi memory emptyDir; non-root 1654, read-only root, no privilege escalation, drop ALL, RuntimeDefault, no `fsGroup`; no host access
+  or GPU request; egress limited to DNS and `/32` GPU addresses on 8080 and 11434; liveness never `/healthz`; grace at least 60 s; Service
+  ClusterIP; Secret template placeholders only and not applicable; no recorder workload named; settings match the compose file.
+- [x] **Step 2 to 5:** Deployment, probes, ConfigMap, NetworkPolicy as described above and in the manifests.
+- [x] **Step 6: README.** `k8s/README.md`: storage (`ReadWriteMany` or one node), preparing the analysis claim, the config ConfigMap command,
+  build, diff, apply, rollout, reading lag from `/healthz`, un-park with a one-off Job while scaled to 0, adapting the NetworkPolicy, and the
+  warning that nothing here may modify or restart the recorders (they have their own kustomization or compose project, plan 5).
   Commit `Analysis: Kubernetes manifests, CPU only, egress to the GPU server (D19, #110)`.
 
 ### Task 23: Deploy the whisper.cpp server on pdl-rune-02 and pdl-rune-01 (owner action, issue #111)

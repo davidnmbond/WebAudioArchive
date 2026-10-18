@@ -248,6 +248,8 @@ servers (pdl-rune-02 test, pdl-rune-01 production, port 8080); the image has no 
 no models mount (it was about 2.0 GB with the CUDA target and 376 MB for the old CPU target, plan 3 D18 evidence). There is no
 ffmpeg and no whisper container in this compose project. See `DESIGN.md`.
 
+For Kubernetes (no GPU nodes) the same service is deployed by the kustomize base in `k8s/analysis` (analysis only, never the recorders): see [k8s/README.md](../k8s/README.md).
+
 Before the first start (owner actions): the whisper.cpp server must be running on the GPU server (plan 3 Task 23, issue #111;
 the service starts without it and shows `whisperReady: false` and `paused` until it answers), create the output folder
 `data/analysis`, and make sure the web app has saved the schedule once (the analysis reads it from the web app's `web-cache`

@@ -1,0 +1,14 @@
+# The analysis output claim: the only volume the service writes (transcripts, events, job state, the service lock).
+# The recordings claims (the recorders' data-a and data-b) are NOT created here: they belong to the recorders and are only
+# referenced by name in deployment.yaml. Set storageClassName and size in the overlay.
+# The user in the pod is uid 1654 and there is deliberately no fsGroup (it would chown every volume that is not read only,
+# and must never be able to touch the recordings): make this claim writable by 1654 once, see the README.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: waa-data-analysis
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 20Gi

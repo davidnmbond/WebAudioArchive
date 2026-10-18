@@ -1,0 +1,58 @@
+# Default deny for the analysis pods, then exactly what they need.
+# EDIT BEFORE USE (an overlay patch is the right place):
+#   1. The two ipBlock cidrs below are placeholders (192.0.2.0/24 is documentation space). Replace them with the /32 of the
+#      GPU server that runs the whisper.cpp server (8080) and Ollama (11434): `nslookup <host in WAA_WHISPER_URL>`.
+#      A NetworkPolicy cannot match DNS names, so if the server's address changes the policy must change too.
+#   2. The ingress selector names the web app's pods by label; change it to the labels the web Deployment really has, and add
+#      a namespaceSelector if the web app runs in another namespace.
+#   3. The DNS rule assumes CoreDNS in kube-system labelled k8s-app=kube-dns.
+# Egress to anything else (the internet, other pods, the recordings' storage network if it is separate) is dropped.
+# NFS or other network storage is mounted by the kubelet on the node, not by the pod, so it is not affected by this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: waa-analysis
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: waa-analysis
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: waa-web
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # whisper.cpp server (WAV chunks) and Ollama (transcript text) on the owner's GPU server.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 11434
+    # Optional second GPU server (test and production differ): replace or delete this rule.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.11/32
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 11434
