@@ -10,6 +10,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-15-webaudioarchive-design.md` (sections 3.5, 3.6, 3.7, 3.8, 3.9, 3.11, 3.13, 5, 6). This is plan 3 of 5. It is written before plan 2 (schedule service, cutter) and does not depend on it: it maps analysis onto shows using the schedule the web app already saves (`/cache/schedule/<station>.json`, spec 3.2 MVP) and works per master segment, not per cut show file. When plan 2 lands, `ScheduleProvider` switches to `/data/<station>/schedule.json` (one constructor argument).
 
+> **Amended 2026-10-17 by decision D19 (deployment to Kubernetes with no GPU nodes).** Transcription no longer runs in
+> the analysis process: it goes over HTTP to a whisper.cpp server container on the owner's GPU servers
+> (`pdl-rune-02` for test, `pdl-rune-01` for production), through the same `ITranscriber` interface. The analysis
+> image becomes CPU only (managed decode, detectors, queue, API); the CUDA target and the GPU override are removed;
+> Whisper.net is removed from the image. D18's managed decode, resampler, detectors and Ollama client stay. Where the
+> text below says whisper runs in process, on the local GPU, or that no audio leaves the machine, D19 and Tasks 20 to 23
+> take precedence. Overview and diagrams: `DESIGN.md` at the repository root.
+
 ## Global Constraints
 
 - .NET 10, `net10.0`, `Nullable` enabled, `TreatWarningsAsErrors` true. Packages pinned to exact versions; this plan adds only those listed in the Tech Stack (D18).
@@ -17,10 +25,10 @@
 - **The archive is stored exactly as broadcast.** Analysis never opens a master `.mp3` or sidecar for writing, never decodes the archive in place: it copies a closed segment into scratch and decodes the copy. `.mp3.part` files are never read.
 - **The recorders are never affected.** Analysis is its own image and container, mounts `data/a` and `data/b` read-only, writes only to `data/analysis` and its tmpfs scratch, runs below the recorders' priority (nice 10, `cpu_shares: 256`, CPU and memory caps, high `oom_score_adj`), and stops work first when free disk falls below its threshold. No compose change may alter the `recorder-a` or `recorder-b` service definitions.
 - **Public repo:** no broadcast audio, recordings, transcripts of real broadcasts, model files or credentials in git. Test audio is synthetic, generated at test time (signals in code; MP3 made by GroovyMp3 in the test process into a temp folder). The `models/` and `data/` folders are gitignored.
-- No transcript or audio leaves the machine: Ollama must be local or on a private network (the settings refuse `:cloud` models and public hosts).
+- *Superseded by D19 (2026-10-17): audio chunks and transcript text now leave the analysis host, but only to the owner's named GPU servers.* ~~No transcript or audio leaves the machine~~: the Whisper service and Ollama must be on the owner's private network; named hosts must be in an allow-list (`WAA_WHISPER_ALLOWED_HOSTS`, `WAA_OLLAMA_ALLOWED_HOSTS`), the settings refuse `:cloud` models and public hosts, and the archive MP3s are never sent anywhere.
 - No em dashes in any text, code comment, commit message or doc.
 - No skipped tests. A test that cannot run (for example a test helper whose package internals changed) must fail with a message saying what is missing and how to fix it. No test needs a native tool or a whisper model: decoding and MP3 encoding are managed code, and transcription is faked in tests.
-- Commit messages end with the attribution trailer the harness supplies. Commit after each task. `git add` named paths only; never `git add -A` (unrelated tracked files such as `CLAUDE.md` and `AGENTS.md` must not be touched).
+- Commit messages carry no attribution or Co-Authored-By line (owner instruction, 2026-10-17). Commit after each task. `git add` named paths only; never `git add -A` (unrelated tracked files such as `CLAUDE.md` and `AGENTS.md` must not be touched).
 - Detector figures are estimates. Every event carries `severity`, `confidence`, `source` (`audio`, `transcript` or `llm`), the detector name and version, and enough to play the audio around it; reports say "detected", never "proven".
 
 Working directory for every command: `C:\Users\david\source\repos\davidnmbond\WebAudioArchive` (PowerShell). Another agent may be working on `src/WebAudioArchive.Web` (Shows and calendar pages); run `git pull --rebase` before Tasks 13 and 17, which touch Web files, and carry over any changes made there since commit `19a06f0`.
@@ -31,10 +39,10 @@ Each decision is the owner's to overturn; the alternatives were considered and r
 
 | # | Decision | Evidence and reasons | Rejected alternatives |
 |---|---|---|---|
-| D1 | *Superseded by D18: whisper.cpp now runs in the analysis process through Whisper.net 1.9.1; the reasons below for a separate HTTP server were weighed again there.* **Transcription engine (original): whisper.cpp `whisper-server` v1.9.5, built from source in `docker/Dockerfile.whisper` (CUDA 13.0.1, compute capability 86 for the RTX 3060), called over HTTP.** | MIT licence (checked 2026-10-16, `LICENSE` at tag v1.9.5, commit `d2a764c648779feb36d44363f212a29b00aad1af`). The server's `verbose_json` response gives segments with `no_speech_prob`, `avg_logprob` and per-token `start`, `end`, `t_dtw` and `probability` (read in `examples/server/server.cpp` at v1.9.5), has `/health`, takes `prompt`, `language` and `temperature` per request, and serialises requests with a mutex. HTTP keeps CUDA, model memory and any native crash out of the .NET process; the analysis image stays a plain aspnet image with ffmpeg. The spec already names whisper.cpp. | (b) **Whisper.net 1.9.1** (MIT; `Whisper.net.Runtime.Cuda` needs CUDA toolkit 13.0.1 runtime libraries in the image, `Whisper.net.Runtime.Cuda12` for 12.4.1): in-process native code, a CUDA runtime in the analysis image (several GB), a native fault kills the worker, and its word or token timestamp API is not documented on the package page. (c) **faster-whisper 1.2.1** (MIT, last release 2025-10-31; CUDA 12 and cuDNN 9; batched mode is the fastest measured: 13 min of audio in 16 to 17 s on an RTX 3070 Ti): needs a Python service we would write and maintain (no official server), a second language in the repo, and its speed advantage is not needed (see D3). The official `ghcr.io/ggml-org/whisper.cpp:main-cuda-<sha>` images were rejected because no image exists for the v1.9.5 release commit (checked on GHCR: only `main-cuda-<sha>` tags of main commits), so pinning one would pin an unreleased commit. |
+| D1 | *Superseded by D18: whisper.cpp now runs in the analysis process through Whisper.net 1.9.1; the reasons below for a separate HTTP server were weighed again there. D19 (2026-10-17) returns to a whisper.cpp server over HTTP, now on a remote GPU host, using the official image, which since exists for the v1.9.5 release commit (`main-cuda-d1be6fde...`), so the image rejection below no longer applies.* **Transcription engine (original): whisper.cpp `whisper-server` v1.9.5, built from source in `docker/Dockerfile.whisper` (CUDA 13.0.1, compute capability 86 for the RTX 3060), called over HTTP.** | MIT licence (checked 2026-10-16, `LICENSE` at tag v1.9.5, commit `d2a764c648779feb36d44363f212a29b00aad1af`). The server's `verbose_json` response gives segments with `no_speech_prob`, `avg_logprob` and per-token `start`, `end`, `t_dtw` and `probability` (read in `examples/server/server.cpp` at v1.9.5), has `/health`, takes `prompt`, `language` and `temperature` per request, and serialises requests with a mutex. HTTP keeps CUDA, model memory and any native crash out of the .NET process; the analysis image stays a plain aspnet image with ffmpeg. The spec already names whisper.cpp. | (b) **Whisper.net 1.9.1** (MIT; `Whisper.net.Runtime.Cuda` needs CUDA toolkit 13.0.1 runtime libraries in the image, `Whisper.net.Runtime.Cuda12` for 12.4.1): in-process native code, a CUDA runtime in the analysis image (several GB), a native fault kills the worker, and its word or token timestamp API is not documented on the package page. (c) **faster-whisper 1.2.1** (MIT, last release 2025-10-31; CUDA 12 and cuDNN 9; batched mode is the fastest measured: 13 min of audio in 16 to 17 s on an RTX 3070 Ti): needs a Python service we would write and maintain (no official server), a second language in the repo, and its speed advantage is not needed (see D3). The official `ghcr.io/ggml-org/whisper.cpp:main-cuda-<sha>` images were rejected because no image exists for the v1.9.5 release commit (checked on GHCR: only `main-cuda-<sha>` tags of main commits), so pinning one would pin an unreleased commit. |
 | D2 | *Model kept; DTW revised by D18 (off by default, measured).* **Model: `ggml-large-v3-turbo-q8_0.bin`** (874,188,075 bytes, sha256 `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1`, Hugging Face `ggerganov/whisper.cpp` commit `5359861c739e955e79d9a303bcbc70fb988958b1`), language forced to `en`, DTW token timestamps (`--dtw large.v3.turbo`) with flash attention off (whisper.cpp disables DTW when flash attention is on, `src/whisper.cpp` line 3817 at v1.9.5). | large-v3-turbo has the large-v3 encoder with 4 decoder layers instead of 32: near large-v3 accuracy at several times the speed. q8_0 halves VRAM against f16 with negligible accuracy loss, which matters because the 3060's 12 GB is shared with the Windows desktop (5.4 GB in use when measured) and Ollama. DTW gives better word times for swear and filler links. | `medium.en`: slower than turbo (24 decoder layers) and less accurate. `large-v3` f16: about 3 to 4 times slower to decode, about 4 GB VRAM. `small.en` / `base.en`: kept only as the CPU fallback (`ggml-base.en.bin`, 147,964,211 bytes, sha256 `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002`). |
 | D3 | *Replaced by measurements in D18 (22x to 46x on speech, 7.5x on a music-heavy hour under full host CPU load).* **Expected speed: 15x to 30x realtime on the RTX 3060** (realtime factor 0.03 to 0.07), to be measured in Task 19 and recorded in `docs/analysis-validation.md`. | Published figure: whisper.cpp large-v2 fp16 with flash attention transcribes 13 min in 65 s (12x) on an RTX 3070 Ti (faster-whisper README benchmark). A 3060 has about 70% of a 3070 Ti's throughput; turbo decodes far faster than large-v2; DTW without flash attention costs some of that back. 24 hours of audio a day at 15x is 1.6 GPU hours a day, so the queue keeps up with a wide margin and can clear a day of backlog in about 2 hours. If Task 19 measures slower than 5x realtime, switch to flash attention on without DTW (Task 16 shows the flag) and record it. | n/a |
-| D4 | **GPU passthrough works on this host** (checked 2026-10-16: `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` shows the RTX 3060, driver 610.88, CUDA 13.3, inside Docker Desktop 29.8.2). GPU use is opt-in through `docker/docker-compose.gpu.yml` (spec 5), which since D18 builds the `cuda` target of the analysis image and gives the analysis container the GPU; without it the analysis image is the `cpu` target and transcribes with `base.en`. Re-checked 2026-10-16 with the Whisper.net CUDA runtime inside a throwaway aspnet-based image (D18). | The driver's CUDA 13.3 supports CUDA 13.0.1 images. | n/a |
+| D4 | *Dev only after D19: the analysis image no longer uses the GPU; passthrough is still how the optional local Whisper container (Task 21) and the D19 spike ran.* **GPU passthrough works on this host** (checked 2026-10-16: `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` shows the RTX 3060, driver 610.88, CUDA 13.3, inside Docker Desktop 29.8.2). GPU use is opt-in through `docker/docker-compose.gpu.yml` (spec 5), which since D18 builds the `cuda` target of the analysis image and gives the analysis container the GPU; without it the analysis image is the `cpu` target and transcribes with `base.en`. Re-checked 2026-10-16 with the Whisper.net CUDA runtime inside a throwaway aspnet-based image (D18). | The driver's CUDA 13.3 supports CUDA 13.0.1 images. | n/a |
 | D5 | **Enricher model: `qwen3.6:latest`** (Ollama digest `07d35212591fc27746f0a317c975a6d68754fb38e9053d82e25f06057af28522`, 36B mixture of experts, 8 of 256 experts active, Q4_K_M, 22.3 GB, Apache 2.0), with `think: false`, temperature 0.1, fixed seed, JSON schema output, `num_ctx` 32768. | Measured on this host 2026-10-16 with the same synthetic extraction prompt and JSON schema: qwen3.6:latest 154 tokens/s prompt, 15.0 tokens/s output, every quote verbatim; gemma4:26b (MoE) 11 tokens/s prompt, 7.8 tokens/s output, short but correct quotes; llama3.1:8b 35 tokens/s prompt, 47.9 tokens/s output, but gave Raff a quote that does not contain his name (the validator would drop it). A 1 hour show transcript (about 10,000 to 15,000 tokens) is 2 to 4 minutes on qwen3.6:latest; about 13 shows a day is under an hour. MoE means it runs well partly on CPU, so it coexists with whisper on the 12 GB card. The analysis records the model digest it used in every result. | Dense 27B and 31B models (`qwen3.8:27b`, `qwen3.6:27b`, `gemma4:31b`): 16 to 18.5 GB do not fit the free VRAM and run slowly on CPU. `qwen3.5:2b`, `qwen2.5-coder:*`: too small or code models. `nomic-embed-text`: embeddings only (useful later for search). **`kimi-k2.6:cloud` is refused by configuration**: it runs remotely, so transcripts would leave the machine. |
 | D6 | **Unit of work: one closed recorder segment** (an hourly `.mp3` plus its sidecar). Transcripts and events are stored per segment; shows are views over them (spec 3.6: "one transcript for the station; each show's transcript is a slice"). | Segments are immutable once closed, so a job is idempotent and keyed by the sidecar's bytes, frames, end and `endedBy`. Show times can change; re-mapping a show is cheap and never re-transcribes. | Per show cut files: plan 2 does not exist yet, and a schedule change would force re-transcription. Live decode in the recorder's fan-out (spec 3.6 "decode the live stream"): would put analysis in the recorder process, which spec 3.13 forbids. |
 | D7 | **A/B: recorder A is analysed; B only fills A's holes.** A B segment is queued only when A's segments cover less than 98% of its span (spans minus gaps). Timelines and transcript slices drop B events and lines at instants that an A segment covers. `WAA_ANALYSIS_PREFERENCE` (default `a,b`) sets the order. | Analysing both doubles GPU work for near-identical results; the two copies are not byte-identical (3.13) so they cannot be merged sample by sample. | Analyse both and reconcile: double the cost and no reconciliation rule in the spec (3.10). |
@@ -47,8 +55,9 @@ Each decision is the owner's to overturn; the alternatives were considered and r
 | D14 | *Superseded by D18: there is no ffmpeg; the decoder library versions (`NLayer 3.0.0 frame decoder, NAudio.Core 3.1.0 WDL sinc resampler`) are recorded in every transcript instead.* **ffmpeg comes from the Ubuntu 24.04 package (6.1.1) and is not version-pinned in apt**; the version used is recorded in every transcript. | apt pins of old point releases break the build when Ubuntu replaces them with security fixes. The aspnet 10.0 image is Ubuntu 24.04 (checked). | A static ffmpeg download: another binary to verify and update by hand. |
 | D15 | **Show mapping uses the web app's saved schedule** (`/cache/schedule/<station>.json`, mounted read-only from the `web-cache` volume). The schedule types (`WeeklySchedule`, `ShowOccurrence`, `ScheduleExpander`) move from Web to Core so both use one implementation. | No new schedule fetcher; one expansion rule for DST. | Calling the web app's HTTP API: analysis would stop mapping shows whenever the web app is down. A second schedule parser: duplicate code. |
 | D16 | **Health alarm:** `/healthz` returns 503 when the analysis lag exceeds `WAA_LAG_ALARM_HOURS` (default 6) or the worker loop has not completed a pass for 15 minutes, so `docker ps` shows `unhealthy`. Docker does not restart unhealthy containers; it is an alarm, not a restart. | Spec 5 asks for analysis lag in `/healthz`; spec 1 says no pushed alerts. | Restart on unhealthy: a restart cannot fix a lag. |
-| D17 | **One work lane:** transcription first, enrichment only when no segment job is ready. | Whisper and Ollama share one GPU; running them at once slows both and risks running out of VRAM. | Two concurrent lanes. |
-| D18 | **The analysis stack comes from NuGet (owner's question, spike 2026-10-16; evidence below).** (a) **Decode:** our own MPEG-1 Layer III frame splitter feeding `NLayer` 3.0.0's `MpegFrameDecoder` frame by frame, with a fresh decoder primed on the previous frames when NLayer refuses a frame; resample to 16 kHz mono with `NAudio.Core` 3.1.0's `WdlResampler` in sinc mode; one pass gives the full-rate features and the speech WAV. No ffmpeg anywhere (image, CI, development host). (b) **Transcription:** `Whisper.net` 1.9.1 in the analysis process behind the same `ITranscriber`, `Whisper.net.Runtime` (CPU) plus `Whisper.net.Runtime.Cuda.Linux` (CUDA 13); one Dockerfile with a `cpu` target (aspnet image plus `libgomp1`) and a `cuda` target (adds NVIDIA's `cuda-cudart-13-0` and `libcublas-13-0`); `WAA_WHISPER_DEVICE` `auto` tries CUDA then falls back to the CPU. Chunks of 300 s as before, no carried context, prompt carried into every 30 s window, flash attention on, **DTW off by default** (`WAA_WHISPER_DTW=on` only with `chunkSeconds` 30). The separate whisper container, `Dockerfile.whisper` and its CUDA workflow are dropped. (c) **Enrichment:** keep the plain `HttpClient` Ollama client (no package). (d) **Tests:** synthetic MP3s from `GroovyMp3` 0.1.3 in the test process. | Decode: the frame-by-frame decode of a real 1 hour Burst segment gave 137,749 frames and 158,686,848 samples per channel, exactly the sidecar's frame count x 1152 and exactly ffmpeg 7.1's count; 81.5 dB SNR against ffmpeg's float decode; samples at or above 0.99: 61,373 in both; above 1.0: 45,608 in both; 79x to 93x realtime on one core (38.7 to 45.5 s an hour), 71 MB peak working set streaming; same on Windows and in a Linux container. Resampler: within 0.1 dB to 6 kHz, -67 dB at 10 kHz. Whisper.net: same whisper.cpp engine, the same per-token start, end, DTW time and probability as whisper-server's verbose_json plus the segment's no-speech probability (so `WhisperResponse.MergeTokens` and `TranscriptFilter` are unchanged); RTX 3060 large-v3-turbo q8_0 on 5 minutes of real speech: 46x realtime (300 s request, no DTW) natively on Windows, 28x in a Linux container with `--gpus all`; about 1 GB of VRAM above idle. In process removes a container, an HTTP hop, a CMake and nvcc build and the 3.8 GB CUDA devel image; a native crash restarts the container and the job resumes after its last finished chunk (Task 12). DTW: a 300 s request with DTW on stopped after 58 s (18 of 140 segments, 131 of 943 words) in every combination tried (context on or off, DTW memory 128 MB or 1 GB); with 30 s requests DTW works at 16.3x. | NLayer's `MpegFile` alone: drops a frame (26 ms) about every 4.7 minutes when its 8 KiB bit-reservoir ring wraps at a frame boundary, 17 to 18 frames (0.47 s) short per hour, so the timeline drifts. `MP3Sharp` 1.0.5 (LGPL-3.0, 2019): correct length, 112x, but 16-bit output only, so the overshoot above full scale that clipping needs is lost. NAudio's `WdlResamplingSampleProvider` default (linear plus IIR): -8.2 dB at 6 kHz, a 10 kHz tone through at -27 dB. A Whisper.net HTTP wrapper container: keeps the crash isolation but is a second service to write and run, for a fault the resume already absorbs. The plain `nvidia/cuda:13.0.1-runtime-ubuntu24.04` base: 1.57 GB compressed against 2.0 GB uncompressed for the whole aspnet-based CUDA image. `OllamaSharp` 5.5.0: works (structured output, `think: false`, streaming, 9.1 s against 9.3 s for `HttpClient`) but adds `Microsoft.Extensions.AI` 10.8 for 15 lines we already have; `Microsoft.Extensions.AI.Ollama` 9.7.0-preview is deprecated in favour of OllamaSharp. ffmpeg kept only for test MP3s: a native tool on every developer machine and CI runner for test data a managed encoder makes. |
+| D17 | *Kept after D19: Whisper and Ollama share the rune server GPU.* **One work lane:** transcription first, enrichment only when no segment job is ready. | Whisper and Ollama share one GPU; running them at once slows both and risks running out of VRAM. | Two concurrent lanes. |
+| D19 | **Speech to text runs as a service on the owner's GPU servers (owner's constraint, 2026-10-17: the production Kubernetes cluster has no GPU node). Supersedes D18 (b) for deployment.** A whisper.cpp `whisper-server` container, official image `ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037` (the v1.9.5 release commit), model `ggml-large-v3-turbo-q8_0` (D2), on pdl-rune-02 (test) and pdl-rune-01 (production) next to their Ollama, port 8080. The analysis service calls it through `ITranscriber` with a new `WhisperServerTranscriber` (Task 20): `POST /inference`, the existing 16 kHz mono 300 s WAV chunks, `verbose_json`; settings for URL, model, language, timeout, concurrency, retries and an optional token, and the Ollama host allow-list rule. The analysis image becomes CPU only (Task 21): Whisper.net, `libgomp1`, the `cuda` target and `docker-compose.gpu.yml` are removed (recommended: remove, not keep as a fallback); a dev-only local whisper.cpp container replaces the GPU override. Kubernetes manifests (Task 22). Deploying the server is an owner action (Task 23). D18 (a) decode and resampler, (c) the Ollama client, the detectors, the chunking, the prompt and the hallucination filter are unchanged. | Spike 2026-10-17 on the RTX 3060 (table below; full report kept outside the repo): whisper.cpp server 19x to 28x realtime on 5 minutes of speech and 28.4x on a whole music-heavy hour in one 115 MB request; per-token `start`, `end`, `probability`, `t_dtw` and per-segment `avg_logprob` and `no_speech_prob`, the same data Whisper.net gave, so `WhisperResponse.MergeTokens` and `TranscriptFilter` are reused; about 1.2 GB VRAM and 1 GB RAM; no transcript text in its log; no temporary files without `--convert`; one request at a time. MIT, v1.9.5 released 2026-10-06, commits weekly; a release-commit image now exists (D1's reason for building from source is gone). | **speaches** (faster-whisper, MIT): OpenAI API with word times, but 8.2x to 9.9x here, Silero voice activity detection always on (only 2,390 s of the 3,598 s hour reached whisper, so sung lyrics that D12 keeps are lost), `no_speech_prob` always 0 (D13's rule never fires), a 183-line repetition loop on the hour, model download from Hugging Face at run time, only release candidates since 0.8.3 and a `latest-cuda` image built 2025-09-19. **Ollama audio** (`gemma4:12b` on pdl-rune-01, Ollama 0.33.2): `/v1/audio/transcriptions` works (7.6x on 300 s) but returns `{"text"}` only, no segments, times or scores, and Gemma 4 takes 30 s clips; pdl-rune-02 has no audio model. **LocalAI** v4.11.0: a gateway over the same engines (whisper.cpp, faster-whisper, WhisperX), more to run for nothing gained. **WhisperX** 3.8.6 (or whisper-asr-webservice 1.10.0): best word alignment, but Python, a second alignment model and a heavier image; revisit only if swear timing proves too coarse. **CPU whisper in the cluster**: base.en 1.8x to 9x and starved under load, turbo 0.94x (D18). **Keeping Whisper.net as a fallback**: a second code path and native libraries in every image for a CPU path too slow to matter. |
+| D18 | *Part (b), in-process Whisper.net with a CUDA image target, superseded for deployment by D19 (2026-10-17): no Kubernetes node has a GPU. Parts (a) decode and resampler, (c) the Ollama client and (d) the test MP3s stay.* **The analysis stack comes from NuGet (owner's question, spike 2026-10-16; evidence below).** (a) **Decode:** our own MPEG-1 Layer III frame splitter feeding `NLayer` 3.0.0's `MpegFrameDecoder` frame by frame, with a fresh decoder primed on the previous frames when NLayer refuses a frame; resample to 16 kHz mono with `NAudio.Core` 3.1.0's `WdlResampler` in sinc mode; one pass gives the full-rate features and the speech WAV. No ffmpeg anywhere (image, CI, development host). (b) **Transcription:** `Whisper.net` 1.9.1 in the analysis process behind the same `ITranscriber`, `Whisper.net.Runtime` (CPU) plus `Whisper.net.Runtime.Cuda.Linux` (CUDA 13); one Dockerfile with a `cpu` target (aspnet image plus `libgomp1`) and a `cuda` target (adds NVIDIA's `cuda-cudart-13-0` and `libcublas-13-0`); `WAA_WHISPER_DEVICE` `auto` tries CUDA then falls back to the CPU. Chunks of 300 s as before, no carried context, prompt carried into every 30 s window, flash attention on, **DTW off by default** (`WAA_WHISPER_DTW=on` only with `chunkSeconds` 30). The separate whisper container, `Dockerfile.whisper` and its CUDA workflow are dropped. (c) **Enrichment:** keep the plain `HttpClient` Ollama client (no package). (d) **Tests:** synthetic MP3s from `GroovyMp3` 0.1.3 in the test process. | Decode: the frame-by-frame decode of a real 1 hour Burst segment gave 137,749 frames and 158,686,848 samples per channel, exactly the sidecar's frame count x 1152 and exactly ffmpeg 7.1's count; 81.5 dB SNR against ffmpeg's float decode; samples at or above 0.99: 61,373 in both; above 1.0: 45,608 in both; 79x to 93x realtime on one core (38.7 to 45.5 s an hour), 71 MB peak working set streaming; same on Windows and in a Linux container. Resampler: within 0.1 dB to 6 kHz, -67 dB at 10 kHz. Whisper.net: same whisper.cpp engine, the same per-token start, end, DTW time and probability as whisper-server's verbose_json plus the segment's no-speech probability (so `WhisperResponse.MergeTokens` and `TranscriptFilter` are unchanged); RTX 3060 large-v3-turbo q8_0 on 5 minutes of real speech: 46x realtime (300 s request, no DTW) natively on Windows, 28x in a Linux container with `--gpus all`; about 1 GB of VRAM above idle. In process removes a container, an HTTP hop, a CMake and nvcc build and the 3.8 GB CUDA devel image; a native crash restarts the container and the job resumes after its last finished chunk (Task 12). DTW: a 300 s request with DTW on stopped after 58 s (18 of 140 segments, 131 of 943 words) in every combination tried (context on or off, DTW memory 128 MB or 1 GB); with 30 s requests DTW works at 16.3x. | NLayer's `MpegFile` alone: drops a frame (26 ms) about every 4.7 minutes when its 8 KiB bit-reservoir ring wraps at a frame boundary, 17 to 18 frames (0.47 s) short per hour, so the timeline drifts. `MP3Sharp` 1.0.5 (LGPL-3.0, 2019): correct length, 112x, but 16-bit output only, so the overshoot above full scale that clipping needs is lost. NAudio's `WdlResamplingSampleProvider` default (linear plus IIR): -8.2 dB at 6 kHz, a 10 kHz tone through at -27 dB. A Whisper.net HTTP wrapper container: keeps the crash isolation but is a second service to write and run, for a fault the resume already absorbs. The plain `nvidia/cuda:13.0.1-runtime-ubuntu24.04` base: 1.57 GB compressed against 2.0 GB uncompressed for the whole aspnet-based CUDA image. `OllamaSharp` 5.5.0: works (structured output, `think: false`, streaming, 9.1 s against 9.3 s for `HttpClient`) but adds `Microsoft.Extensions.AI` 10.8 for 15 lines we already have; `Microsoft.Extensions.AI.Ollama` 9.7.0-preview is deprecated in favour of OllamaSharp. ffmpeg kept only for test MP3s: a native tool on every developer machine and CI runner for test data a managed encoder makes. |
 
 ### D18 evidence: the NuGet spike (2026-10-16 UTC)
 
@@ -73,6 +82,33 @@ Measured on this host (i9-11900K, 16 threads, 96 GB, RTX 3060 12 GB, driver 610.
 | LLM enrichment | OllamaSharp 5.5.0 (MIT) and plain `HttpClient` against Ollama 0.40.4, qwen3.6:latest | Both return schema-valid JSON with `format` = the schema and `think: false` (117 output tokens, 9.1 s and 9.3 s warm; the first call 179 s while the model loaded under host load). OllamaSharp streams (93 chunks, first after 0.84 s). An `HttpClient` timeout surfaces as `TaskCanceledException` with an inner `TimeoutException`, which `OllamaClient` (Task 14) already maps to "pending". |
 | Native tools elsewhere | plan Tasks 5 to 8 | The clipping, dead-air, swear and filler detectors and `FeatureExtractor` are plain C# (checked); nothing else in the plan starts a process. |
 
+### D19 evidence: Whisper as a service (2026-10-17 UTC)
+
+Measured on this host (RTX 3060, host CPU 69% to 100% busy with other work, so lower bounds) with throwaway
+containers on 127.0.0.1 (removed afterwards, with their images), on a scratch copy of the closed segment
+`data/a/burst/master/2026/10-16/120000.mp3` decoded to 16 kHz mono: 5 minutes of speech (51:00 to 56:00, the same
+excerpt as D18) and the whole hour. "WER vs reference" is disagreement with D18's in-process Whisper.net output for
+the same 5 minutes (no human transcript exists). The recorders and the web app were not touched.
+
+| Question | whisper.cpp server v1.9.5 (`main-cuda-d1be6fde...`, turbo q8_0, flash attention, 4 threads) | speaches `latest-cuda` (faster-whisper turbo, int8_float16) | Ollama 0.33.2 `gemma4:12b` (pdl-rune-01) |
+|---|---|---|---|
+| 300 s of speech | 10.8, 13.0, 16.0 s: 19x to 28x | 36.8, 30.6, 30.4 s: 8.2x to 9.9x | 39.5 s: 7.6x |
+| Whole hour, one request (115 MB) | 126.6 s: 28.4x, 1,125 segments, 6,279 words | 374.8 s: 9.6x, 1,512 segments, 6,686 words; segments cover 2,390 of 3,598 s (voice activity detection) | n/a (30 s clips) |
+| Word timestamps | per token (`word`, `start`, `end`, `t_dtw`, `probability`) | per word (`timestamp_granularities[]=word`) | none (`{"text"}` only, even with `verbose_json`) |
+| Scores for D13 | `avg_logprob`, `no_speech_prob` (non-zero in 30 of 98 segments) | `avg_logprob`, `compression_ratio`; `no_speech_prob` always 0 | none |
+| WER vs reference, word start difference | 6.5%; mean 0.30 s, median 0.18 s | 5.5%; mean 0.22 s, median 0.13 s | 13.7%; no times |
+| Longest run of identical lines (hour) | 16 | 183 | n/a |
+| Two requests in parallel (300 s each) | 12.9 s and 25.7 s (serialised) | 71.4 s and 72.3 s | not tried |
+| Memory | VRAM +1.2 GB, RAM 1.0 GiB | VRAM +1.4 GB, RAM 1.7 GiB | 1.1 GB model |
+| Start-up | `/health` ok after 22 s (503 while loading) | model fetched from Hugging Face at run time (slow, retried) | already running |
+| Errors | non-audio or missing file: 400 | not tried | n/a |
+| Image (compressed) | 2.25 GB | 2.91 GB | n/a |
+
+The client's request (Task 20): `POST /inference` multipart with `file` (WAV), `response_format=verbose_json`,
+`language=en`, `temperature=0`, `temperature_inc=0.2`, `token_timestamps=true`, `no_language_probabilities=true`,
+`carry_initial_prompt=true`, `prompt`. Server defaults already match the plan: `no_context` true, flash attention
+on, DTW off.
+
 ## Prerequisites and owner actions
 
 1. **Nothing to install for building or testing** (D18): decoding, resampling and test MP3 encoding are NuGet packages restored by `dotnet build`; no ffmpeg, CMake, CUDA toolkit or compiler. The GPU image fetches its two CUDA libraries from NVIDIA's apt repository at `docker build` time (about 1.3 GB), so the first CUDA build needs internet access and some minutes.
@@ -84,12 +120,31 @@ Measured on this host (i9-11900K, 16 threads, 96 GB, RTX 3060 12 GB, driver 610.
 7. **Review the swear list** `config/analysis/swearwords.json` (D12) and add any local terms in a mounted copy if needed.
 8. **Review the decisions above**, especially D5 (model), D7 (A first), D11 (watershed hours), D13 (what is suppressed) and D18 (NuGet stack, whisper in process, DTW off by default, GroovyMp3's LGPL licence in the test project only).
 
+**Added by D19 (2026-10-17).** Items 2 and 3 above (models in `models/`, the local GPU) apply only to the in-process
+engine until Task 21; afterwards the model and the GPU live on the rune servers.
+
+9. **Deploy the whisper.cpp server on pdl-rune-02** (test) with the model, then on pdl-rune-01 (production): Task 23,
+   issue #111.
+10. **Confirm each rune server's GPU and free VRAM** next to Ollama (`nvidia-smi`), and the model
+    (`ggml-large-v3-turbo-q8_0`, sha256 `317eb69c...`).
+11. **Confirm network reachability** from the Kubernetes nodes (and this PC) to the rune servers on 8080 and 11434,
+    and whether cluster DNS resolves the `panoramicdata.com` names (otherwise use the private IPs).
+12. **Decide TLS and authentication** for both model servers and the host firewall rule (issue #112). Until then
+    speech audio and transcript text cross the private network over plain HTTP.
+13. **Review `DESIGN.md` and D19** before Task 20 is built.
+
 ## Issues closed by this plan
 
 | Issue | Closed by | Notes |
 |---|---|---|
 | #76 ffmpeg decode of a scratch copy | Task 9 (managed decode, D18), Task 16 (image) | Decoded without ffmpeg; say so when closing. |
-| #77 Transcription with whisper.cpp | Tasks 10, 12, 16; realtime factor measured in Task 19 | whisper.cpp through Whisper.net (D18). Close after Task 19 records the model and the realtime factor. |
+| #77 Transcription with whisper.cpp | Tasks 10, 12, 16; realtime factor measured in Task 19; since D19 Tasks 20 and 23 | whisper.cpp through Whisper.net (D18), then the whisper.cpp server on the rune servers (D19). Close after the HTTP path is deployed and its realtime factor recorded. |
+| #51 GPU compose override | superseded by D19, Task 21 | The override is removed; close with Task 21. |
+| #108 HTTP Whisper transcriber client | Task 20 | D19 |
+| #109 CPU-only analysis image, Whisper.net and CUDA removed | Task 21 | D19 |
+| #110 Kubernetes manifests for analysis | Task 22 | D19 |
+| #111 Deploy the whisper.cpp server on pdl-rune-02 and pdl-rune-01 | Task 23 (owner) | D19 |
+| #112 TLS and authentication for the model servers | owner decision, then configuration | D19 |
 | #78 Swearing with tiers and the watershed | Task 7 | |
 | #79 Clipping | Task 5 | Thresholds stay provisional until Task 18's real-audio labels. |
 | #80 Filler words | Task 8 | Labelled an estimate. |
@@ -209,6 +264,15 @@ docker/docker-compose.web-analysis.yml                      web override: WAA_AN
 docs/analysis.md                                            how analysis works, files, schemas, operations
 docs/analysis-validation.md                                 thresholds, synthetic and real-sample results
 docs/operations.md, README.md, spec                         updated in Task 19
+
+Added by D19 (Tasks 20 to 23):
+src/WebAudioArchive.Analysis/Transcription/WhisperServerTranscriber.cs  HTTP client for the whisper.cpp server
+src/WebAudioArchive.Analysis/Transcription/WhisperServerResponse.cs     verbose_json to RawSegment (tokens through MergeTokens)
+tests/WebAudioArchive.Tests/Support/StubHttpHandler.cs, StubWhisperServer.cs (Kestrel)
+tests/WebAudioArchive.Tests/WhisperServerTranscriberTests.cs, WhisperServerContractTests.cs (manual), KubernetesManifestTests.cs
+docker/docker-compose.whisper-dev.yml                       dev only: whisper.cpp server on the local GPU, loopback
+deploy/k8s/analysis/                                        Deployment, ConfigMap, Secret example, NetworkPolicy, Service, PVC
+Removed by D19: WhisperNetTranscriber.cs, docker/docker-compose.gpu.yml, the cuda target of docker/Dockerfile.analysis
 ```
 
 ---
@@ -9817,6 +9881,8 @@ git commit -m "Analysis service: single work lane, lag and realtime factor in /h
 
 ### Task 16: Containers: the analysis image (CPU and CUDA targets, whisper in process), its own compose project, the GPU override, the web override and CI
 
+> *Partly superseded by D19 (2026-10-17): the `cuda` target, the GPU override and the `models/` mount are removed in Task 21; the compose project, the web override and the separation rules stay.*
+
 **Files:**
 - Create: `docker/Dockerfile.analysis`, `docker/docker-compose.analysis.yml`, `docker/docker-compose.gpu.yml`, `docker/docker-compose.web-analysis.yml`
 - Modify: `.github/workflows/ci.yml`, `docs/operations.md` (an "Analysis container" section). **`docker/docker-compose.yml` is not changed** (binding change after the plan was written: another session restructures it into its own recorder compose project, so analysis lives in its own file and project).
@@ -11493,6 +11559,8 @@ git commit -m "Detector validation: labelled synthetic sample in CI, --validate 
 
 ### Task 19: Deploy on the GPU, measure, document, push and close the issues
 
+> *Partly superseded by D19 (2026-10-17): the GPU and the model are on the rune servers (Task 23); Step 0 (local GPU memory) and the GPU override commands apply only until Task 21. Measure the realtime factor against the rune server instead.*
+
 **Files:**
 - Create: `docs/analysis.md`
 - Modify: `docs/operations.md`, `README.md`, `docs/superpowers/specs/2026-10-15-webaudioarchive-design.md`, `docs/analysis-validation.md`
@@ -11636,6 +11704,209 @@ Close #84 only when the real-sample figures are in `docs/analysis-validation.md`
 
 ---
 
+## D19 tasks (added 2026-10-17): transcription on the GPU servers, CPU-only analysis, Kubernetes
+
+Tasks 20 to 23 implement D19. They are written as task lists, not full listings: the code is built in a later job,
+after the owner has reviewed `DESIGN.md` and D19. Order: Task 23 Steps 1 to 4 (owner, the server must exist for the
+live check), Task 20, Task 21, Task 22. Tasks 16 and 19 above stay as history; where they build the `cuda` target,
+use `docker/docker-compose.gpu.yml` or download models into `models/`, Tasks 21 and 23 replace them.
+
+### Task 20: HTTP transcriber for the whisper.cpp server (issue #108)
+
+**Files:**
+- Create: `src/WebAudioArchive.Analysis/Transcription/WhisperServerTranscriber.cs`, `src/WebAudioArchive.Analysis/Transcription/WhisperServerResponse.cs`
+- Modify: `src/WebAudioArchive.Analysis/Settings/AnalysisSettings.cs`, `src/WebAudioArchive.Analysis/AnalysisComposition.cs`, `src/WebAudioArchive.Analysis/Transcription/WhisperResponse.cs` (keep `MergeTokens`; `FromSegment(SegmentData)` goes in Task 21), `docs/analysis.md`
+- Test: `tests/WebAudioArchive.Tests/WhisperServerTranscriberTests.cs`, `tests/WebAudioArchive.Tests/Support/StubHttpHandler.cs`, `tests/WebAudioArchive.Tests/Support/StubWhisperServer.cs` (Kestrel), `tests/WebAudioArchive.Tests/WhisperServerContractTests.cs` (manual, see Step 7)
+
+**Interfaces:**
+- Consumes: `ITranscriber`, `TranscriptionRequest(byte[] Wav, string Prompt, string Language)`, `RawSegment`, `WhisperResponse.MergeTokens`, `TranscriptFilter` (all unchanged).
+- Produces: `WhisperServerTranscriber(HttpClient http, WhisperServerOptions options, TimeProvider clock) : ITranscriber`; `WhisperServerOptions(Uri BaseUrl, string Model, string Language, TimeSpan Timeout, int Concurrency, string? Token, int Retries)`; settings below.
+
+**Settings** (environment, validated at start-up with the error naming the variable):
+
+| Variable | Default | Rule |
+|---|---|---|
+| `WAA_WHISPER_URL` | none (required) | `http` or `https`; the host must be loopback, a private address, or listed in `WAA_WHISPER_ALLOWED_HOSTS` (the same rule and code as `WAA_OLLAMA_URL`: `IsLocalOrPrivate`) |
+| `WAA_WHISPER_ALLOWED_HOSTS` | `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` in compose | comma separated names |
+| `WAA_WHISPER_MODEL` | `ggml-large-v3-turbo-q8_0` | the model the server was started with; recorded in every transcript and in `ModelIdentity` (whisper.cpp's server does not report it) |
+| `WAA_WHISPER_LANGUAGE` | from `config/analysis/analysis.json` (`en`) | override only |
+| `WAA_WHISPER_TIMEOUT_SECONDS` | 600 | per request; 300 s of speech took 11 to 16 s on the 3060 and a whole hour 127 s, so 600 s leaves room for a slower or shared GPU |
+| `WAA_WHISPER_CONCURRENCY` | 1 | requests in flight; whisper.cpp's server serialises on a mutex, so more than 1 helps only with several servers behind a load balancer |
+| `WAA_WHISPER_RETRIES` | 3 | retries inside one chunk for transient errors before the job is put back to waiting |
+| `WAA_WHISPER_TOKEN` | none | optional bearer token (from a Kubernetes Secret) for a TLS proxy in front of the server (issue #112) |
+
+The old `WAA_WHISPER_MODEL_PATH`, `WAA_WHISPER_DEVICE`, `WAA_WHISPER_THREADS` and `WAA_WHISPER_DTW` are rejected at
+start-up with a message naming `WAA_WHISPER_URL` once Task 21 removes Whisper.net (until then they select the
+optional in-process fallback when `WAA_WHISPER_URL` is unset).
+
+- [ ] **Step 1: Request shape tests first (stub `HttpMessageHandler`).** One request per chunk:
+  `POST {base}/inference`, `multipart/form-data` with `file` (`chunk.wav`, `audio/wav`, the bytes of
+  `TranscriptionRequest.Wav` unchanged: 16 kHz mono 16-bit, about 300 s, 9.6 MB), `response_format=verbose_json`,
+  `language`, `prompt` (only when non-empty), `carry_initial_prompt=true`, `temperature=0`, `temperature_inc=0.2`,
+  `token_timestamps=true`, `no_language_probabilities=true` (whisper.cpp otherwise runs a second language
+  detection pass per request). `Authorization: Bearer` only when a token is set. Tests:
+  `Request_is_multipart_with_the_wav_unchanged_and_the_options`, `Empty_prompt_is_not_sent`,
+  `Token_is_sent_only_when_configured`.
+- [ ] **Step 2: Response mapping.** Parse `segments[]` (`start`, `end`, `text`, `avg_logprob`, `no_speech_prob`,
+  `words[]` with `word`, `start`, `end`, `t_dtw`, `probability`). whisper.cpp's `words` are tokens, not words, exactly
+  what `MergeTokens` already merges (a leading space starts a word; special tokens `[_BEG_]`, `[_TT_n]`, `<|...|>`
+  dropped). `t_dtw` is -1 without DTW. Times are seconds from the start of the chunk; `TranscribeAsync` returns them
+  unshifted, as now (the pipeline shifts by the chunk start). Tests: `Tokens_merge_into_words_with_times_and_lowest_probability`,
+  `Segment_scores_feed_the_hallucination_filter_unchanged` (a segment with `no_speech_prob` 0.8 and `avg_logprob`
+  -1.2 is suppressed by `TranscriptFilter`), `Missing_words_array_gives_a_segment_without_words`, `Empty_segments_is_an_empty_result`.
+- [ ] **Step 3: Errors, retries, backoff, cancellation.** Mapping: connection refused, DNS failure, socket reset,
+  `HttpRequestException` without a status, a timeout (`TaskCanceledException` with an inner `TimeoutException`),
+  HTTP 502, 503 and 504: retry up to `Retries` times with exponential backoff and jitter (2 s, 4 s, 8 s, capped at
+  30 s), then `TranscriberUnavailableException` (the job waits, no attempt used). HTTP 500 whose body mentions
+  memory, CUDA or allocation: `TransientTranscriptionException`. HTTP 400, 413, 415 and a body that is not the
+  expected JSON: `TranscriptionFailedException` (an attempt is used). A cancellation from the caller's token is
+  rethrown as `OperationCanceledException` at once, never retried, and the request is aborted. Tests:
+  `Unreachable_server_is_unavailable_after_retries`, `Timeout_is_unavailable_not_failed`,
+  `Server_out_of_memory_is_transient`, `Bad_request_fails_the_chunk`, `Cancellation_is_not_retried_and_aborts_the_request`,
+  `Backoff_grows_and_is_capped` (a fake `TimeProvider`).
+- [ ] **Step 4: Readiness and identity.** `IsReadyAsync` sends `GET {base}/health` (whisper.cpp answers
+  `{"status":"ok"}` once the model is loaded, 503 while loading) with a 10 s timeout; false with `LastError` set
+  otherwise. `Engine` is `whisper.cpp server <base host>`; `Device` is `remote`; `Model` is `WAA_WHISPER_MODEL`;
+  `ModelBytes` null. `Identity` (the transcript version's engine part) is `whisper.cpp`, and `JobRules` treats a
+  stored `whisper.net 1` as equal to `whisper.cpp` (same engine and model file), so switching from the in-process
+  engine never re-transcribes the archive by itself. `ResetModel()` does nothing (the server owns the model). Tests:
+  `Health_ok_is_ready`, `Health_503_is_not_ready_with_a_reason`, `Whisper_net_transcripts_stay_current_after_the_switch`.
+- [ ] **Step 5: Concurrency.** A `SemaphoreSlim(Concurrency)` around requests (the service has one work lane, so
+  1 is normal). Test: `Requests_in_flight_never_exceed_the_concurrency`.
+- [ ] **Step 6: A real HTTP stub (Kestrel) for what a handler stub cannot show.** `StubWhisperServer` listens on
+  `127.0.0.1:0`, parses the multipart body with ASP.NET Core's form reader and answers canned `verbose_json`
+  recorded from the D19 spike (synthetic text only, no broadcast transcript in the repo). Tests:
+  `Multipart_body_round_trips_through_a_real_server` (the server sees the WAV bytes and fields),
+  `Slow_server_hits_the_timeout`, `Connection_dropped_mid_response_is_unavailable`,
+  `Large_chunk_of_10_MB_is_accepted`.
+- [ ] **Step 7: Contract test against the live service (manual, not in CI).** `WhisperServerContractTests` runs
+  only when `WAA_LIVE_WHISPER_URL` is set and otherwise fails with a message saying how to run it (no skipped
+  tests): it sends a synthetic 20 s WAV of generated speech-like tones and checks the response has `segments`,
+  `no_speech_prob` and `avg_logprob` per segment and `words` with `start`, `end` and `probability`. Real speech is
+  checked by hand with the curl commands in Task 23 Step 4. Document the command in `docs/analysis.md`:
+  `$env:WAA_LIVE_WHISPER_URL='http://pdl-rune-02.panoramicdata.com:8080'; dotnet test --filter WhisperServerContractTests`.
+- [ ] **Step 8: Wire it.** `AnalysisComposition` builds `WhisperServerTranscriber` when `WAA_WHISPER_URL` is set
+  (a named `HttpClient` with `Timeout = WAA_WHISPER_TIMEOUT_SECONDS`, `PooledConnectionLifetime` 5 minutes so DNS
+  changes are followed). `/healthz` gains `whisperUrl` (scheme, host and port only) next to `whisperReady`. The
+  chunking (300 s at the quietest 50 ms window within 8 s, `ChunkPlanner`), the prompt (`PromptBuilder`) and the
+  hallucination filter are unchanged. Run `dotnet build -c Release` and `dotnet test -c Release`; commit
+  `Analysis: HTTP transcriber for the whisper.cpp server on the GPU servers (D19, #108)`.
+
+### Task 21: CPU-only analysis image; Whisper.net and the CUDA path removed (issue #109)
+
+**Recommendation (D19):** remove Whisper.net entirely rather than keep it as a fallback. Keeping it costs the
+`libgomp1` package, about 30 MB of native libraries per runtime and a second code path to test, and the CPU fallback
+measured 1.8x to 9x realtime with `base.en` (D18), too slow to be a real fallback for 24 hours a day. A developer
+without the network runs the same whisper.cpp server container locally instead (Step 4), which exercises the
+production path.
+
+**Files:**
+- Modify: `src/WebAudioArchive.Analysis/WebAudioArchive.Analysis.csproj` (remove `Whisper.net`, `Whisper.net.Runtime`, `Whisper.net.Runtime.Cuda.Linux`), `docker/Dockerfile.analysis` (one stage `runtime` on `mcr.microsoft.com/dotnet/aspnet:10.0`, no `libgomp1`, no `runtimes/` pruning, no `cuda` stage), `docker/docker-compose.analysis.yml` (no `target`, no `/models` mount, `WAA_WHISPER_URL` and `WAA_WHISPER_ALLOWED_HOSTS` set), `.github/workflows/ci.yml` (one image build, no `ldd` checks), `tests/WebAudioArchive.Tests/DeploymentFilesTests.cs`, `docs/analysis.md`, `docs/operations.md`
+- Delete: `src/WebAudioArchive.Analysis/Transcription/WhisperNetTranscriber.cs`, `WhisperResponse.FromSegment`, `docker/docker-compose.gpu.yml`, the Whisper.net tests
+- Create: `docker/docker-compose.whisper-dev.yml` (dev only)
+
+- [ ] **Step 1:** Tests first in `DeploymentFilesTests`: `Analysis_image_has_no_cuda_and_no_native_whisper`
+  (the Dockerfile has one runtime stage, no `cuda`, `libcublas`, `libgomp1`), `Analysis_compose_has_no_gpu_and_no_models_mount`,
+  `Gpu_override_is_gone`, `Whisper_dev_compose_is_loopback_only_and_names_no_recorder`.
+- [ ] **Step 2:** Remove the packages, `WhisperNetTranscriber`, `WhisperDevice`, the four old settings (start-up
+  error: "WAA_WHISPER_MODEL_PATH is no longer used: transcription runs on the Whisper service; set WAA_WHISPER_URL
+  (docs/analysis.md)"), and `WhisperResponse.FromSegment`. `MergeTokens` stays.
+- [ ] **Step 3:** The image: build it and record its size in `docs/operations.md` (expected about 350 MB, against
+  2.0 GB for the old `cuda` target). `docker run --rm webaudioarchive-analysis:local --healthcheck` must fail
+  cleanly (no service running) without any native library error.
+- [ ] **Step 4:** `docker/docker-compose.whisper-dev.yml`, project name `waa-whisper-dev`, service `whisper`,
+  image `ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037`, the same command as
+  Task 23 Step 3, GPU reservation, `models/` mounted read only, published on `127.0.0.1:8178` only. Then
+  `WAA_WHISPER_URL=http://host.docker.internal:8178` for the analysis container on the PC. Dev only: production
+  uses the rune servers.
+- [ ] **Step 5:** CI builds the one analysis image and validates the compose files with `docker compose config`.
+  Commit `Analysis: CPU-only image, Whisper.net and the CUDA target removed (D19, #109, #51)`.
+
+### Task 22: Kubernetes manifests for analysis (issue #110)
+
+**Files:**
+- Create: `deploy/k8s/analysis/kustomization.yaml`, `deployment.yaml`, `configmap.yaml`, `secret.example.yaml` (placeholder values only, never real tokens), `networkpolicy.yaml`, `service.yaml`, `pvc.yaml` (claims `data-analysis`; the shared data claims are referenced, not created here), `deploy/k8s/README.md`
+- Test: `tests/WebAudioArchive.Tests/KubernetesManifestTests.cs`
+
+- [ ] **Step 1:** Tests first (parse the YAML with a small reader or `YamlDotNet` in the test project only):
+  `Analysis_mounts_recordings_read_only_and_writes_only_analysis`, `Analysis_requests_no_gpu`,
+  `Analysis_kustomization_contains_no_recorder`, `Readiness_uses_healthz_and_liveness_never_fails_on_lag`,
+  `Scratch_is_a_memory_emptydir_of_2Gi`, `Secret_example_holds_no_real_value`.
+- [ ] **Step 2: Deployment.** `replicas: 1`, `strategy: Recreate` (the service lock forbids two), `securityContext`
+  with `runAsUser: 1654`, `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`,
+  `capabilities: drop [ALL]`; `terminationGracePeriodSeconds: 90` (a graceful stop restores the job's attempts);
+  `envFrom` the ConfigMap and the Secret (optional); resources requests `cpu: 1`, `memory: 1536Mi`, limits
+  `cpu: 4`, `memory: 6Gi`; volumes: `data-a`, `data-b`, `data-merged` (readOnly), `data-analysis` (read and write),
+  `web-cache` (readOnly), `config` (ConfigMap of `config/analysis` and `config/stations.json`, readOnly),
+  `scratch` (`emptyDir: {medium: Memory, sizeLimit: 2Gi}`, counted in the memory limit).
+- [ ] **Step 3: Probes.** `startupProbe` and `readinessProbe`: `httpGet /healthz` port 8080 accepting any status
+  below 600 is not possible in Kubernetes, so readiness uses `exec: dotnet WebAudioArchive.Analysis.Service.dll --healthcheck --alive`
+  (a new flag in this task: exits 0 when the process answers, whatever the lag), and there is no liveness probe that
+  can fail on lag; `/healthz` 503 is an alarm for monitoring, never a restart (D16).
+- [ ] **Step 4: ConfigMap.** `WAA_WHISPER_URL=http://pdl-rune-01.panoramicdata.com:8080` (production; the test
+  cluster uses pdl-rune-02), `WAA_WHISPER_ALLOWED_HOSTS`, `WAA_WHISPER_MODEL`, `WAA_OLLAMA_URL`,
+  `WAA_OLLAMA_ALLOWED_HOSTS`, `WAA_OLLAMA_MODEL=qwen3.6:27b` (what pdl-rune-01 has), `WAA_RECORDERS=a=/data/a,b=/data/b`,
+  `WAA_MIN_FREE_GB`, `WAA_LAG_ALARM_HOURS`. If cluster DNS cannot resolve the rune names, use the IPs (private
+  addresses are accepted without the allow-list).
+- [ ] **Step 5: NetworkPolicy.** Egress only to cluster DNS (UDP and TCP 53) and to the rune server's IP on 8080
+  and 11434; ingress only from the web pod (if it ever reads `/healthz`) and the monitoring namespace.
+- [ ] **Step 6: README.** `deploy/k8s/README.md`: the storage class must offer `ReadWriteMany` for the shared data
+  claims (or pin every pod to one node); the recorders have their own kustomization (`deploy/k8s/recorders/`, a
+  separate task in plan 5 or later) with a `PodDisruptionBudget` of `maxUnavailable: 0` each and are applied one at a
+  time, never by `kubectl apply -k deploy/k8s/analysis`; apply analysis with `kubectl apply -k deploy/k8s/analysis`
+  and check with `kubectl -n webaudioarchive logs deploy/analysis` and a port-forward to `/healthz`.
+  Commit `Analysis: Kubernetes manifests, CPU only, egress to the GPU server (D19, #110)`.
+
+### Task 23: Deploy the whisper.cpp server on pdl-rune-02 and pdl-rune-01 (owner action, issue #111)
+
+The rune servers run Ollama 0.33.2 on 11434 and nothing on 8000, 8080, 9000 or 10300 (checked 2026-10-17). The
+steps assume each is a Docker host with the NVIDIA container toolkit (Ollama's GPU use suggests the driver is
+there). If a rune server is instead a Kubernetes node with a GPU, use the manifest in Step 3b.
+
+- [ ] **Step 1: Check the GPU and the toolkit** (on the rune host):
+  ```bash
+  nvidia-smi --query-gpu=name,memory.total,memory.used,driver_version --format=csv
+  docker run --rm --gpus all ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037 nvidia-smi
+  ```
+  Expected: the GPU named in both, at least 2 GB free next to Ollama's loaded model.
+- [ ] **Step 2: The model** (874,188,075 bytes, the same file as D2):
+  ```bash
+  sudo mkdir -p /srv/whisper/models && cd /srv/whisper/models
+  sudo curl -L --fail -o ggml-large-v3-turbo-q8_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q8_0.bin
+  echo "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1  ggml-large-v3-turbo-q8_0.bin" | sha256sum -c
+  ```
+- [ ] **Step 3a: Run it (Docker host).** The image's entrypoint is `bash -c` (checked), so the server command is passed as
+  one string:
+  ```bash
+  docker run -d --name whisper --restart unless-stopped --gpus all \
+    -p 8080:8080 -v /srv/whisper/models:/models:ro \
+    --log-opt max-size=10m --log-opt max-file=3 \
+    ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037 \
+    "whisper-server --host 0.0.0.0 --port 8080 --model /models/ggml-large-v3-turbo-q8_0.bin --language en --threads 4 --flash-attn"
+  ```
+  (or the same as a compose file with `deploy.resources.reservations.devices` for the GPU). No `--convert` (the
+  client sends WAV, so no ffmpeg and no temporary files); no `--print-realtime` (keeps transcript text out of the
+  log).
+- [ ] **Step 3b: Run it (Kubernetes GPU node, only if the rune host is one).** A `Deployment` with one replica, the
+  same image and arguments, `resources.limits: nvidia.com/gpu: 1`, a `hostPath` or PVC for `/models` read only, a
+  `Service` of type `LoadBalancer` or `NodePort` on 8080 reachable from the analysis cluster, and a readiness probe
+  `httpGet /health`.
+- [ ] **Step 4: Verify** (from this PC and from a cluster node):
+  ```bash
+  curl -s http://pdl-rune-02.panoramicdata.com:8080/health
+  curl -s http://pdl-rune-02.panoramicdata.com:8080/inference -F file=@chunk.wav -F response_format=verbose_json \
+    -F language=en -F temperature=0 -F temperature_inc=0.2 -F token_timestamps=true -F no_language_probabilities=true \
+    -F "prompt=Burst Radio, Burst, Backseat Aux. Um, so, er, welcome back to Burst Radio." | head -c 600
+  ```
+  Expected: `{"status":"ok"}`; then JSON with `segments`, each with `words` carrying `start`, `end` and
+  `probability`. `chunk.wav` is any 16 kHz mono 16-bit WAV (never commit it).
+- [ ] **Step 5: Firewall.** Allow 8080 only from the cluster's egress addresses and the owner's PC (for example
+  `ufw allow from <cluster egress CIDR> to any port 8080 proto tcp`). TLS and a token: issue #112.
+- [ ] **Step 6: Repeat on pdl-rune-01** (production, 10.210.3.1) once the test cluster has run for a day; record
+  both GPUs, the realtime factor from `/healthz` and the image digest in `docs/analysis-validation.md`.
+
+---
+
 ## Self-review
 
 **Spec coverage (plan 3 scope):**
@@ -11652,6 +11923,8 @@ Close #84 only when the real-sample figures are in `docs/analysis-validation.md`
 **Known gaps left deliberately:** DTW word times (off by default until whisper.cpp keeps DTW over long requests, D18); speaker diarisation; song fingerprinting (#2, #3); presenter access rules on the analysis API (plan 4, with sign-in); a VAD model; the LLM schedule fallback of 3.2 (plan 2); per-station margins from config (5 minutes is a constant until plan 2 adds `marginBefore`/`marginAfter`); retention of analysis output (plan 5 covers retention).
 
 **Type consistency:** `TranscriptDocument`, `TranscriptSegment`, `TranscriptWord`, `TimelineAnchor`, `AnalysisEvent`, `EventsDocument`, `SourceSpan`, `TimedLine` (Task 3) are used unchanged in Tasks 7, 8, 12, 13, 14, 17 and 18. `RawSegment` (Task 10) feeds `TranscriptPartial` and `TranscriptAssembler` (Task 12). `SegmentJob`, `SourceSegment`, `JobState`, `JobRules`, `JobAction` (Task 11) are used by `SegmentPipeline` (Task 12) and `AnalysisRunner` (Task 15). `ShowAnalysis` (Task 13) is the input of `Enricher` (Task 14) and the output read by the web (Task 17). `LoadedConfig` positional order (Config, Swears, ConfigDir, DetectorVersion) is the same everywhere it is built with `with`.
+
+**D19 consistency (2026-10-17):** `ITranscriber`, `TranscriptionRequest`, `RawSegment`, `WhisperResponse.MergeTokens`, `TranscriptFilter`, `ChunkPlanner` and `PromptBuilder` are unchanged; only the engine behind the interface moves (Task 20) and the in-process one is removed (Task 21). The transcript version keeps existing transcripts current (`whisper.net 1` equals `whisper.cpp`, Task 20 Step 4). No task adds a GPU or CUDA dependency to the analysis image; the only GPU in the system is on the rune servers. The spec (3, 3.6, 3.7, 4, 5, 7, 8), `docs/analysis.md`, `docs/operations.md` and `DESIGN.md` say where audio and text go.
 
 **Review Focus check:** each of the eight items has its named test in the owning task (Tasks 5, 7, 8, 9, 10, 11, 12, 14).
 
