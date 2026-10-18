@@ -164,9 +164,9 @@ builder.Services.AddHostedService<AnalysisWorker>();
 var app = builder.Build();
 app.Lifetime.ApplicationStopped.Register(serviceLock.Release);
 app.Logger.LogInformation(
-    "Analysing {Station} from recorders {Recorders} (preference {Preference}) into {Out}; whisper {Model} on {Device} (DTW {Dtw}); enrichment {Enrichment}",
+    "Analysing {Station} from recorders {Recorders} (preference {Preference}) into {Out}; whisper server {Whisper} (model {Model}); enrichment {Enrichment}",
     settings.Station, string.Join(", ", settings.Recorders.Select(r => $"{r.Id}={r.Root}")), string.Join(",", settings.Preference), settings.OutputDir,
-    settings.WhisperModelPath, settings.WhisperDevice, settings.WhisperDtw ? "on" : "off", settings.EnrichmentEnabled ? $"{settings.OllamaModel} at {settings.OllamaUrl}" : "off");
+    settings.WhisperUrlForHealth, settings.WhisperServer.Model, settings.EnrichmentEnabled ? $"{settings.OllamaModel} at {settings.OllamaUrl}" : "off");
 
 app.MapGet("/healthz", (AnalysisRuntime rt, AnalysisSettings s) =>
 {

@@ -1,17 +1,16 @@
 # Analysis (plan 3)
 
 The analysis service turns the archive into transcripts, detected events and per-show facts. It is a separate container
-(`waa-analysis`) with its own image and its own compose project, below the recorders' priority, that runs whisper.cpp in
-process (Whisper.net) on the GPU or the CPU. It never writes to the recordings: it reads closed segments read-only, copies
-each one into a 2 GiB tmpfs scratch, decodes the copy, and writes only under `data/analysis`. All times are UTC. Every count
-is a detection from speech to text and audio levels, not a proven event.
+(`waa-analysis`) with its own image and its own compose project, below the recorders' priority. It is CPU only (decision D19,
+2026-10-17): the production Kubernetes cluster has no GPU, so speech to text is an HTTP call to a whisper.cpp server container on
+the owner's GPU servers (`pdl-rune-02` for test, `pdl-rune-01` for production, port 8080), the same servers that run Ollama.
+It never writes to the recordings: it reads closed segments read-only, copies each one into a 2 GiB tmpfs scratch, decodes the
+copy, and writes only under `data/analysis`. All times are UTC. Every count is a detection from speech to text and audio levels,
+not a proven event.
 
-**Planned change (decision D19, 2026-10-17; not built yet).** Production runs in a Kubernetes cluster with no GPU, so
-whisper is moving out of this container: the analysis service will send each chunk (a 16 kHz mono WAV of about 5 minutes)
-over HTTP to a whisper.cpp server on the owner's GPU servers (`pdl-rune-02` for test, `pdl-rune-01` for production), the
-same servers that run Ollama. The container becomes CPU only: no CUDA image, no GPU override, no model files here. Until
-that lands (plan 3 Tasks 20 to 23, issues #108 to #111), the settings and commands below for the in-process engine still
-apply. Speech audio will then leave this machine, but only to the named server. Overview and diagrams: `DESIGN.md`.
+**Where the data goes.** Speech audio (16 kHz mono WAV chunks of about 5 minutes) is sent to the whisper server and transcript text
+to Ollama, both only to the hosts you configure: loopback, private addresses, or names listed in `WAA_WHISPER_ALLOWED_HOSTS` and
+`WAA_OLLAMA_ALLOWED_HOSTS`. The archive MP3s are never sent anywhere. Overview and diagrams: `DESIGN.md`.
 
 ## The whisper.cpp server client (decision D19)
 
@@ -30,7 +29,7 @@ unchanged, `response_format=verbose_json`, `language`, `prompt`, `carry_initial_
 
 The client never follows a redirect (a 307 would resend the audio to another host), uses no proxy, and logs no audio,
 transcript text or token. `GET /health` is the readiness check (10 s). `/healthz` shows `whisperReady` and `whisperUrl`
-(scheme, host and port only). Existing transcripts made by the in-process engine (`whisper.net 1`) stay current: the
+(scheme, host and port only). Transcripts made by the retired in-process engine (`whisper.net 1`) stay current: the
 engine, model and device are not part of the job version, so the switch re-transcribes nothing.
 
 ### Live contract check (manual, never in CI)
@@ -80,16 +79,19 @@ Environment variables (compose sets the defaults):
 | Variable | Default | Meaning |
 |---|---|---|
 | `WAA_MIN_FREE_GB` | 20 | below this much free disk the service pauses |
-| `WAA_WHISPER_MODEL_PATH` | `/models/ggml-large-v3-turbo-q8_0.bin` (GPU), `ggml-base.en.bin` (CPU compose) | the model file (in-process engine; removed by D19, Task 21) |
-| `WAA_WHISPER_DEVICE` | `auto` | `auto` tries CUDA then CPU, `cpu`, `cuda` (in-process engine; removed by D19, Task 21) |
-| `WAA_WHISPER_URL` | none (the in-process engine runs until Task 21 when it is unset) | the whisper.cpp server on the GPU server, for example `http://pdl-rune-02.panoramicdata.com:8080`. The audio chunks go there. `http` or `https`; the host must be loopback, `localhost`, a private address or named in `WAA_WHISPER_ALLOWED_HOSTS`, otherwise the service refuses to start (the Ollama rule, the same code); a URL with user info is refused (use the token) |
-| `WAA_WHISPER_ALLOWED_HOSTS` | none in code; `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` in compose (Task 21) | comma separated names the audio may be sent to; independent of `WAA_OLLAMA_ALLOWED_HOSTS` |
+| `WAA_WHISPER_URL` | `http://pdl-rune-02.panoramicdata.com:8080` in compose; required (the service refuses to start without it) | the whisper.cpp server on the GPU server, for example `http://pdl-rune-02.panoramicdata.com:8080`. The audio chunks go there. `http` or `https`; the host must be loopback, `localhost`, a private address or named in `WAA_WHISPER_ALLOWED_HOSTS`, otherwise the service refuses to start (the Ollama rule, the same code); a URL with user info is refused (use the token) |
+| `WAA_WHISPER_ALLOWED_HOSTS` | `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` in compose, none in code | comma separated names the audio may be sent to; independent of `WAA_OLLAMA_ALLOWED_HOSTS` |
 | `WAA_WHISPER_MODEL` | `ggml-large-v3-turbo-q8_0` | the model the server was started with. whisper.cpp's server does not report it, so this is recorded in every transcript and job for information only |
 | `WAA_WHISPER_LANGUAGE` | the language in `analysis.json` (`en`) | override only |
 | `WAA_WHISPER_TIMEOUT_MINUTES` | 10 (10 to 240) | per request. A 300 s chunk takes 11 to 16 s on an RTX 3060, a whole hour 127 s, so 10 minutes leaves room for a slower or shared GPU |
 | `WAA_WHISPER_CONCURRENCY` | 1 (1 to 16) | requests in flight; the server handles one at a time, so more helps only with several servers behind a load balancer |
 | `WAA_WHISPER_RETRIES` | 3 (0 to 10) | retries inside one chunk (2, 4, 8 s, then 16 s, at most 30 s, with jitter) for a connection error, 502, 503, 504, a timeout or a 500 before the job waits |
 | `WAA_WHISPER_TOKEN` | none | optional bearer token sent as `Authorization: Bearer`; never logged or shown in an error (issue #112) |
+
+The old in-process settings `WAA_WHISPER_MODEL_PATH`, `WAA_WHISPER_DEVICE`, `WAA_WHISPER_THREADS` and `WAA_WHISPER_DTW` are gone: setting one
+stops the service at start-up with "... is no longer used: transcription runs on the Whisper service; set WAA_WHISPER_URL". Whisper.net,
+the CUDA image target, `docker-compose.gpu.yml` and the `models/` mount were removed.
+
 | `WAA_RETRANSCRIBE` | `false` | `true`: transcribe again every segment made by a different model (name or file size); see Changing the model |
 | `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` | `http://pdl-rune-02.panoramicdata.com:11434`, `qwen3.6:latest` | the owner's Ollama server (never a cloud model). For production use `http://pdl-rune-01.panoramicdata.com:11434` and `WAA_OLLAMA_MODEL=qwen3.6:27b`, which is what that server has |
 | `WAA_OLLAMA_ALLOWED_HOSTS` | `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` | the only named hosts transcript text may be sent to (a name that is not listed is refused; loopback and private IP addresses are accepted) |
@@ -118,22 +120,22 @@ During the first catch-up watch `backlogAudioHours` fall; `lagSeconds` stays hig
 
 ## First run checklist
 
-1. Download the models into `models/` (gitignored), with the pinned commit and hashes:
-
-       $hf = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1'
-       curl.exe -L --fail -o models/ggml-large-v3-turbo-q8_0.bin "$hf/ggml-large-v3-turbo-q8_0.bin"
-       curl.exe -L --fail -o models/ggml-base.en.bin "$hf/ggml-base.en.bin"
-
-   sha256 must be `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1` (874,188,075 bytes) and
-   `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002` (147,964,211 bytes). A different hash means a different file.
+1. The whisper.cpp server must be running on the GPU server (owner action, plan 3 Task 23, issue #111): deploy it on pdl-rune-02 first,
+   then pdl-rune-01. `curl http://pdl-rune-02.panoramicdata.com:8080/health` answers `{"status":"ok"}` (503 while the model loads). Until it
+   answers, the service starts anyway: `/healthz` shows `"whisperReady":false` and the status `paused`, and it catches up by itself when the
+   server appears. Check the server's answer once with the live contract check above; for real speech use the `curl` command in Task 23 Step 4.
+   The model (`ggml-large-v3-turbo-q8_0`, 874,188,075 bytes, sha256 `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1`)
+   lives on that server, not here: there is no `models/` mount and nothing downloads a model at run time.
 2. Create `data/analysis`, and make sure the web app has saved the schedule once.
-3. GPU check (in-process engine only; after D19 the GPU check is on the rune server, plan 3 Task 23): `nvidia-smi` on the host must show at least 3 GB free with Ollama's model loaded.
+3. Confirm this machine (or the Kubernetes node) can reach the rune server on 8080 and 11434, and that Ollama and the whisper server fit the
+   GPU together (`nvidia-smi` on the rune server, Task 23 Step 1). To try the service without those servers, run the development-only local
+   container, `docker/docker-compose.whisper-dev.yml` (it needs an NVIDIA GPU, the model in `models/` and the container toolkit; loopback
+   only), and set `WAA_WHISPER_URL=http://host.docker.internal:8178`.
 4. Start (always name the service; never touch the recorders):
 
-       docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+       docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
 
-   Without a GPU leave out the second file: the CPU image uses `base.en` and is far slower.
-5. `docker exec waa-analysis nvidia-smi` names the GPU; `curl http://127.0.0.1:8095/healthz` shows `"whisperReady":true` within a few minutes.
+5. `curl http://127.0.0.1:8095/healthz` shows `"whisperReady":true` and `"whisperUrl"` once the server answers (it is checked every pass).
 6. See progress with `/healthz` (`backlogSegments`, `backlogAudioHours`, `catchUpEtaHours`, `realtimeFactor`, `currentJob`) and
    `docker logs waa-analysis`.
 7. A 503 means `lagging`, `stalled` or `failing` (table above). `docker logs waa-analysis` and the `last...Error` fields say why.
@@ -147,37 +149,35 @@ on it, and `data/analysis` can be deleted and rebuilt from the recordings. Do no
 Both refuse to run while the service is live: stop the service first.
 
     docker compose -f docker/docker-compose.analysis.yml stop analysis
-    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml run --rm analysis --unpark
-    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml run --rm analysis --rebuild
-    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d analysis
+    docker compose -f docker/docker-compose.analysis.yml run --rm analysis --unpark
+    docker compose -f docker/docker-compose.analysis.yml run --rm analysis --rebuild
+    docker compose -f docker/docker-compose.analysis.yml up -d analysis
 
 - `--unpark`: every failed or parked segment goes back in the queue with its attempts reset.
 - `--rebuild`: events, day files and shows are rebuilt from the stored transcripts and features (no whisper, no audio decode). The
   timeline is worked out again from the current sidecar, so a position-model fix re-places every event.
 - `--rebuild --retranscribe`: also marks every finished segment made by a different model for the service to transcribe again.
 - `--benchmark <segment> 600` measures the realtime factor. Stop the service first and use `run --rm` (the entrypoint keeps `nice`, and
-  `run` publishes no ports); an `exec` into the live container would run un-niced and double the GPU memory.
+  `run` publishes no ports); an `exec` into the live container would run un-niced.
+- `--check-whisper [chunk.wav]` is the live contract check of the whisper server (see above); it sends audio, so it needs `WAA_WHISPER_URL`.
 
 ## Changing the model
 
-The job version holds the Whisper.net package major version and the transcript options (language, chunk length, glossary, prompt).
-It does not hold the model. Switching the model, for example to `base.en` on the CPU, leaves every finished transcript as it is: the
+The job version holds the engine family (`whisper.cpp`) and the transcript options (language, chunk length, glossary, prompt).
+It does not hold the model or the server. Switching the model on the server (and `WAA_WHISPER_MODEL`, which only labels it), or the server
+itself, leaves every finished transcript as it is: the
 model name, file size and device are recorded in each transcript and in `state.json` for information. Transcribing again happens only
 when `WAA_RETRANSCRIBE=true` (each segment whose recorded model differs is run once and then records the new model, so turn the setting
-off again afterwards), when `--rebuild --retranscribe` marks segments, or when the options or the package major version change.
+off again afterwards), when `--rebuild --retranscribe` marks segments, or when the options change.
 
-## Sharing the GPU with Ollama (only if you run Ollama on this machine)
+## Sharing the GPU with Ollama
 
-After D19 whisper and Ollama share the rune server's GPU instead; the service still never transcribes and enriches at the
-same time (one work lane).
-
-By default Ollama now runs on the owner's servers (`pdl-rune-02`, or `pdl-rune-01` for production), so none of this applies unless `WAA_OLLAMA_URL` points at an Ollama on this machine.
-
-
-Whisper and Ollama share the 12 GB card. Whisper builds a processor (with its own GPU state) for every chunk, and a model held by
-Ollama can make that allocation fail. The service therefore: sends `keep_alive` `0` to Ollama so its model is unloaded straight after
-each enrichment; drops whisper's model before an enrichment batch so Ollama can have the GPU (the next pass loads it again); and treats
-any failure to set up a chunk as transient (the job waits and retries without using an attempt, so a busy GPU never parks a segment).
+Whisper and Ollama share each rune server's GPU, so the service never transcribes and enriches at the same time (one work lane:
+transcription first, enrichment only when no segment job is ready). `WAA_OLLAMA_KEEP_ALIVE` (`5m` in compose) keeps Ollama's model loaded
+between the shows of one enrichment batch; the whisper server keeps its own model loaded (about 1.2 GB of VRAM). If the server cannot
+get GPU memory it answers with a memory error, which the client treats as transient: the job waits and retries without using an
+attempt, so a busy GPU never parks a segment. Owner check before production: both fit next to each other (`nvidia-smi` with the Ollama
+model loaded, plan 3 Task 23 Step 1).
 
 ## The lock
 

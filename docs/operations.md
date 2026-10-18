@@ -239,25 +239,27 @@ Vendored front-end files (served from the container, no CDN, so the app works of
 
 ## Analysis container (plan 3)
 
-The analysis service (transcripts, detectors, events, show enrichment) is its own image (`docker/Dockerfile.analysis`,
-targets `cpu` and `cuda`) and its own compose project, **`waa-analysis`**, defined in
+The analysis service (transcripts, detectors, events, show enrichment) is its own image (`docker/Dockerfile.analysis`, one
+CPU-only runtime stage, about 234 MB of filesystem content) and its own compose project, **`waa-analysis`**, defined in
 `docker/docker-compose.analysis.yml`. It is deliberately not part of `docker/docker-compose.yml`, so no command for the
-recorder project can recreate it and no command for this one can touch a recorder or the web app. whisper.cpp runs
-inside it (Whisper.net, decision D18); there is no ffmpeg and no whisper container. **Planned (decision D19,
-2026-10-17, not built yet):** for the Kubernetes deployment, which has no GPU nodes, whisper moves to a whisper.cpp
-server container on the owner's GPU servers (pdl-rune-02 test, pdl-rune-01 production); this container becomes CPU
-only and the `cuda` target and `docker-compose.gpu.yml` are removed. See `DESIGN.md` and plan 3 Tasks 20 to 23.
+recorder project can recreate it and no command for this one can touch a recorder or the web app. Since decision D19 (the
+Kubernetes cluster has no GPU nodes) speech to text is an HTTP call to a whisper.cpp server container on the owner's GPU
+servers (pdl-rune-02 test, pdl-rune-01 production, port 8080); the image has no Whisper.net, no CUDA, no GPU override and
+no models mount (it was about 2.0 GB with the CUDA target and 376 MB for the old CPU target, plan 3 D18 evidence). There is no
+ffmpeg and no whisper container in this compose project. See `DESIGN.md`.
 
-Before the first start (owner actions): download the models into `models/` (gitignored; commands and sha256 values in
-the plan, Task 16 Step 1), create the output folder `data/analysis`, and make sure the web app has saved the schedule
-once (the analysis reads it from the web app's `web-cache` volume, read-only).
+Before the first start (owner actions): the whisper.cpp server must be running on the GPU server (plan 3 Task 23, issue #111;
+the service starts without it and shows `whisperReady: false` and `paused` until it answers), create the output folder
+`data/analysis`, and make sure the web app has saved the schedule once (the analysis reads it from the web app's `web-cache`
+volume, read-only).
 
 What it may touch: `data/a` and `data/b` are mounted read-only; it writes only `data/analysis` and a 2 GiB tmpfs
-scratch; `models/` and `config/` are read-only. It runs as the image's non-root user (UID 1654, set `APP_UID` if your
+scratch; `config/` is read-only. It runs as the image's non-root user (UID 1654, set `APP_UID` if your
 `data/analysis` folder is owned by someone else), under `nice 10`, `cpu_shares: 256`, `cpus: 6`, `mem_limit: 6g`,
 `oom_score_adj: 800`. Its `/healthz` is published on `127.0.0.1:8095` only. It reaches the owner's Ollama at
-`http://pdl-rune-02.panoramicdata.com:11434` (test; production uses pdl-rune-01), named in `WAA_OLLAMA_ALLOWED_HOSTS`;
-transcript text crosses the private network over plain HTTP (see `DESIGN.md`, "What leaves which machine").
+`http://pdl-rune-02.panoramicdata.com:11434` (test; production uses pdl-rune-01), named in `WAA_OLLAMA_ALLOWED_HOSTS`, and the
+whisper server at `http://pdl-rune-02.panoramicdata.com:8080`, named in `WAA_WHISPER_ALLOWED_HOSTS`; transcript text and speech audio
+cross the private network over plain HTTP (see `DESIGN.md`, "What leaves which machine").
 
 **Stopping.** `stop_grace_period` is 90 s (never below 60 s): a graceful stop finishes or aborts the current chunk
 and restores the job's attempts before Docker would kill the container. Use `docker compose ... stop analysis` (or
@@ -265,10 +267,8 @@ and restores the job's attempts before Docker would kill the container. Use `doc
 
 Commands (always from the repository root, always naming the service; these never touch the recorders):
 
-    # CPU image, base.en model
     docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
-    # GPU image (cuda target, large-v3-turbo q8_0, device auto: CUDA first, CPU if no GPU is attached; removed by D19)
-    docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
+    # test against the other server: WAA_WHISPER_URL=http://pdl-rune-01.panoramicdata.com:8080 docker compose ... up -d analysis
     curl http://127.0.0.1:8095/healthz
 
 The `docker_web-cache` volume belongs to the recorder project (named after its compose project plus `_web-cache`).
@@ -288,11 +288,16 @@ its new path in place of `docker/docker-compose.yml`. The current web service al
 
 **Analysis health (`http://127.0.0.1:8095/healthz`).** `status` is one of: `ok` (200); `catching-up` (200: lag is above the
 6 hour alarm only because of the backlog, a job finished within the stall window; expected for days after the first start, watch
-`backlogAudioHours` and `catchUpEtaHours` instead of `lagSeconds`); `paused` (200: low disk or whisper not ready, `paused` says
+`backlogAudioHours` and `catchUpEtaHours` instead of `lagSeconds`); `paused` (200: low disk or the whisper server not ready, `paused` says
 why); `lagging` (503: lag above the alarm and no job finished within the stall window, so nothing is progressing); `stalled`
 (503: no sign of life for 15 minutes, or a job running longer than the stall window); `failing` (503: whole passes keep
-failing, see `lastPassError`). Full detail, the first-run checklist, the maintenance commands (stop the service first), the GPU
-sharing with Ollama and the warning about the web override are in `docs/analysis.md`.
+failing, see `lastPassError`). Full detail, the settings table (`WAA_WHISPER_*`), the live contract check of the whisper server
+(`--check-whisper`), the first-run checklist, the maintenance commands (stop the service first), the GPU sharing with Ollama and the
+warning about the web override are in `docs/analysis.md`.
 
-CI builds both image targets, checks with `ldd` that the images carry the libraries whisper.cpp links, and validates
-the compose combinations with `docker compose config` (which starts nothing).
+For trying the service without the rune servers there is a development-only local whisper container,
+`docker/docker-compose.whisper-dev.yml` (its own compose project `waa-whisper-dev`, loopback only, needs an NVIDIA GPU and the model in
+`models/`); production never uses it.
+
+CI builds the one CPU image and validates the compose files (analysis, the dev whisper file, and the recorder project with the web
+override) with `docker compose config`, which starts nothing.

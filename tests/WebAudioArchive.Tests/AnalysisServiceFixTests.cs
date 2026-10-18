@@ -110,7 +110,7 @@ public sealed partial class AnalysisServiceTests
         await first.PassAsync(CancellationToken.None);
         Assert.True(AnalysisJson.Read<ShowAnalysis>(ShowFile)!.Complete);
 
-        // A restart with the model missing: every finished segment looks new to the planner (the Whisper.net package major changed; a model switch alone would not do it).
+        // A restart with the model missing: every finished segment looks new to the planner (the engine identity changed; a model switch alone would not do it).
         _whisper.Identity = "fake-next-major";
         _whisper.Ready = false;
         var (second, metrics) = Runner();

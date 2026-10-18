@@ -20,6 +20,7 @@ public sealed class FinalFixSettingsTests : IDisposable
     {
         var d = extra.ToDictionary(p => p.Name, p => p.Value);
         d["WAA_RECORDERS"] = $"a={_root}/a";
+        d["WAA_WHISPER_URL"] = "http://127.0.0.1:8080";
         return AnalysisSettings.Load(n => d.GetValueOrDefault(n));
     }
 
@@ -126,23 +127,12 @@ public class FinalFixDeploymentTests
     }
 
     [Fact]
-    public void The_cuda_keyring_download_is_pinned_by_checksum_and_the_build_opts_out_of_telemetry()
+    public void The_build_opts_out_of_telemetry_and_downloads_nothing_unpinned()
     {
         var docker = RepoFiles.Read("docker/Dockerfile.analysis");
 
-        Assert.Matches(@"(?m)^ADD --checksum=sha256:[0-9a-f]{64} https://developer\.download\.nvidia\.com/\S+cuda-keyring_1\.1-1_all\.deb /tmp/cuda-keyring\.deb$", docker);
-        Assert.Contains("ENV DOTNET_CLI_TELEMETRY_OPTOUT=1", docker.Split("FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS cpu")[0]);
-    }
-
-    [Fact]
-    public void The_ci_library_checks_cannot_pass_vacuously_when_a_library_path_is_wrong()
-    {
-        var ci = RepoFiles.Read(".github/workflows/ci.yml");
-        var checks = ci.Split('\n').Where(l => l.Contains("ldd ", StringComparison.Ordinal)).ToList();
-
-        Assert.Equal(2, checks.Count);
-        foreach (var line in checks)
-            Assert.Matches(@"test -f (/app/\S+\.so) && ! ldd \1 ", line);
+        Assert.Contains("ENV DOTNET_CLI_TELEMETRY_OPTOUT=1", docker.Split("FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime")[0]);
+        Assert.DoesNotContain("\nADD ", docker); // the CUDA keyring download (the only ADD) went with the cuda target (decision D19)
     }
 
     [Fact]

@@ -118,8 +118,8 @@ public sealed class WhisperServerSettingsTests : IDisposable
     }
 
     [Fact]
-    public void Without_a_url_there_is_no_server_client_yet()
+    public void Without_a_url_the_settings_are_refused()
     {
-        Assert.Null(AnalysisSettings.Load(Env()).WhisperServer);
+        Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(Env()));
     }
 }

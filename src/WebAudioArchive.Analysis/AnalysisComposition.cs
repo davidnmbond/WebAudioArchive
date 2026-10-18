@@ -14,7 +14,7 @@ namespace WebAudioArchive.Analysis;
 public sealed record AnalysisRuntime(AnalysisRunner Runner, AnalysisMetrics Metrics, ScratchSpace Scratch, SegmentDecoder Decoder, ITranscriber Transcriber);
 
 /// <summary>
-/// Builds the service from its settings and config: whisper in process (Whisper.net, D18), Ollama over HTTP (no redirects,
+/// Builds the service from its settings and config: speech to text over HTTP to the whisper.cpp server (D19), Ollama over HTTP (no redirects,
 /// timeout from WAA_OLLAMA_TIMEOUT_MINUTES), the saved schedule, the 5 minute show margin. Refuses to build (with an
 /// <see cref="AnalysisSettingsException"/> that names the setting) when the scratch folder would contain a recorder's data or
 /// the analysis output, or when the output folder is inside a recorder's data: scratch is swept and the archive must never
@@ -45,9 +45,7 @@ public static class AnalysisComposition
         }
 
         var decoder = new SegmentDecoder();
-        ITranscriber transcriber = s.WhisperServer is { } server
-            ? new WhisperServerTranscriber(WhisperServerTranscriber.CreateHttpClient(server.Timeout), server, loggers.CreateLogger("WebAudioArchive.Analysis.Whisper"))
-            : new WhisperNetTranscriber(s.WhisperModelPath, s.WhisperDevice, s.WhisperThreads, s.WhisperDtw);
+        var transcriber = new WhisperServerTranscriber(WhisperServerTranscriber.CreateHttpClient(s.WhisperServer.Timeout), s.WhisperServer, loggers.CreateLogger("WebAudioArchive.Analysis.Whisper"));
         var disk = new DiskGuard(s.OutputDir, s.MinFreeBytes);
         var schedule = new ScheduleProvider(s.ScheduleFile, s.StationsConfigPath, s.Station, log);
         var watershed = Watershed.From(c.Config.Swearing, schedule.Zone);

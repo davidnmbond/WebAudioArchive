@@ -40,7 +40,7 @@ public sealed class SegmentPipeline(
     ILogger log,
     bool retranscribe = false)
 {
-    /// <summary>What decides whether a stored transcript is current: the Whisper.net package major version and the transcript options. Not the model, its size or the device (cuda or cpu): they are recorded in the transcript and the state, and a different model re-transcribes only when asked (WAA_RETRANSCRIBE or --rebuild --retranscribe).</summary>
+    /// <summary>What decides whether a stored transcript is current: the engine family and the transcript options. Not the model, its size or the device: they are recorded in the transcript and the state, and a different model re-transcribes only when asked (WAA_RETRANSCRIBE or --rebuild --retranscribe).</summary>
     public string TranscriptVersion => $"{transcriber.Identity}|{config.Config.Transcription.TranscriptKey()}";
 
     public JobDecision Decide(SegmentJob job) =>

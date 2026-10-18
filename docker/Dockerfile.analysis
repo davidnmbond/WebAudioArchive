@@ -1,9 +1,7 @@
 # The analysis service (plan 3). Its own image and container: it never shares a process or an image with a recorder.
-# Decision D18: MP3 decoding is managed code and whisper.cpp runs in process through Whisper.net, so nothing is compiled
-# here beyond the .NET publish.
-#   target cpu  (docker-compose.analysis.yml): the aspnet image plus the OpenMP runtime that whisper.cpp's CPU library links.
-#   target cuda (docker-compose.gpu.yml): adds the CUDA 13.0 runtime and cuBLAS from NVIDIA's Ubuntu 24.04 repository
-#               (the two libraries Whisper.net's CUDA runtime links); the NVIDIA container toolkit supplies the driver.
+# CPU only (decision D19): MP3 decoding, resampling and the detectors are managed code, and speech to text is an HTTP call
+# to the whisper.cpp server on the owner's GPU servers (WAA_WHISPER_URL), so the image carries no native library, no CUDA
+# and no model. One stage on the aspnet image after the .NET publish.
 # Build and restart only it: docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
@@ -12,15 +10,11 @@ COPY global.json Directory.Build.props ./
 COPY src/WebAudioArchive.Core/ src/WebAudioArchive.Core/
 COPY src/WebAudioArchive.Analysis/ src/WebAudioArchive.Analysis/
 COPY src/WebAudioArchive.Analysis.Service/ src/WebAudioArchive.Analysis.Service/
-# Keep only the linux-x64 native libraries; the CUDA ones go to /cuda for the cuda target.
-RUN dotnet publish src/WebAudioArchive.Analysis.Service -c Release -o /app \
-    && find /app/runtimes -mindepth 1 -maxdepth 1 ! -name linux-x64 ! -name cuda -exec rm -rf {} + \
-    && find /app/runtimes/cuda -mindepth 1 -maxdepth 1 ! -name linux-x64 -exec rm -rf {} + \
-    && mkdir /cuda && mv /app/runtimes/cuda /cuda/cuda
+RUN dotnet publish src/WebAudioArchive.Analysis.Service -c Release -o /app
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS cpu
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 tzdata ca-certificates \
+    && apt-get install -y --no-install-recommends tzdata ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app .
@@ -35,19 +29,5 @@ EXPOSE 8080
 USER $APP_UID
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
     CMD ["dotnet", "WebAudioArchive.Analysis.Service.dll", "--healthcheck"]
-# nice 10: the service, and the whisper.cpp threads inside it, always run below the recorders.
+# nice 10: the service always runs below the recorders.
 ENTRYPOINT ["nice", "-n", "10", "dotnet", "WebAudioArchive.Analysis.Service.dll"]
-
-FROM cpu AS cuda
-USER root
-# The checksum pins the keyring package (sha256 of cuda-keyring_1.1-1_all.deb, 4328 bytes, fetched 2026-10-17); if NVIDIA republishes it, check the new file and update the hash.
-ADD --checksum=sha256:d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb /tmp/cuda-keyring.deb
-RUN dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends cuda-cudart-13-0 libcublas-13-0 \
-    && rm -rf /var/lib/apt/lists/*
-ENV LD_LIBRARY_PATH=/usr/local/cuda-13.0/targets/x86_64-linux/lib \
-    NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
-COPY --from=build /cuda/cuda /app/runtimes/cuda
-USER $APP_UID

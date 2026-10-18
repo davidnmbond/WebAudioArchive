@@ -2,11 +2,10 @@
 # separate from the recorder project, so nothing here can recreate, restart or rebuild a recorder or the web app.
 # Below the recorders' priority (nice 10, low CPU shares, capped CPU and memory, killed first under memory pressure).
 # It reads the recorders' folders read-only, writes only data/analysis and a 2 GiB tmpfs scratch, and stops first when
-# free disk falls below WAA_MIN_FREE_GB. whisper.cpp runs inside it (Whisper.net, decision D18): here the CPU build with
-# base.en; docker-compose.gpu.yml switches to the CUDA target and large-v3-turbo. Models come from models/ (see
-# docs/analysis.md). Health: http://127.0.0.1:8095/healthz.
+# free disk falls below WAA_MIN_FREE_GB. CPU only (decision D19): speech to text is an HTTP call to the whisper.cpp server
+# container on the owner's GPU servers (WAA_WHISPER_URL), so the image has no GPU, no CUDA, no model and no models mount.
+# Health: http://127.0.0.1:8095/healthz. Settings, checks and the first-run checklist: docs/analysis.md.
 #   docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
-#   docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
 # The schedule cache is the web app's volume, shared read-only. It is external because the web app lives in another
 # compose project; its name is the web project's name plus "_web-cache" (docker_web-cache today). If the recorder
 # project is renamed, set WAA_WEB_CACHE_VOLUME to the new name (docker volume ls).
@@ -17,7 +16,6 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.analysis
-      target: cpu
     image: webaudioarchive-analysis:local
     container_name: waa-analysis
     restart: unless-stopped
@@ -32,9 +30,14 @@ services:
       WAA_SCRATCH: /scratch
       WAA_SCRATCH_MAX_MB: "2048"
       WAA_MIN_FREE_GB: ${WAA_MIN_FREE_GB:-20}
-      WAA_WHISPER_MODEL_PATH: ${WAA_WHISPER_MODEL_PATH:-/models/ggml-base.en.bin}
-      WAA_WHISPER_DEVICE: cpu
-      WAA_WHISPER_THREADS: "4"
+      # Speech to text (decision D19): the whisper.cpp server on the owner's GPU servers, pdl-rune-02 for this machine (test) and
+      # pdl-rune-01 for production, port 8080. The audio chunks (16 kHz mono WAV, about 5 minutes) are sent there over plain HTTP
+      # on the private network; named hosts must be in WAA_WHISPER_ALLOWED_HOSTS or the service refuses to start. The server is
+      # started by the owner (plan 3 Task 23); until it answers, /healthz shows whisperReady false and the service is paused.
+      # For a local server see docker/docker-compose.whisper-dev.yml (development only).
+      WAA_WHISPER_URL: ${WAA_WHISPER_URL:-http://pdl-rune-02.panoramicdata.com:8080}
+      WAA_WHISPER_ALLOWED_HOSTS: ${WAA_WHISPER_ALLOWED_HOSTS:-pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com}
+      WAA_WHISPER_MODEL: ${WAA_WHISPER_MODEL:-ggml-large-v3-turbo-q8_0}
       # The owner's Ollama servers (decision 2026-10-17): pdl-rune-02 for this machine (test), pdl-rune-01 for production.
       # Named hosts must be in WAA_OLLAMA_ALLOWED_HOSTS. Transcript text goes to the server named here over plain HTTP on the
       # private network. pdl-rune-01 has qwen3.6:27b rather than qwen3.6:latest: set WAA_OLLAMA_MODEL when pointing at it.
@@ -51,7 +54,6 @@ services:
       - ${WAA_DATA_DIR:-../data}/a:/data/a:ro
       - ${WAA_DATA_DIR:-../data}/b:/data/b:ro
       - ${WAA_DATA_DIR:-../data}/analysis:/analysis
-      - ${WAA_MODELS_DIR:-../models}:/models:ro
       - ../config:/config:ro
       - web-cache:/web-cache:ro
     tmpfs:

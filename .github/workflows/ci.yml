@@ -19,9 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -f docker/Dockerfile -t webaudioarchive:ci .
       - run: docker build -f docker/Dockerfile.web -t webaudioarchive-web:ci .
-      - run: docker build -f docker/Dockerfile.analysis --target cpu -t webaudioarchive-analysis:ci .
-      - run: docker run --rm --entrypoint sh webaudioarchive-analysis:ci -c "test -f /app/runtimes/linux-x64/libggml-cpu-whisper.so && ! ldd /app/runtimes/linux-x64/libggml-cpu-whisper.so | grep -E 'libgomp[^ ]* => not found'"
-      - run: docker build -f docker/Dockerfile.analysis --target cuda -t webaudioarchive-analysis:ci-cuda .
-      - run: docker run --rm --entrypoint sh webaudioarchive-analysis:ci-cuda -c "test -f /app/runtimes/cuda/linux-x64/libggml-cuda-whisper.so && ! ldd /app/runtimes/cuda/linux-x64/libggml-cuda-whisper.so | grep -E 'lib(cudart|cublas)[^ ]* => not found'"
-      - run: docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml config --quiet
+      - run: docker build -f docker/Dockerfile.analysis -t webaudioarchive-analysis:ci .
+      - run: docker compose -f docker/docker-compose.analysis.yml config --quiet
+      - run: docker compose -f docker/docker-compose.whisper-dev.yml config --quiet
       - run: docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml config --quiet

@@ -31,7 +31,7 @@ public static class Benchmark
 
         if (!await transcriber.IsReadyAsync(ct))
         {
-            output.WriteLine($"benchmark: the transcriber ({transcriber.Engine} {transcriber.Model}) is not ready; check the model file (WAA_WHISPER_MODEL_PATH) and the device");
+            output.WriteLine($"benchmark: the transcriber ({transcriber.Engine} {transcriber.Model}) is not ready: {(transcriber as WhisperServerTranscriber)?.LastError ?? "no answer"}; check that the whisper.cpp server is running and WAA_WHISPER_URL (docs/analysis.md)");
             return 1;
         }
 

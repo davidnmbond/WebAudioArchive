@@ -15,10 +15,13 @@ public sealed class AnalysisSettingsTests : IDisposable
 
     public void Dispose() => Directory.Delete(_root, recursive: true);
 
-    static Func<string, string?> Env(params (string Name, string Value)[] pairs)
+    static Func<string, string?> Env(params (string Name, string Value)[] pairs) => EnvWith(false, pairs);
+
+    /// <summary>The default environment has a whisper URL (it is required); withoutWhisperUrl leaves it out.</summary>
+    static Func<string, string?> EnvWith(bool withoutWhisperUrl, params (string Name, string Value)[] pairs)
     {
         var d = pairs.ToDictionary(p => p.Name, p => p.Value);
-        return n => d.GetValueOrDefault(n);
+        return n => d.GetValueOrDefault(n) ?? (n == "WAA_WHISPER_URL" && !withoutWhisperUrl ? "http://127.0.0.1:8080" : null);
     }
 
     string Recorders => $"a={_root}/a,b={_root}/b";
@@ -34,11 +37,8 @@ public sealed class AnalysisSettingsTests : IDisposable
         Assert.Equal("/scratch", s.ScratchDir);
         Assert.Equal(2048L * 1024 * 1024, s.ScratchMaxBytes);
         Assert.Equal(20L * 1024 * 1024 * 1024, s.MinFreeBytes);
-        Assert.Equal("/models/ggml-large-v3-turbo-q8_0.bin", s.WhisperModelPath);
-        Assert.Equal("ggml-large-v3-turbo-q8_0", s.WhisperModel);
-        Assert.Equal(WhisperDevice.Auto, s.WhisperDevice);
-        Assert.Equal(4, s.WhisperThreads);
-        Assert.False(s.WhisperDtw);
+        Assert.Equal("ggml-large-v3-turbo-q8_0", s.WhisperServer.Model);
+        Assert.Equal(new Uri("http://127.0.0.1:8080"), s.WhisperServer.BaseUrl);
         Assert.Equal(new Uri("http://host.docker.internal:11434"), s.OllamaUrl);
         Assert.Equal("qwen3.6:latest", s.OllamaModel);
         Assert.True(s.EnrichmentEnabled);
@@ -68,7 +68,6 @@ public sealed class AnalysisSettingsTests : IDisposable
     [Theory]
     [InlineData("WAA_OLLAMA_MODEL", "kimi-k2.6:cloud", "cloud model")]
     [InlineData("WAA_OLLAMA_URL", "https://ollama.example.com", "leave")]
-    [InlineData("WAA_WHISPER_DEVICE", "gpu", "auto, cpu or cuda")]
     [InlineData("WAA_SCRATCH_MAX_MB", "10", "WAA_SCRATCH_MAX_MB")]
     [InlineData("WAA_ENRICHMENT", "maybe", "on or off")]
     [InlineData("WAA_ANALYSIS_PREFERENCE", "c", "recorder 'c'")]
@@ -147,6 +146,28 @@ public sealed class AnalysisSettingsTests : IDisposable
     {
         var s = AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), ("WAA_OLLAMA_URL", "https://ollama.example.com"), ("WAA_OLLAMA_ALLOW_REMOTE", "true")));
         Assert.Equal("ollama.example.com", s.OllamaUrl.Host);
+    }
+
+    [Fact]
+    public void A_missing_whisper_url_is_refused_and_says_how_to_set_it()
+    {
+        var ex = Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(EnvWith(true, ("WAA_RECORDERS", Recorders))));
+
+        Assert.Contains("WAA_WHISPER_URL is not set", ex.Message);
+        Assert.Contains("docs/analysis.md", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("WAA_WHISPER_MODEL_PATH", "/models/ggml-base.en.bin")]
+    [InlineData("WAA_WHISPER_DEVICE", "cuda")]
+    [InlineData("WAA_WHISPER_THREADS", "4")]
+    [InlineData("WAA_WHISPER_DTW", "on")]
+    public void The_old_in_process_settings_are_refused_with_a_message_naming_the_url_setting(string name, string value)
+    {
+        var ex = Assert.Throws<AnalysisSettingsException>(() => AnalysisSettings.Load(Env(("WAA_RECORDERS", Recorders), (name, value))));
+
+        Assert.Contains($"{name} is no longer used", ex.Message);
+        Assert.Contains("set WAA_WHISPER_URL (docs/analysis.md)", ex.Message);
     }
 
     [Fact]

@@ -380,6 +380,7 @@ public sealed partial class AnalysisServiceTests : IAsyncLifetime
             ["WAA_ANALYSIS_OUT"] = Path.Combine(_root, "comp-out"),
             ["WAA_SCRATCH"] = Path.Combine(_root, "comp-scratch"),
             ["WAA_ANALYSIS_CONFIG"] = ConfigPath,
+            ["WAA_WHISPER_URL"] = "http://127.0.0.1:1",
         };
         foreach (var (n, v) in extra) d[n] = v;
         return n => d.GetValueOrDefault(n);
@@ -514,7 +515,7 @@ public sealed partial class AnalysisServiceTests : IAsyncLifetime
         b.UseSetting("WAA_ANALYSIS_OUT", Path.Combine(_root, "host-out"));
         b.UseSetting("WAA_SCRATCH", Path.Combine(_root, "host-scratch"));
         b.UseSetting("WAA_ANALYSIS_CONFIG", ConfigPath);
-        b.UseSetting("WAA_WHISPER_MODEL_PATH", Path.Combine(_root, "no-model.bin"));
+        b.UseSetting("WAA_WHISPER_URL", "http://127.0.0.1:1"); // nothing listens there: the whisper server is unreachable, the service starts and /healthz answers
         b.UseSetting("WAA_ENRICHMENT", "off");
         b.UseSetting("WAA_MIN_FREE_GB", "0");
         // Nothing is planned (the test segment is older), so the lag, and with it the status code, does not depend on today's date.

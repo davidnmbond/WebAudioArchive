@@ -214,8 +214,7 @@ src/WebAudioArchive.Analysis/Decode/Mp3FrameReader.cs       frame splitter + NLa
 src/WebAudioArchive.Analysis/Decode/SpeechResampler.cs      16 kHz mono, NAudio WDL sinc
 src/WebAudioArchive.Analysis/Decode/SegmentDecoder.cs
 src/WebAudioArchive.Analysis/Transcription/ITranscriber.cs
-src/WebAudioArchive.Analysis/Transcription/WhisperNetTranscriber.cs  whisper.cpp in process (D18)
-src/WebAudioArchive.Analysis/Transcription/WhisperResponse.cs       Whisper.net segments to RawSegment
+src/WebAudioArchive.Analysis/Transcription/WhisperResponse.cs       MergeTokens: whisper tokens to words (the in-process WhisperNetTranscriber and FromSegment were removed by Task 21)
 src/WebAudioArchive.Analysis/Transcription/TranscriptFilter.cs
 src/WebAudioArchive.Analysis/Transcription/ChunkPlanner.cs
 src/WebAudioArchive.Analysis/Transcription/PromptBuilder.cs
@@ -256,11 +255,10 @@ tests/WebAudioArchive.Tests/Support/TranscriptFixtures.cs   hand-made transcript
 tests/WebAudioArchive.Tests/Support/ValidationCorpus.cs     the labelled synthetic sample
 tests/WebAudioArchive.Tests/Support/RepoFiles.cs            deployment file checks
 tests/WebAudioArchive.Tests/*Tests.cs                       one file per task area
-docker/Dockerfile.analysis                                  targets cpu and cuda (D18)
+docker/Dockerfile.analysis                                  one CPU runtime stage (D19)
 docker/docker-compose.analysis.yml                          analysis only, its own compose project (waa-analysis)
-docker/docker-compose.gpu.yml                               GPU override for analysis only
 docker/docker-compose.web-analysis.yml                      web override: WAA_ANALYSIS and a read-only data/analysis mount
-.github/workflows/ci.yml                                    analysis image builds (cpu and cuda targets)
+.github/workflows/ci.yml                                    one analysis image build, compose config checks
 docs/analysis.md                                            how analysis works, files, schemas, operations
 docs/analysis-validation.md                                 thresholds, synthetic and real-sample results
 docs/operations.md, README.md, spec                         updated in Task 19
@@ -269,7 +267,8 @@ Added by D19 (Tasks 20 to 23):
 src/WebAudioArchive.Analysis/Transcription/WhisperServerTranscriber.cs  HTTP client for the whisper.cpp server
 src/WebAudioArchive.Analysis/Transcription/WhisperServerResponse.cs     verbose_json to RawSegment (tokens through MergeTokens)
 tests/WebAudioArchive.Tests/Support/StubHttpHandler.cs, StubWhisperServer.cs (Kestrel)
-tests/WebAudioArchive.Tests/WhisperServerTranscriberTests.cs, WhisperServerContractTests.cs (manual), KubernetesManifestTests.cs
+tests/WebAudioArchive.Tests/WhisperServerTranscriberTests.cs, WhisperServerSettingsTests.cs, WhisperContractCheckTests.cs, KubernetesManifestTests.cs
+src/WebAudioArchive.Analysis/WhisperContractCheck.cs        the --check-whisper command (live run is manual, never in CI)
 docker/docker-compose.whisper-dev.yml                       dev only: whisper.cpp server on the local GPU, loopback
 deploy/k8s/analysis/                                        Deployment, ConfigMap, Secret example, NetworkPolicy, Service, PVC
 Removed by D19: WhisperNetTranscriber.cs, docker/docker-compose.gpu.yml, the cuda target of docker/Dockerfile.analysis
@@ -11806,6 +11805,17 @@ optional in-process fallback when `WAA_WHISPER_URL` is unset).
   `Analysis: HTTP transcriber for the whisper.cpp server on the GPU servers (D19, #108)`.
 
 ### Task 21: CPU-only analysis image; Whisper.net and the CUDA path removed (issue #109)
+
+> **Built (Task 21, 2026-10-18).** Whisper.net, `WhisperNetTranscriber`, `WhisperResponse.FromSegment`, `WhisperDevice`, the four old settings,
+> the `cuda` target, the keyring download, `libgomp1`, `docker/docker-compose.gpu.yml`, the `models/` mount and the CI `ldd`/cuda steps are gone.
+> `WAA_WHISPER_URL` is now required; the old settings stop the service at start-up with the message above. The Whisper.net tests
+> (`FromSegment`, missing model, runtime order, DTW heads, `Classify`, `RunAsync`, model identity) were removed with the code they tested;
+> `MergeTokens` keeps its tests and the new `WhisperServer*Tests` cover the replacement. The image is 234 MB of filesystem content (`du -sxm /` inside the container, 2 MB of it the application, no native libraries, `/app/runtimes` gone; measured by running the image, not by `docker image ls`, so it is not directly comparable with the spike's listed sizes) (built with
+> `docker build -f docker/Dockerfile.analysis -t waa-scratch-analysis-cpu .`, against 2.01 GB for the old `cuda` target and 376 MB for the old CPU
+> target in the D18 spike). `DeploymentFilesTests` gained `Gpu_override_is_gone`, `Analysis_compose_has_no_gpu_and_no_models_mount`,
+> `Analysis_compose_names_the_whisper_server_and_the_hosts_the_audio_may_go_to`, `Whisper_dev_compose_is_loopback_only_and_names_no_recorder`,
+> `The_whisper_url_default_and_allow_list_in_compose_pass_the_settings_rule` and `Ci_builds_the_single_cpu_analysis_image_and_checks_the_compose_files`
+> (comments are ignored, so a comment may still say "no CUDA").
 
 **Recommendation (D19):** remove Whisper.net entirely rather than keep it as a fallback. Keeping it costs the
 `libgomp1` package, about 30 MB of native libraries per runtime and a second code path to test, and the CPU fallback

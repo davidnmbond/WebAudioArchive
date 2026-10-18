@@ -17,19 +17,19 @@ public sealed record RawSegment(double Start, double End, string Text, double No
 }
 
 /// <summary>
-/// Speech to text, kept behind this interface so the engine can change (whisper.cpp through Whisper.net today) and tests use a fake.
+/// Speech to text, kept behind this interface so the engine can change (the whisper.cpp server over HTTP, decision D19) and tests use a fake.
 /// TranscribeAsync throws <see cref="TranscriberUnavailableException"/> when the engine cannot be reached (the job waits
 /// and retries, it is not failed) and <see cref="TranscriptionFailedException"/> when this input cannot be transcribed.
 /// </summary>
 public interface ITranscriber
 {
-    /// <summary>For information, recorded in the transcript: the engine and, once loaded, the device (for example "whisper.net 1.9.1 (cuda)"). It changes between runs, so it is never part of the job version.</summary>
+    /// <summary>For information, recorded in the transcript: the engine and, once loaded, the device (for example "whisper.cpp server at pdl-rune-02.panoramicdata.com:8080"). It changes between runs, so it is never part of the job version.</summary>
     string Engine { get; }
 
     /// <summary>
-    /// What decides, with the transcript options, whether a stored transcript is current: the Whisper.net package major version
-    /// ("whisper.net 1"). Never the model, its size, the device or the load state, so switching the model (for example to the CPU
-    /// base.en) or a GPU to CPU fallback does not re-transcribe the archive. <see cref="ModelIdentity"/> is recorded with each job
+    /// What decides, with the transcript options, whether a stored transcript is current: the engine family ("whisper.cpp"; a stored "whisper.net 1" from the retired in-process engine counts as equal, see JobRules.SameTranscriptVersion).
+    /// Never the model, its size, the device or the load state, so switching the model (for example to base.en) or the server
+    /// does not re-transcribe the archive. <see cref="ModelIdentity"/> is recorded with each job
     /// and compared only when re-transcription is asked for (WAA_RETRANSCRIBE, or --rebuild --retranscribe).
     /// </summary>
     string Identity { get; }
@@ -42,12 +42,12 @@ public interface ITranscriber
     /// <summary>The model name and file size ("ggml-base.en|147951465"): recorded with each finished job, compared only when re-transcription is asked for.</summary>
     string ModelIdentity => $"{Model}|{(ModelBytes is { } bytes ? bytes.ToString(System.Globalization.CultureInfo.InvariantCulture) : "unknown")}";
 
-    /// <summary>Drops the loaded model so its memory (the GPU's) is free for another program; the next readiness check or chunk loads it again. Safe when nothing is loaded.</summary>
+    /// <summary>Drops a locally loaded model so its memory is free for another program. The whisper server owns its model, so the default does nothing.</summary>
     void ResetModel()
     {
     }
 
-    /// <summary>Where the model runs, for /healthz: "cuda", "cpu", "not loaded" or "unknown". For information only; never part of the job version.</summary>
+    /// <summary>Where the model runs, for /healthz: "remote" for the whisper server unless it reports its device, or "unknown". For information only; never part of the job version.</summary>
     string Device => "unknown";
 
     Task<bool> IsReadyAsync(CancellationToken ct);

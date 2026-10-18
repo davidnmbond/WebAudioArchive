@@ -9,6 +9,9 @@ public class DeploymentFilesTests
     static readonly Dictionary<string, string> Compose = RepoFiles.ComposeServices("docker/docker-compose.yml");
     static readonly Dictionary<string, string> Analysis = RepoFiles.ComposeServices(AnalysisFile);
 
+    /// <summary>The file without its comment lines: comments may say "no CUDA"; only real configuration is checked.</summary>
+    static string Code(string text) => string.Join('\n', text.Split('\n').Where(l => !l.TrimStart().StartsWith('#')));
+
     [Fact]
     public void Analysis_reads_the_recordings_read_only_and_writes_only_its_own_folder()
     {
@@ -19,7 +22,7 @@ public class DeploymentFilesTests
         Assert.Contains("/analysis:/analysis", a);
         Assert.Contains("web-cache:/web-cache:ro", a);
         Assert.Contains("../config:/config:ro", a);
-        Assert.Contains(":/models:ro", a);
+        Assert.DoesNotContain("/models", a);
         foreach (var mount in a.Split('\n').Where(l => l.Contains(":/data", StringComparison.Ordinal)))
             Assert.EndsWith(":ro", mount.Trim());
         Assert.Contains("/scratch:size=2g", a);
@@ -78,16 +81,110 @@ public class DeploymentFilesTests
     }
 
     [Fact]
-    public void The_gpu_override_changes_only_analysis_and_falls_back_to_the_cpu()
+    public void Gpu_override_is_gone()
     {
-        var gpu = RepoFiles.ComposeServices("docker/docker-compose.gpu.yml");
+        Assert.False(File.Exists(Path.Combine(RepoFiles.Root, "docker", "docker-compose.gpu.yml")), "decision D19: the analysis container is CPU only; the GPU is on the whisper server");
+        Assert.DoesNotContain("docker-compose.gpu.yml", RepoFiles.Read(".github/workflows/ci.yml"));
+    }
 
-        Assert.Equal(new[] { "analysis" }, gpu.Keys.Order(StringComparer.Ordinal));
-        Assert.Contains("capabilities: [gpu]", gpu["analysis"]);
-        Assert.Contains("target: cuda", gpu["analysis"]);
-        Assert.Contains("WAA_WHISPER_DEVICE: auto", gpu["analysis"]);
-        Assert.DoesNotContain("WAA_WHISPER_DEVICE: cuda", gpu["analysis"]);
-        Assert.Contains("ggml-large-v3-turbo-q8_0.bin", gpu["analysis"]);
+    [Fact]
+    public void Analysis_compose_has_no_gpu_and_no_models_mount()
+    {
+        var text = Code(RepoFiles.Read(AnalysisFile));
+        var a = Code(Analysis["analysis"]);
+
+        Assert.DoesNotContain("nvidia", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("gpu", a, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("cuda", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/models", text);
+        Assert.DoesNotContain("target:", a);
+        Assert.DoesNotContain("deploy:", a);
+        foreach (var gone in new[] { "WAA_WHISPER_MODEL_PATH", "WAA_WHISPER_DEVICE", "WAA_WHISPER_THREADS", "WAA_WHISPER_DTW" })
+            Assert.DoesNotContain(gone, text);
+    }
+
+    [Fact]
+    public void Analysis_compose_names_the_whisper_server_and_the_hosts_the_audio_may_go_to()
+    {
+        var a = Analysis["analysis"];
+
+        Assert.Contains("WAA_WHISPER_URL: ${WAA_WHISPER_URL:-http://pdl-rune-02.panoramicdata.com:8080}", a);
+        Assert.Contains("WAA_WHISPER_ALLOWED_HOSTS: ${WAA_WHISPER_ALLOWED_HOSTS:-pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com}", a);
+        Assert.Contains("WAA_WHISPER_MODEL: ${WAA_WHISPER_MODEL:-ggml-large-v3-turbo-q8_0}", a);
+        Assert.Contains("cap_drop: [ALL]", a);
+        Assert.Contains("no-new-privileges:true", a);
+        Assert.Contains("user:", a);
+    }
+
+    [Fact]
+    public void Whisper_dev_compose_is_loopback_only_and_names_no_recorder()
+    {
+        const string file = "docker/docker-compose.whisper-dev.yml";
+        var text = RepoFiles.Read(file);
+        var services = RepoFiles.ComposeServices(file);
+
+        Assert.Matches("(?m)^name: waa-whisper-dev$", text);
+        Assert.Equal(new[] { "whisper" }, services.Keys.Order(StringComparer.Ordinal));
+        var whisper = Code(services["whisper"]);
+        Assert.Contains("image: ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037", whisper);
+        Assert.Contains("\"127.0.0.1:8178:8080\"", whisper);
+        foreach (var port in whisper.Split('\n').Where(l => l.Contains(":8080\"", StringComparison.Ordinal)))
+            Assert.Contains("127.0.0.1:", port);
+        Assert.Contains("capabilities: [gpu]", whisper);
+        Assert.Contains(":/models:ro", whisper);
+        Assert.Contains("--flash-attn", whisper);
+        Assert.DoesNotContain("--convert", whisper);
+        Assert.DoesNotContain("--print-realtime", whisper);
+        Assert.Contains("DEVELOPMENT ONLY", text);
+        Assert.DoesNotContain("recorder", whisper, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("/data", whisper);
+        Assert.DoesNotContain("container_name: waa-recorder", text);
+        Assert.DoesNotContain("container_name: waa-web", text);
+    }
+
+    [Fact]
+    public void The_whisper_url_default_and_allow_list_in_compose_pass_the_settings_rule()
+    {
+        var compose = RepoFiles.Read(AnalysisFile);
+        var url = System.Text.RegularExpressions.Regex.Match(compose, @"WAA_WHISPER_URL: \$\{WAA_WHISPER_URL:-([^}]+)\}");
+        var hosts = System.Text.RegularExpressions.Regex.Match(compose, @"WAA_WHISPER_ALLOWED_HOSTS: \$\{WAA_WHISPER_ALLOWED_HOSTS:-([^}]+)\}");
+        Assert.True(url.Success && hosts.Success);
+        var root = Directory.CreateTempSubdirectory("waa-dep-").FullName;
+        try
+        {
+            var env = new Dictionary<string, string>
+            {
+                ["WAA_RECORDERS"] = "a=" + root,
+                ["WAA_WHISPER_URL"] = url.Groups[1].Value,
+                ["WAA_WHISPER_ALLOWED_HOSTS"] = hosts.Groups[1].Value,
+            };
+
+            var w = WebAudioArchive.Analysis.Settings.AnalysisSettings.Load(n => env.GetValueOrDefault(n)).WhisperServer!;
+
+            Assert.Equal("pdl-rune-02.panoramicdata.com", w.BaseUrl.Host);
+            Assert.Equal(8080, w.BaseUrl.Port);
+            env["WAA_WHISPER_URL"] = "http://pdl-rune-01.panoramicdata.com:8080";
+            Assert.Equal("pdl-rune-01.panoramicdata.com", WebAudioArchive.Analysis.Settings.AnalysisSettings.Load(n => env.GetValueOrDefault(n)).WhisperServer!.BaseUrl.Host);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Ci_builds_the_single_cpu_analysis_image_and_checks_the_compose_files()
+    {
+        var ci = RepoFiles.Read(".github/workflows/ci.yml");
+
+        Assert.Contains("docker build -f docker/Dockerfile.analysis -t webaudioarchive-analysis:ci .", ci);
+        Assert.DoesNotContain("--target", ci);
+        Assert.DoesNotContain("cuda", ci, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ldd", ci);
+        Assert.DoesNotContain("whisper.so", ci);
+        Assert.Contains("docker compose -f docker/docker-compose.analysis.yml config --quiet", ci);
+        Assert.Contains("docker compose -f docker/docker-compose.whisper-dev.yml config --quiet", ci);
+        Assert.Contains("docker compose -f docker/docker-compose.yml -f docker/docker-compose.web-analysis.yml config --quiet", ci);
     }
 
     [Fact]
@@ -103,16 +200,21 @@ public class DeploymentFilesTests
     }
 
     [Fact]
-    public void The_image_is_non_root_with_cpu_and_cuda_targets_and_no_native_build()
+    public void Analysis_image_has_no_cuda_and_no_native_whisper()
     {
-        var analysis = RepoFiles.Read("docker/Dockerfile.analysis");
+        var analysis = Code(RepoFiles.Read("docker/Dockerfile.analysis"));
         Assert.Contains("USER $APP_UID", analysis);
         Assert.Contains("--healthcheck", analysis);
-        Assert.Contains("AS cpu", analysis);
-        Assert.Contains("FROM cpu AS cuda", analysis);
-        Assert.Contains("libgomp1", analysis);
-        Assert.Contains("cuda-cudart-13-0", analysis);
-        Assert.Contains("libcublas-13-0", analysis);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(analysis, "(?m)^FROM ").Count); // build and runtime: one runtime stage, no cuda stage
+        Assert.Contains("AS runtime", analysis);
+        Assert.DoesNotContain("AS cpu", analysis);
+        Assert.DoesNotContain("AS cuda", analysis);
+        Assert.DoesNotContain("cuda", analysis, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("libcublas", analysis);
+        Assert.DoesNotContain("libgomp", analysis);
+        Assert.DoesNotContain("nvidia", analysis, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("runtimes", analysis);
+        Assert.DoesNotContain("whisper", analysis, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("ffmpeg", analysis);
         Assert.DoesNotContain("cmake", analysis);
         Assert.False(File.Exists(Path.Combine(RepoFiles.Root, "docker", "Dockerfile.whisper")));

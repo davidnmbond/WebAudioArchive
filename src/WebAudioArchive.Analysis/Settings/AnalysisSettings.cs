@@ -10,13 +10,6 @@ namespace WebAudioArchive.Analysis.Settings;
 /// <summary>One recorder whose closed segments are analysed: its id (a, b) and its data root, mounted read-only.</summary>
 public sealed record RecorderRoot(string Id, string Root);
 
-/// <summary>Where whisper runs (D18): Auto tries the CUDA runtime and falls back to the CPU.</summary>
-public enum WhisperDevice
-{
-    Auto,
-    Cpu,
-    Cuda,
-}
 
 public sealed class AnalysisSettingsException(string message) : Exception(message);
 
@@ -32,10 +25,7 @@ public sealed partial record AnalysisSettings(
     string ScratchDir,
     long ScratchMaxBytes,
     long MinFreeBytes,
-    string WhisperModelPath,
-    WhisperDevice WhisperDevice,
-    int WhisperThreads,
-    bool WhisperDtw,
+    WhisperServerOptions WhisperServer,
     Uri OllamaUrl,
     string OllamaModel,
     bool EnrichmentEnabled,
@@ -49,10 +39,8 @@ public sealed partial record AnalysisSettings(
     /// <summary>How long one Ollama request may take (WAA_OLLAMA_TIMEOUT_MINUTES, 10 to 240, default 20): an enrichment of a long show takes minutes.</summary>
     public TimeSpan OllamaTimeout { get; init; } = TimeSpan.FromMinutes(20);
 
-    /// <summary>The whisper.cpp server client (WAA_WHISPER_URL and the other WAA_WHISPER_* settings, decision D19); null when WAA_WHISPER_URL is not set.</summary>
-    public WhisperServerOptions? WhisperServer { get; init; }
 
-    /// <summary>WAA_RETRANSCRIBE (true or false, default false): transcribe again every segment whose transcript was made with a different model (name or file size). Off, a model switch never touches the archive; the transcript options and the Whisper.net package major version always do.</summary>
+    /// <summary>WAA_RETRANSCRIBE (true or false, default false): transcribe again every segment whose transcript was made with a different model (name or file size). Off, a model switch never touches the archive; the transcript options always do.</summary>
     public bool Retranscribe { get; init; }
 
     /// <summary>WAA_OLLAMA_KEEP_ALIVE (default "0"): how long Ollama keeps the model in memory after a request; 0 frees the GPU straight away for whisper. A number of seconds, -1 for always, or a duration such as 30s, 5m, 1h30m.</summary>
@@ -61,11 +49,9 @@ public sealed partial record AnalysisSettings(
     /// <summary>How long one job may run before /healthz calls the worker stalled: 3 hours, or the Ollama timeout plus 5 minutes if that is longer (one enrichment request can legitimately take the whole timeout).</summary>
     public TimeSpan JobStallAfter => TimeSpan.FromTicks(Math.Max(AnalysisHealth.JobStallAfter.Ticks, (OllamaTimeout + TimeSpan.FromMinutes(5)).Ticks));
 
-    /// <summary>The whisper server for /healthz: scheme, host and port only, never a path, query or user info; null when no server is configured.</summary>
-    public string? WhisperUrlForHealth => WhisperServer?.BaseUrl is { } u ? $"{u.Scheme}://{u.Host}:{u.Port}" : null;
+    /// <summary>The whisper server for /healthz: scheme, host and port only, never a path, query or user info.</summary>
+    public string WhisperUrlForHealth => $"{WhisperServer.BaseUrl.Scheme}://{WhisperServer.BaseUrl.Host}:{WhisperServer.BaseUrl.Port}";
 
-    /// <summary>The model label recorded in transcripts: the model file name without its extension.</summary>
-    public string WhisperModel => Path.GetFileNameWithoutExtension(WhisperModelPath);
 
     [GeneratedRegex(@"^(-1|\d+|(\d+(\.\d+)?(ms|s|m|h))+)$")]
     private static partial Regex KeepAlivePattern();
@@ -122,19 +108,6 @@ public sealed partial record AnalysisSettings(
         foreach (var r in recorders.Where(r => !preference.Contains(r.Id)))
             preference.Add(r.Id);
 
-        var device = Text("WAA_WHISPER_DEVICE", "auto").ToLowerInvariant() switch
-        {
-            "auto" => WhisperDevice.Auto,
-            "cpu" => WhisperDevice.Cpu,
-            "cuda" => WhisperDevice.Cuda,
-            var v => throw new AnalysisSettingsException($"WAA_WHISPER_DEVICE: '{v}' must be auto, cpu or cuda."),
-        };
-        var dtw = Text("WAA_WHISPER_DTW", "off").ToLowerInvariant() switch
-        {
-            "on" => true,
-            "off" => false,
-            var v => throw new AnalysisSettingsException($"WAA_WHISPER_DTW: '{v}' must be on or off."),
-        };
         var ollama = HttpUrl("WAA_OLLAMA_URL", Text("WAA_OLLAMA_URL", "http://host.docker.internal:11434"));
         var allowRemote = string.Equals(Optional("WAA_OLLAMA_ALLOW_REMOTE"), "true", StringComparison.OrdinalIgnoreCase);
         var allowedHosts = (Optional("WAA_OLLAMA_ALLOWED_HOSTS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(h => h.ToLowerInvariant()).ToHashSet();
@@ -171,10 +144,7 @@ public sealed partial record AnalysisSettings(
             Text("WAA_SCRATCH", "/scratch"),
             (long)Number("WAA_SCRATCH_MAX_MB", 2048, 64, 1_048_576) * 1024 * 1024,
             (long)(Number("WAA_MIN_FREE_GB", 20, 0, 1_000_000) * 1024 * 1024 * 1024),
-            Text("WAA_WHISPER_MODEL_PATH", "/models/ggml-large-v3-turbo-q8_0.bin"),
-            device,
-            (int)Number("WAA_WHISPER_THREADS", 4, 1, 64),
-            dtw,
+            whisper,
             ollama,
             model,
             enrichment,
@@ -198,7 +168,6 @@ public sealed partial record AnalysisSettings(
             OllamaTimeout = TimeSpan.FromMinutes(Number("WAA_OLLAMA_TIMEOUT_MINUTES", 20, OllamaClient.MinTimeout.TotalMinutes, 240)),
             Retranscribe = retranscribe,
             OllamaKeepAlive = keepAlive,
-            WhisperServer = whisper,
         };
     }
 
@@ -214,11 +183,18 @@ public sealed partial record AnalysisSettings(
     /// <summary>
     /// WAA_WHISPER_URL and friends (decision D19). The audio chunks go to this server, so the host rule is the Ollama rule
     /// (<see cref="IsLocalOrPrivate"/>): loopback, localhost, private ranges and names listed in WAA_WHISPER_ALLOWED_HOSTS only.
-    /// There is no "allow remote" switch. Returns null when WAA_WHISPER_URL is not set.
+    /// There is no "allow remote" switch. WAA_WHISPER_URL is required: the old in-process settings are refused with a message that names it.
     /// </summary>
-    static WhisperServerOptions? LoadWhisperServer(Func<string, string, string> text, Func<string, string?> optional, Func<string, double, double, double, double> number)
+    static WhisperServerOptions LoadWhisperServer(Func<string, string, string> text, Func<string, string?> optional, Func<string, double, double, double, double> number)
     {
-        if (optional("WAA_WHISPER_URL") is not { } urlText) return null;
+        foreach (var gone in new[] { "WAA_WHISPER_MODEL_PATH", "WAA_WHISPER_DEVICE", "WAA_WHISPER_THREADS", "WAA_WHISPER_DTW" })
+        {
+            if (optional(gone) is not null)
+                throw new AnalysisSettingsException($"{gone} is no longer used: transcription runs on the Whisper service; set WAA_WHISPER_URL (docs/analysis.md).");
+        }
+
+        if (optional("WAA_WHISPER_URL") is not { } urlText)
+            throw new AnalysisSettingsException("WAA_WHISPER_URL is not set: transcription runs on the whisper.cpp server on the GPU servers, for example WAA_WHISPER_URL=http://pdl-rune-02.panoramicdata.com:8080 with WAA_WHISPER_ALLOWED_HOSTS=pdl-rune-02.panoramicdata.com (docs/analysis.md).");
         var url = HttpUrl("WAA_WHISPER_URL", urlText);
         var allowed = (optional("WAA_WHISPER_ALLOWED_HOSTS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(h => h.ToLowerInvariant()).ToHashSet();
         if (!IsLocalOrPrivate(url, allowed))

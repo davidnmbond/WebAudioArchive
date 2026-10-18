@@ -1,0 +1,44 @@
+# DEVELOPMENT ONLY. Never used in production and never started by the analysis compose file.
+#
+# Production speech to text is the whisper.cpp server container on the owner's GPU servers (pdl-rune-02 for test,
+# pdl-rune-01 for production, port 8080; plan 3 Task 23, decision D19). This file runs the same pinned image on a
+# developer PC with an NVIDIA GPU, so the analysis service can be tried without those servers. It listens on loopback
+# only, so nothing else on the network can reach it, and it is its own compose project (name: waa-whisper-dev), so no
+# command for it can touch a recorder, the web app or the analysis service.
+#
+# The model is not in git and not in the image: download ggml-large-v3-turbo-q8_0.bin into models/ at the repository root
+# (gitignored; commands and sha256 in plan 3 Task 23 Step 2), then:
+#   docker compose -f docker/docker-compose.whisper-dev.yml up -d
+#   curl http://127.0.0.1:8178/health          # {"status":"ok"} once the model is loaded (503 while loading)
+# and point the analysis service at it (it runs in Docker, so use the host alias; loopback and host.docker.internal are
+# accepted by the host rule):
+#   WAA_WHISPER_URL=http://host.docker.internal:8178 docker compose -f docker/docker-compose.analysis.yml up -d analysis
+# Stop it with: docker compose -f docker/docker-compose.whisper-dev.yml down
+name: waa-whisper-dev
+
+services:
+  whisper:
+    # The v1.9.5 release commit (decision D19). The image's entrypoint is "bash -c", so the server command is one string.
+    image: ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037
+    container_name: waa-whisper-dev
+    restart: "no"
+    # No --convert (the client sends WAV, so no ffmpeg and no temporary files) and no --print-realtime (keeps transcript text out of the log).
+    command: ["whisper-server --host 0.0.0.0 --port 8080 --model /models/ggml-large-v3-turbo-q8_0.bin --language en --threads 4 --flash-attn"]
+    volumes:
+      - ${WAA_MODELS_DIR:-../models}:/models:ro
+    ports:
+      - "127.0.0.1:8178:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

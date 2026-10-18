@@ -192,8 +192,9 @@ flowchart TB
 
 All published ports are on 127.0.0.1. The analysis container uses the same image as in Kubernetes: no CUDA libraries
 and no model files. For development without the network it can point at a throwaway whisper.cpp container on the
-local RTX 3060 (`docker/docker-compose.whisper-dev.yml`, planned in plan 3 Task 21; dev only, never needed in
-production). Until D19 is built, today's analysis container still runs Whisper.net in process (D18).
+local RTX 3060 (`docker/docker-compose.whisper-dev.yml`, plan 3 Task 21; dev only, never needed in production).
+The analysis container no longer runs Whisper.net: Tasks 20 and 21 replaced it with the HTTP client (`WhisperServerTranscriber`) and a
+CPU-only image. Kubernetes manifests (Task 22) and deploying the server (Task 23) are still to do.
 
 ### Kubernetes (production, no GPU nodes)
 
