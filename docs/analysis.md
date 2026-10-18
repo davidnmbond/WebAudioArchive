@@ -13,6 +13,39 @@ same servers that run Ollama. The container becomes CPU only: no CUDA image, no 
 that lands (plan 3 Tasks 20 to 23, issues #108 to #111), the settings and commands below for the in-process engine still
 apply. Speech audio will then leave this machine, but only to the named server. Overview and diagrams: `DESIGN.md`.
 
+## The whisper.cpp server client (decision D19)
+
+`WhisperServerTranscriber` sends each 300 s chunk to `POST {WAA_WHISPER_URL}/inference` as multipart (`file` = the WAV
+unchanged, `response_format=verbose_json`, `language`, `prompt`, `carry_initial_prompt=true`, `temperature=0`,
+`temperature_inc=0.2`, `token_timestamps=true`, `no_language_probabilities=true`) and reads `segments[]` with `words[]`
+(whisper tokens: `WhisperResponse.MergeTokens` merges them) and the per-segment `avg_logprob` and `no_speech_prob` that
+`TranscriptFilter` uses. Failure handling:
+
+| What happens | Result |
+|---|---|
+| connection refused, DNS failure, reset, timeout, 502, 503 (also while the model loads), 504 | retried with backoff, then the job waits (no attempt used); `/healthz` goes `paused`, then `catching-up` |
+| 500 whose body mentions memory or CUDA | the same (transient) |
+| any other 500, 4xx, a redirect, a body that is not the expected JSON, an answer over 32 MB | the chunk fails with a clear message (an attempt is used) |
+| the service is stopping | the request is aborted at once and no attempt is used |
+
+The client never follows a redirect (a 307 would resend the audio to another host), uses no proxy, and logs no audio,
+transcript text or token. `GET /health` is the readiness check (10 s). `/healthz` shows `whisperReady` and `whisperUrl`
+(scheme, host and port only). Existing transcripts made by the in-process engine (`whisper.net 1`) stay current: the
+engine, model and device are not part of the job version, so the switch re-transcribes nothing.
+
+### Live contract check (manual, never in CI)
+
+The server is deployed by the owner (plan 3 Task 23). Once it runs, check that its answer has what the client needs:
+
+    docker run --rm -e WAA_RECORDERS=a=/data/a -e WAA_WHISPER_URL=http://pdl-rune-02.panoramicdata.com:8080 \
+      -e WAA_WHISPER_ALLOWED_HOSTS=pdl-rune-02.panoramicdata.com webaudioarchive-analysis:local --check-whisper [chunk.wav]
+
+or `dotnet run --project src/WebAudioArchive.Analysis.Service -- --check-whisper [chunk.wav]` with the same variables set (and
+`WAA_RECORDERS` pointing at an existing folder). It prints PASS or FAIL lines and exits 0, 1 or 2. Without a file it sends 20 s of
+generated tones (the server may answer no segments, which passes with a note); with a real 16 kHz mono 16-bit WAV (never
+commit one) it requires segments with scores and words with `start`, `end` and `probability`. The check code itself is
+tested against a stub server in CI (`WhisperContractCheckTests`); the real server is never contacted by the tests.
+
 ## What it does
 
 One work lane, one pass every 60 seconds:
@@ -49,7 +82,14 @@ Environment variables (compose sets the defaults):
 | `WAA_MIN_FREE_GB` | 20 | below this much free disk the service pauses |
 | `WAA_WHISPER_MODEL_PATH` | `/models/ggml-large-v3-turbo-q8_0.bin` (GPU), `ggml-base.en.bin` (CPU compose) | the model file (in-process engine; removed by D19, Task 21) |
 | `WAA_WHISPER_DEVICE` | `auto` | `auto` tries CUDA then CPU, `cpu`, `cuda` (in-process engine; removed by D19, Task 21) |
-| `WAA_WHISPER_URL`, `WAA_WHISPER_ALLOWED_HOSTS`, `WAA_WHISPER_MODEL` | planned (D19, Task 20) | the whisper.cpp server on the GPU server, for example `http://pdl-rune-02.panoramicdata.com:8080`; the allow-list follows the Ollama rule |
+| `WAA_WHISPER_URL` | none (the in-process engine runs until Task 21 when it is unset) | the whisper.cpp server on the GPU server, for example `http://pdl-rune-02.panoramicdata.com:8080`. The audio chunks go there. `http` or `https`; the host must be loopback, `localhost`, a private address or named in `WAA_WHISPER_ALLOWED_HOSTS`, otherwise the service refuses to start (the Ollama rule, the same code); a URL with user info is refused (use the token) |
+| `WAA_WHISPER_ALLOWED_HOSTS` | none in code; `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` in compose (Task 21) | comma separated names the audio may be sent to; independent of `WAA_OLLAMA_ALLOWED_HOSTS` |
+| `WAA_WHISPER_MODEL` | `ggml-large-v3-turbo-q8_0` | the model the server was started with. whisper.cpp's server does not report it, so this is recorded in every transcript and job for information only |
+| `WAA_WHISPER_LANGUAGE` | the language in `analysis.json` (`en`) | override only |
+| `WAA_WHISPER_TIMEOUT_MINUTES` | 10 (10 to 240) | per request. A 300 s chunk takes 11 to 16 s on an RTX 3060, a whole hour 127 s, so 10 minutes leaves room for a slower or shared GPU |
+| `WAA_WHISPER_CONCURRENCY` | 1 (1 to 16) | requests in flight; the server handles one at a time, so more helps only with several servers behind a load balancer |
+| `WAA_WHISPER_RETRIES` | 3 (0 to 10) | retries inside one chunk (2, 4, 8 s, then 16 s, at most 30 s, with jitter) for a connection error, 502, 503, 504, a timeout or a 500 before the job waits |
+| `WAA_WHISPER_TOKEN` | none | optional bearer token sent as `Authorization: Bearer`; never logged or shown in an error (issue #112) |
 | `WAA_RETRANSCRIBE` | `false` | `true`: transcribe again every segment made by a different model (name or file size); see Changing the model |
 | `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` | `http://pdl-rune-02.panoramicdata.com:11434`, `qwen3.6:latest` | the owner's Ollama server (never a cloud model). For production use `http://pdl-rune-01.panoramicdata.com:11434` and `WAA_OLLAMA_MODEL=qwen3.6:27b`, which is what that server has |
 | `WAA_OLLAMA_ALLOWED_HOSTS` | `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` | the only named hosts transcript text may be sent to (a name that is not listed is refused; loopback and private IP addresses are accepted) |

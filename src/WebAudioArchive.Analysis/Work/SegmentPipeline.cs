@@ -107,7 +107,7 @@ public sealed class SegmentPipeline(
             return new JobOutcome(s.JobId, decision.Action, JobOutcome.PausedDisk, "free disk is below the threshold", 0, 0, 0);
 
         var wall = Stopwatch.StartNew();
-        var resumable = state is not null && state.Fingerprint == s.Fingerprint && state.TranscriptVersion == TranscriptVersion;
+        var resumable = state is not null && state.Fingerprint == s.Fingerprint && JobRules.SameTranscriptVersion(state.TranscriptVersion, TranscriptVersion);
         var partial = resumable ? LoadPartial(dir, s.Fingerprint) : null;
         var previousAttempts = resumable ? state!.Attempts : 0;
         var attempts = previousAttempts + 1; // counted now, so a process that is killed again and again reaches MaxAttempts

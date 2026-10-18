@@ -45,7 +45,9 @@ public static class AnalysisComposition
         }
 
         var decoder = new SegmentDecoder();
-        var transcriber = new WhisperNetTranscriber(s.WhisperModelPath, s.WhisperDevice, s.WhisperThreads, s.WhisperDtw);
+        ITranscriber transcriber = s.WhisperServer is { } server
+            ? new WhisperServerTranscriber(WhisperServerTranscriber.CreateHttpClient(server.Timeout), server, loggers.CreateLogger("WebAudioArchive.Analysis.Whisper"))
+            : new WhisperNetTranscriber(s.WhisperModelPath, s.WhisperDevice, s.WhisperThreads, s.WhisperDtw);
         var disk = new DiskGuard(s.OutputDir, s.MinFreeBytes);
         var schedule = new ScheduleProvider(s.ScheduleFile, s.StationsConfigPath, s.Station, log);
         var watershed = Watershed.From(c.Config.Swearing, schedule.Zone);

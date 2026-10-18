@@ -56,7 +56,7 @@ public static class JobRules
     {
         if (state is null) return new(JobAction.Run, "new");
         if (state.Fingerprint != fingerprint) return new(JobAction.Run, "the segment changed");
-        if (state.TranscriptVersion != transcriptVersion) return new(JobAction.Run, "the transcriber or its options changed");
+        if (!SameTranscriptVersion(state.TranscriptVersion, transcriptVersion)) return new(JobAction.Run, "the transcriber or its options changed");
         if (retranscribe && modelIdentity is not null && state.Status == JobStatus.Done && state.ModelIdentity != modelIdentity)
             return new(JobAction.Run, "the model changed and re-transcription was asked for");
         if (state.Status == JobStatus.Done)
@@ -70,6 +70,17 @@ public static class JobRules
         if (state.NextAttemptUtc is { } next && next > now) return new(JobAction.Wait, $"retry at {next:u}");
         return new(JobAction.Run, state.Status == JobStatus.Running ? "resume after an interruption" : "retry");
     }
+
+    /// <summary>
+    /// A transcript version is "engine|transcript options". The in-process engine called itself "whisper.net 1"; the whisper.cpp server
+    /// calls itself "whisper.cpp". They are the same engine and model file (decision D19), so a stored "whisper.net 1|..." equals
+    /// "whisper.cpp|..." and switching engines never re-transcribes the archive by itself.
+    /// </summary>
+    public static bool SameTranscriptVersion(string stored, string current) => Canonical(stored) == Canonical(current);
+
+    static string Canonical(string version) => version.StartsWith(LegacyEngine, StringComparison.Ordinal) ? "whisper.cpp|" + version[LegacyEngine.Length..] : version;
+
+    const string LegacyEngine = "whisper.net 1|";
 
     /// <summary>5 minutes after the first failure, doubling, at most 6 hours.</summary>
     public static DateTimeOffset NextAttempt(int attempts, DateTimeOffset now) =>

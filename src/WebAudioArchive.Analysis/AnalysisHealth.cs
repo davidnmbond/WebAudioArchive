@@ -16,7 +16,7 @@ public static class AnalysisHealth
     /// <summary>How long one job may run without finishing before the worker is called stalled.</summary>
     public static readonly TimeSpan JobStallAfter = TimeSpan.FromHours(3);
 
-    public static HealthResult Build(MetricsSnapshot m, TimeSpan lagAlarm, DateTimeOffset now, TimeSpan? jobStallAfter = null)
+    public static HealthResult Build(MetricsSnapshot m, TimeSpan lagAlarm, DateTimeOffset now, TimeSpan? jobStallAfter = null, string? whisperUrl = null)
     {
         var lag = m.OldestPendingEndUtc is { } oldest && now > oldest ? now - oldest : TimeSpan.Zero;
         // Between jobs the last sign of life is the latest of the pass end and any activity; while a job runs it is when that job started.
@@ -63,6 +63,7 @@ public static class AnalysisHealth
             jobsDone = m.JobsDone,
             jobsFailed = m.JobsFailed,
             whisperReady = m.WhisperReady,
+            whisperUrl, // scheme, host and port only (see AnalysisSettings.WhisperUrlForHealth)
             enrichment = new { pending = m.EnrichmentPending, done = m.EnrichmentDone, failed = m.EnrichmentFailed },
             freeDiskBytes = m.FreeBytes,
             minFreeDiskBytes = m.MinFreeBytes,

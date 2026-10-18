@@ -11713,6 +11713,19 @@ use `docker/docker-compose.gpu.yml` or download models into `models/`, Tasks 21 
 
 ### Task 20: HTTP transcriber for the whisper.cpp server (issue #108)
 
+> **Built (Task 20, 2026-10-18).** Deviations from the steps below, all deliberate: (1) the timeout setting is
+> `WAA_WHISPER_TIMEOUT_MINUTES` (default and minimum 10, same floor as the Ollama client) instead of seconds; (2) every
+> "job waits" outcome is a `TransientTranscriptionException` (not `TranscriberUnavailableException`; the pipeline treats both the
+> same), and a 500 that is not a memory or CUDA error is retried and then fails the chunk, so a poison chunk is parked rather than
+> waiting for ever; a redirect fails the chunk and is never followed; (3) the live contract test is the command
+> `--check-whisper [chunk.wav]` (`WhisperContractCheck`, documented in `docs/analysis.md`), because an xUnit test that fails
+> without `WAA_LIVE_WHISPER_URL` would fail every normal `dotnet test`; the check code is tested against a Kestrel stub in CI;
+> (4) the engine identity is `whisper.cpp` and `JobRules.SameTranscriptVersion` treats a stored `whisper.net 1|...` as equal, so
+> the key part is unchanged for existing transcripts (`A_done_job_made_by_the_in_process_engine_is_skipped_by_the_whisper_server_engine`);
+> (5) whisper.cpp v1.9.5 reports no device and no model, so `Device` is `remote` unless `/health` carries a `device` field, and the model
+> is the configured name; (6) the request body is parsed with `System.Text.Json` into `WhisperServerResponse`, size limited to 32 MB.
+> Until Task 21 an unset `WAA_WHISPER_URL` still selects the in-process engine.
+
 **Files:**
 - Create: `src/WebAudioArchive.Analysis/Transcription/WhisperServerTranscriber.cs`, `src/WebAudioArchive.Analysis/Transcription/WhisperServerResponse.cs`
 - Modify: `src/WebAudioArchive.Analysis/Settings/AnalysisSettings.cs`, `src/WebAudioArchive.Analysis/AnalysisComposition.cs`, `src/WebAudioArchive.Analysis/Transcription/WhisperResponse.cs` (keep `MergeTokens`; `FromSegment(SegmentData)` goes in Task 21), `docs/analysis.md`

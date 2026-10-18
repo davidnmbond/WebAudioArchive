@@ -115,6 +115,28 @@ public sealed partial class AnalysisServiceTests
     }
 
     [Fact]
+    public async Task A_done_job_made_by_the_in_process_engine_is_skipped_by_the_whisper_server_engine()
+    {
+        _whisper.Identity = "whisper.net 1";
+        var (first, _) = Runner();
+        await first.PassAsync(CancellationToken.None);
+        Assert.Equal(1, _whisper.Calls);
+        var dir = Paths.SegmentDir("a/2026/10-15/190000");
+        Assert.StartsWith("whisper.net 1|", JobStore.Read(dir)!.TranscriptVersion);
+
+        _whisper.Identity = "whisper.cpp";
+        _whisper.Engine = "whisper.cpp server at pdl-rune-02.panoramicdata.com:8080";
+        _whisper.Device = "remote";
+        var (second, metrics) = Runner();
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await second.PassAsync(CancellationToken.None);
+
+        Assert.Equal(1, _whisper.Calls);
+        Assert.Equal(JobStatus.Done, JobStore.Read(dir)!.Status);
+        Assert.Equal(0, metrics.Snapshot().Backlog);
+    }
+
+    [Fact]
     public async Task Retranscribe_runs_a_segment_made_with_another_model_once_and_records_the_model_size_and_device()
     {
         var (first, _) = Runner();

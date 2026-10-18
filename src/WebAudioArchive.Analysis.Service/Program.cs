@@ -2,6 +2,7 @@ using System.Globalization;
 using WebAudioArchive.Analysis;
 using WebAudioArchive.Analysis.Service;
 using WebAudioArchive.Analysis.Settings;
+using WebAudioArchive.Analysis.Transcription;
 using WebAudioArchive.Analysis.Validation;
 using WebAudioArchive.Core.Analysis;
 using WebAudioArchive.Core.Recording;
@@ -108,6 +109,19 @@ if (benchmark >= 0)
     return await Benchmark.RunAsync(args[benchmark + 1], seconds, runtime.Decoder, runtime.Scratch, runtime.Transcriber, config.Config.Transcription, Console.Out, CancellationToken.None);
 }
 
+if (args.Contains("--check-whisper"))
+{
+    // Manual contract check of the whisper.cpp server (docs/analysis.md); never run by the tests or CI.
+    if (runtime.Transcriber is not WhisperServerTranscriber server)
+    {
+        Console.Error.WriteLine("check-whisper: WAA_WHISPER_URL is not set");
+        return 2;
+    }
+
+    var at = Array.IndexOf(args, "--check-whisper");
+    return await WhisperContractCheck.RunAsync(server, at + 1 < args.Length && !args[at + 1].StartsWith("--", StringComparison.Ordinal) ? args[at + 1] : null, Console.Out, CancellationToken.None);
+}
+
 // The maintenance commands write the same files as the service: refuse while it is running.
 if ((args.Contains("--rebuild") || args.Contains("--unpark")) && ServiceLock.RunningMessage(settings.OutputDir, DateTimeOffset.UtcNow) is { } running)
 {
@@ -156,7 +170,7 @@ app.Logger.LogInformation(
 
 app.MapGet("/healthz", (AnalysisRuntime rt, AnalysisSettings s) =>
 {
-    var h = AnalysisHealth.Build(rt.Metrics.Snapshot(), s.LagAlarm, DateTimeOffset.UtcNow, s.JobStallAfter);
+    var h = AnalysisHealth.Build(rt.Metrics.Snapshot(), s.LagAlarm, DateTimeOffset.UtcNow, s.JobStallAfter, s.WhisperUrlForHealth);
     return Results.Json(h.Body, statusCode: h.StatusCode);
 });
 

@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using WebAudioArchive.Analysis.Enrichment;
+using WebAudioArchive.Analysis.Transcription;
 
 namespace WebAudioArchive.Analysis.Settings;
 
@@ -48,6 +49,9 @@ public sealed partial record AnalysisSettings(
     /// <summary>How long one Ollama request may take (WAA_OLLAMA_TIMEOUT_MINUTES, 10 to 240, default 20): an enrichment of a long show takes minutes.</summary>
     public TimeSpan OllamaTimeout { get; init; } = TimeSpan.FromMinutes(20);
 
+    /// <summary>The whisper.cpp server client (WAA_WHISPER_URL and the other WAA_WHISPER_* settings, decision D19); null when WAA_WHISPER_URL is not set.</summary>
+    public WhisperServerOptions? WhisperServer { get; init; }
+
     /// <summary>WAA_RETRANSCRIBE (true or false, default false): transcribe again every segment whose transcript was made with a different model (name or file size). Off, a model switch never touches the archive; the transcript options and the Whisper.net package major version always do.</summary>
     public bool Retranscribe { get; init; }
 
@@ -56,6 +60,9 @@ public sealed partial record AnalysisSettings(
 
     /// <summary>How long one job may run before /healthz calls the worker stalled: 3 hours, or the Ollama timeout plus 5 minutes if that is longer (one enrichment request can legitimately take the whole timeout).</summary>
     public TimeSpan JobStallAfter => TimeSpan.FromTicks(Math.Max(AnalysisHealth.JobStallAfter.Ticks, (OllamaTimeout + TimeSpan.FromMinutes(5)).Ticks));
+
+    /// <summary>The whisper server for /healthz: scheme, host and port only, never a path, query or user info; null when no server is configured.</summary>
+    public string? WhisperUrlForHealth => WhisperServer?.BaseUrl is { } u ? $"{u.Scheme}://{u.Host}:{u.Port}" : null;
 
     /// <summary>The model label recorded in transcripts: the model file name without its extension.</summary>
     public string WhisperModel => Path.GetFileNameWithoutExtension(WhisperModelPath);
@@ -134,6 +141,8 @@ public sealed partial record AnalysisSettings(
         if (!allowRemote && !IsLocalOrPrivate(ollama, allowedHosts))
             throw new AnalysisSettingsException($"WAA_OLLAMA_URL: '{ollama}' is not on this machine or a private network, so transcripts would leave it. Use a local Ollama, list the host in WAA_OLLAMA_ALLOWED_HOSTS (comma separated) if it is yours on a private network, or set WAA_OLLAMA_ALLOW_REMOTE=true.");
 
+        var whisper = LoadWhisperServer(Text, Optional, Number);
+
         var model = Text("WAA_OLLAMA_MODEL", "qwen3.6:latest");
         if (model.EndsWith(":cloud", StringComparison.OrdinalIgnoreCase) || model.EndsWith("-cloud", StringComparison.OrdinalIgnoreCase))
             throw new AnalysisSettingsException($"WAA_OLLAMA_MODEL: '{model}' is an Ollama cloud model, which sends the transcript off the machine. Choose a local model such as qwen3.6:latest.");
@@ -189,7 +198,49 @@ public sealed partial record AnalysisSettings(
             OllamaTimeout = TimeSpan.FromMinutes(Number("WAA_OLLAMA_TIMEOUT_MINUTES", 20, OllamaClient.MinTimeout.TotalMinutes, 240)),
             Retranscribe = retranscribe,
             OllamaKeepAlive = keepAlive,
+            WhisperServer = whisper,
         };
+    }
+
+    [GeneratedRegex("^[a-z]{2,8}(-[A-Za-z0-9]{2,8})?$")]
+    private static partial Regex LanguagePattern();
+
+    [GeneratedRegex(@"^[A-Za-z0-9._-]{1,100}$")]
+    private static partial Regex ModelNamePattern();
+
+    [GeneratedRegex(@"^[\x21-\x7E]{1,4096}$")]
+    private static partial Regex TokenPattern();
+
+    /// <summary>
+    /// WAA_WHISPER_URL and friends (decision D19). The audio chunks go to this server, so the host rule is the Ollama rule
+    /// (<see cref="IsLocalOrPrivate"/>): loopback, localhost, private ranges and names listed in WAA_WHISPER_ALLOWED_HOSTS only.
+    /// There is no "allow remote" switch. Returns null when WAA_WHISPER_URL is not set.
+    /// </summary>
+    static WhisperServerOptions? LoadWhisperServer(Func<string, string, string> text, Func<string, string?> optional, Func<string, double, double, double, double> number)
+    {
+        if (optional("WAA_WHISPER_URL") is not { } urlText) return null;
+        var url = HttpUrl("WAA_WHISPER_URL", urlText);
+        var allowed = (optional("WAA_WHISPER_ALLOWED_HOSTS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(h => h.ToLowerInvariant()).ToHashSet();
+        if (!IsLocalOrPrivate(url, allowed))
+            throw new AnalysisSettingsException($"WAA_WHISPER_URL: the host '{url.Host}' is not on this machine or a private network, so the audio would leave it (or the URL carries user info: use WAA_WHISPER_TOKEN instead). Use a local server, list the host in WAA_WHISPER_ALLOWED_HOSTS (comma separated) if it is yours on a private network.");
+
+        var model = text("WAA_WHISPER_MODEL", "ggml-large-v3-turbo-q8_0");
+        if (!ModelNamePattern().IsMatch(model))
+            throw new AnalysisSettingsException($"WAA_WHISPER_MODEL: '{model}' must be a model name such as ggml-large-v3-turbo-q8_0 (letters, digits, dots, dashes and underscores).");
+        var language = optional("WAA_WHISPER_LANGUAGE");
+        if (language is not null && !LanguagePattern().IsMatch(language))
+            throw new AnalysisSettingsException($"WAA_WHISPER_LANGUAGE: '{language}' must be a language code such as en.");
+        var token = optional("WAA_WHISPER_TOKEN");
+        if (token is not null && !TokenPattern().IsMatch(token))
+            throw new AnalysisSettingsException("WAA_WHISPER_TOKEN: the token must be printable ASCII without spaces or line breaks (the value is not shown).");
+        return new WhisperServerOptions(
+            url,
+            model,
+            language,
+            TimeSpan.FromMinutes(number("WAA_WHISPER_TIMEOUT_MINUTES", 10, OllamaClient.MinTimeout.TotalMinutes, 240)),
+            (int)number("WAA_WHISPER_CONCURRENCY", 1, 1, 16),
+            token,
+            (int)number("WAA_WHISPER_RETRIES", 3, 0, 10));
     }
 
     static Uri HttpUrl(string name, string value) =>
