@@ -61,6 +61,12 @@ Each instance is one .NET 10 worker plus one web app (same image, two roles) and
 a whisper.cpp server and Ollama. Two instances run independently, one on the station manager's machine and one
 in the test cluster, both on Linux containers.
 
+**Current architecture (2026-10-17):** the system overview, with Mermaid diagrams of the components, the data flow
+for one segment, the Docker and Kubernetes deployments and the job lifecycle, is in `DESIGN.md` at the repository
+root. Since decision D19 (plan 3) the deployment cluster has no GPU: speech to text runs in a whisper.cpp server
+container and the LLM in Ollama, both on the owner's GPU servers (`pdl-rune-02` for test, `pdl-rune-01` for
+production), reached over HTTP on the private network. The sketch below is the original v1 picture.
+
 ```
 config/stations.json
    |
@@ -169,13 +175,23 @@ mounted files, never committed, because the repo is public.
 ### 3.6 Analyser, transcriber and detectors
 
 All run off the master data on their own thread and queue, never in the recorder's path. Each instance
-analyses independently, so both need local whisper and an LLM, as you have confirmed.
+analyses independently. *Amended 2026-10-17 (D19):* neither instance needs a GPU of its own any more; each uses a
+Whisper service and an Ollama on the owner's GPU servers (test: pdl-rune-02; production: pdl-rune-01), so "local
+whisper" means "whisper on a server the owner controls", not on the analysis host.
 
 - **Decode once:** ffmpeg decodes the live stream to 16 kHz mono PCM for speech and to full-rate PCM for the
   clipping detector, in chunks of about 30 seconds with a short overlap.
 - **Transcriber:** whisper.cpp server, segments with word timestamps stored on the **stream timeline** (UTC),
   one transcript for the station. Each show's transcript is a slice of it. The prompt is primed with the show
   title and a station glossary.
+- **Where whisper runs (D19, 2026-10-17; supersedes D18's in-process Whisper.net for deployment):** the analysis
+  container is CPU only (managed decode, detectors, queue, `/healthz`). It sends each chunk of about 300 s as a
+  16 kHz mono WAV over HTTP to a whisper.cpp server container (official `ghcr.io/ggml-org/whisper.cpp` CUDA image
+  pinned to the v1.9.5 release commit, model `ggml-large-v3-turbo-q8_0`) on the GPU server, and reads back
+  segments with per-token times and probabilities. The server URL is allow-listed like Ollama's. **Speech audio
+  therefore leaves the analysis host** (a 16 kHz mono copy of each chunk, never the archive MP3s), only to that
+  named server, currently over plain HTTP (TLS and a token: issue #112). Measured figures and the alternatives
+  rejected (speaches, LocalAI, Ollama audio input, WhisperX): plan 3, D19.
 - **Clipping detector:** on the decoded full-rate audio, an event is a run of at least 3 consecutive samples at
   or above 0.99 of full scale (configurable). Events within 250 ms merge. Each event stores time, duration,
   channel and peak. Per show it reports event count, total clipped milliseconds and worst peak. The definition
@@ -213,7 +229,9 @@ analyses independently, so both need local whisper and an LLM, as you have confi
   for the test instance and `pdl-rune-01.panoramicdata.com` for production (both `:11434`, reachable on the private
   network), instead of an Ollama on the analysis host. Transcript text for enrichment therefore leaves the analysis
   host, but only to those two named servers (an allow-list; cloud models and any other host are refused), and
-  currently over plain HTTP. Audio never leaves the analysis host: transcription stays local.
+  currently over plain HTTP. ~~Audio never leaves the analysis host: transcription stays local.~~ *Superseded by D19
+  (2026-10-17): speech audio chunks now go to the Whisper service on the same rune servers (3.6); the archive MP3s
+  never leave.*
 - **Derived hosts never grant access.** They are suggestions shown to a manager (see 3.8).
 
 ### 3.8 Web app, accounts and access
@@ -549,7 +567,8 @@ src/WebAudioArchive.Worker/    recorder host and background services
 src/WebAudioArchive.Web/       Blazor app (PanoramicData.Blazor), sign-in, roles, pages, audio endpoints, reports
 tests/WebAudioArchive.Tests/   unit and integration, fixtures under tests/fixtures
 config/stations.json           Burst configured
-docker/                        Dockerfile, compose files (cpu, gpu), tunnel notes
+docker/                        Dockerfile, compose files (cpu; gpu removed by D19), tunnel notes
+deploy/k8s/                    Kubernetes manifests (analysis first, plan 3 Task 22)
 docs/                          specs, operations, detector validation notes
 .github/workflows/ci.yml       build and test on Linux
 ```
@@ -561,9 +580,15 @@ All packages pinned to exact versions.
 ## 5. Deployment
 
 - `docker compose up` brings up worker, web, whisper.cpp and Ollama. GPU use is opt-in via an override file.
+  *Amended 2026-10-17 (D19, `DESIGN.md`):* the recorders, the web app, the consolidator and the analysis service
+  run on the archive site (Docker on the owner's PC, or Kubernetes with no GPU nodes); whisper.cpp and Ollama run on
+  the owner's GPU servers and are not part of the archive's compose projects or manifests. The analysis image has no
+  CUDA and no model files; the GPU override is removed (a dev-only local Whisper container replaces it).
 - The same image runs on the manager's machine and the test cluster. Config and secrets are injected by the
   environment, so nothing differs between them except values. A Kubernetes manifest example is provided for the
-  cluster.
+  cluster (analysis: plan 3 Task 22, `deploy/k8s/analysis/`; the cluster needs egress to the GPU server on 8080 and
+  11434, `ReadWriteMany` storage for the shared data volumes, and the recorders in their own kustomization so no
+  other rollout restarts them).
 - Non-root user. The data directory is a volume. Timezone comes from config, not the host.
 - `/healthz` reports per station: connected, last byte time, current segment, coverage figures, last schedule
   fetch, analysis lag, free disk. The container health check fails if no audio has arrived for 2 minutes or the
@@ -598,7 +623,8 @@ All packages pinned to exact versions.
 | Burst changes its page | Parser fails closed (last good schedule kept), LLM fallback proposes one, warning logged. The master is unaffected. |
 | Filler and swear counts are estimates | Reported as detected, linked to audio, validated on a labelled sample, thresholds provisional. |
 | Clipping thresholds are not yet tuned | Provisional defaults, tuned on real audio and recorded in `docs/`. |
-| 24x7 transcription load | Needs a GPU for large models; CPU works with a small model with lag. Recording is unaffected either way. |
+| 24x7 transcription load | Needs a GPU for large models; CPU works with a small model with lag. Recording is unaffected either way. Since D19 the GPU is on the owner's rune servers; if they are unreachable, analysis pauses and catches up later. |
+| Speech audio and transcripts cross the network to the GPU servers (D19) | Allow-listed named hosts only, private network, archive MP3s never sent; plain HTTP today, TLS and a token recommended for production (issue #112). |
 | Disk fills | Free-space guard keeps recording and stops everything else first. |
 | Primary (internet-facing) instance exposed | Google-only sign-in, listed accounts only, server-side authorisation on every request, audit log, no local passwords. |
 | Secondary exposed | Not needed: `manager-only`, reached via localhost or a private network, not the public internet. |
@@ -613,7 +639,9 @@ All packages pinned to exact versions.
 ## 8. Decisions recorded
 
 - Repo `davidnmbond/WebAudioArchive`, public, personal account; no panoramicdata code copied in.
-- C# on .NET 10, Docker, whisper.cpp and Ollama for local AI.
+- C# on .NET 10, Docker, whisper.cpp and Ollama for local AI. *Amended 2026-10-17 (D19):* "local" means on the
+  owner's own GPU servers (pdl-rune-02 test, pdl-rune-01 production), reached over the private network; the
+  analysis container is CPU only and runs in a Kubernetes cluster without GPU nodes.
 - 24x7 continuous master; show files are lossless cuts with 5 minute margins; unassigned audio is kept.
 - Two Linux instances (manager's machine and test cluster), independent, no reconciliation.
 - Schedule: per-station parser with LLM fallback, re-checked every 15 minutes, applied immediately.
@@ -635,3 +663,7 @@ All packages pinned to exact versions.
 - Songs (2026-10-17): both recorders capture the station's now-playing data around the clock; identification
   uses PanoramicData.SoundPrint from its published NuGet package, trained from the now-playing labels, against our
   own catalogue (3.9). Design first; capture to be built next, identification once the package is published.
+- Speech to text on the GPU servers (2026-10-17, plan 3 decision D19): a whisper.cpp server container
+  (official image, pinned release commit, large-v3-turbo q8_0) on pdl-rune-02 and pdl-rune-01, called over HTTP by
+  a CPU-only analysis service; speaches, LocalAI, Ollama audio input and in-process Whisper.net were rejected (D19).
+  The design overview with diagrams is `DESIGN.md`.

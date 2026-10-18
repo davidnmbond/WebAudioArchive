@@ -243,7 +243,10 @@ The analysis service (transcripts, detectors, events, show enrichment) is its ow
 targets `cpu` and `cuda`) and its own compose project, **`waa-analysis`**, defined in
 `docker/docker-compose.analysis.yml`. It is deliberately not part of `docker/docker-compose.yml`, so no command for the
 recorder project can recreate it and no command for this one can touch a recorder or the web app. whisper.cpp runs
-inside it (Whisper.net, decision D18); there is no ffmpeg and no whisper container.
+inside it (Whisper.net, decision D18); there is no ffmpeg and no whisper container. **Planned (decision D19,
+2026-10-17, not built yet):** for the Kubernetes deployment, which has no GPU nodes, whisper moves to a whisper.cpp
+server container on the owner's GPU servers (pdl-rune-02 test, pdl-rune-01 production); this container becomes CPU
+only and the `cuda` target and `docker-compose.gpu.yml` are removed. See `DESIGN.md` and plan 3 Tasks 20 to 23.
 
 Before the first start (owner actions): download the models into `models/` (gitignored; commands and sha256 values in
 the plan, Task 16 Step 1), create the output folder `data/analysis`, and make sure the web app has saved the schedule
@@ -252,9 +255,9 @@ once (the analysis reads it from the web app's `web-cache` volume, read-only).
 What it may touch: `data/a` and `data/b` are mounted read-only; it writes only `data/analysis` and a 2 GiB tmpfs
 scratch; `models/` and `config/` are read-only. It runs as the image's non-root user (UID 1654, set `APP_UID` if your
 `data/analysis` folder is owned by someone else), under `nice 10`, `cpu_shares: 256`, `cpus: 6`, `mem_limit: 6g`,
-`oom_score_adj: 800`. Its `/healthz` is published on `127.0.0.1:8095` only. It reaches Ollama on the host at
-`http://host.docker.internal:11434` (`extra_hosts: host-gateway`; a private name, so it needs no
-`WAA_OLLAMA_ALLOWED_HOSTS`).
+`oom_score_adj: 800`. Its `/healthz` is published on `127.0.0.1:8095` only. It reaches the owner's Ollama at
+`http://pdl-rune-02.panoramicdata.com:11434` (test; production uses pdl-rune-01), named in `WAA_OLLAMA_ALLOWED_HOSTS`;
+transcript text crosses the private network over plain HTTP (see `DESIGN.md`, "What leaves which machine").
 
 **Stopping.** `stop_grace_period` is 90 s (never below 60 s): a graceful stop finishes or aborts the current chunk
 and restores the job's attempts before Docker would kill the container. Use `docker compose ... stop analysis` (or
@@ -264,7 +267,7 @@ Commands (always from the repository root, always naming the service; these neve
 
     # CPU image, base.en model
     docker compose -f docker/docker-compose.analysis.yml up -d --build analysis
-    # GPU image (cuda target, large-v3-turbo q8_0, device auto: CUDA first, CPU if no GPU is attached)
+    # GPU image (cuda target, large-v3-turbo q8_0, device auto: CUDA first, CPU if no GPU is attached; removed by D19)
     docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
     curl http://127.0.0.1:8095/healthz
 

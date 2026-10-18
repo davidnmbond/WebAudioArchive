@@ -6,6 +6,13 @@ process (Whisper.net) on the GPU or the CPU. It never writes to the recordings: 
 each one into a 2 GiB tmpfs scratch, decodes the copy, and writes only under `data/analysis`. All times are UTC. Every count
 is a detection from speech to text and audio levels, not a proven event.
 
+**Planned change (decision D19, 2026-10-17; not built yet).** Production runs in a Kubernetes cluster with no GPU, so
+whisper is moving out of this container: the analysis service will send each chunk (a 16 kHz mono WAV of about 5 minutes)
+over HTTP to a whisper.cpp server on the owner's GPU servers (`pdl-rune-02` for test, `pdl-rune-01` for production), the
+same servers that run Ollama. The container becomes CPU only: no CUDA image, no GPU override, no model files here. Until
+that lands (plan 3 Tasks 20 to 23, issues #108 to #111), the settings and commands below for the in-process engine still
+apply. Speech audio will then leave this machine, but only to the named server. Overview and diagrams: `DESIGN.md`.
+
 ## What it does
 
 One work lane, one pass every 60 seconds:
@@ -40,8 +47,9 @@ Environment variables (compose sets the defaults):
 | Variable | Default | Meaning |
 |---|---|---|
 | `WAA_MIN_FREE_GB` | 20 | below this much free disk the service pauses |
-| `WAA_WHISPER_MODEL_PATH` | `/models/ggml-large-v3-turbo-q8_0.bin` (GPU), `ggml-base.en.bin` (CPU compose) | the model file |
-| `WAA_WHISPER_DEVICE` | `auto` | `auto` tries CUDA then CPU, `cpu`, `cuda` |
+| `WAA_WHISPER_MODEL_PATH` | `/models/ggml-large-v3-turbo-q8_0.bin` (GPU), `ggml-base.en.bin` (CPU compose) | the model file (in-process engine; removed by D19, Task 21) |
+| `WAA_WHISPER_DEVICE` | `auto` | `auto` tries CUDA then CPU, `cpu`, `cuda` (in-process engine; removed by D19, Task 21) |
+| `WAA_WHISPER_URL`, `WAA_WHISPER_ALLOWED_HOSTS`, `WAA_WHISPER_MODEL` | planned (D19, Task 20) | the whisper.cpp server on the GPU server, for example `http://pdl-rune-02.panoramicdata.com:8080`; the allow-list follows the Ollama rule |
 | `WAA_RETRANSCRIBE` | `false` | `true`: transcribe again every segment made by a different model (name or file size); see Changing the model |
 | `WAA_OLLAMA_URL`, `WAA_OLLAMA_MODEL` | `http://pdl-rune-02.panoramicdata.com:11434`, `qwen3.6:latest` | the owner's Ollama server (never a cloud model). For production use `http://pdl-rune-01.panoramicdata.com:11434` and `WAA_OLLAMA_MODEL=qwen3.6:27b`, which is what that server has |
 | `WAA_OLLAMA_ALLOWED_HOSTS` | `pdl-rune-02.panoramicdata.com,pdl-rune-01.panoramicdata.com` | the only named hosts transcript text may be sent to (a name that is not listed is refused; loopback and private IP addresses are accepted) |
@@ -79,7 +87,7 @@ During the first catch-up watch `backlogAudioHours` fall; `lagSeconds` stays hig
    sha256 must be `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1` (874,188,075 bytes) and
    `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002` (147,964,211 bytes). A different hash means a different file.
 2. Create `data/analysis`, and make sure the web app has saved the schedule once.
-3. GPU check: `nvidia-smi` on the host must show at least 3 GB free with Ollama's model loaded.
+3. GPU check (in-process engine only; after D19 the GPU check is on the rune server, plan 3 Task 23): `nvidia-smi` on the host must show at least 3 GB free with Ollama's model loaded.
 4. Start (always name the service; never touch the recorders):
 
        docker compose -f docker/docker-compose.analysis.yml -f docker/docker-compose.gpu.yml up -d --build analysis
@@ -119,6 +127,9 @@ when `WAA_RETRANSCRIBE=true` (each segment whose recorded model differs is run o
 off again afterwards), when `--rebuild --retranscribe` marks segments, or when the options or the package major version change.
 
 ## Sharing the GPU with Ollama (only if you run Ollama on this machine)
+
+After D19 whisper and Ollama share the rune server's GPU instead; the service still never transcribes and enriches at the
+same time (one work lane).
 
 By default Ollama now runs on the owner's servers (`pdl-rune-02`, or `pdl-rune-01` for production), so none of this applies unless `WAA_OLLAMA_URL` points at an Ollama on this machine.
 
