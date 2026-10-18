@@ -76,7 +76,6 @@ public static class ClipPlanner
         if (pieces.Count == 0)
             throw new ClipException(404, NothingRecorded(request.Recorder, from, to, recorders));
 
-        var label = chosen.Recorder.ToUpperInvariant();
         var windowSeconds = (to - from).TotalSeconds;
         var covered = coverage[chosen.Recorder];
         string? nothingNew = null;
@@ -86,31 +85,38 @@ public static class ClipPlanner
             || pieces.SkipLast(1).Any(p => p.Segment.EndedBy is not null and not "hour-boundary");
         if (request.Recorder == "auto" && (covered < windowSeconds - BreakSeconds || breaks))
         {
-            var other = candidates.Where(c => c.Recorder != chosen.Recorder && c.Segments.Count > 0).OrderByDescending(c => coverage[c.Recorder]).FirstOrDefault();
-            if (other.Recorder is not null)
+            // Every other source with audio here, best covered first, each filling what the earlier ones lack.
+            var others = candidates.Where(c => c.Recorder != chosen.Recorder && c.Segments.Count > 0).OrderByDescending(c => coverage[c.Recorder]).ToList();
+            if (others.Count > 0)
             {
-                var stitched = ClipStitcher.Stitch(chosen.Segments, other.Segments, from, to);
+                var stitched = ClipStitcher.Stitch(chosen.Segments, [.. others.Select(o => (IReadOnlyList<CatalogSegment>)o.Segments)], from, to);
                 if (stitched is not null && stitched.SecondarySeconds > 0)
-                    return Stitched(request, from, to, chosen.Recorder, other.Recorder, stitched, coverage, notes);
+                {
+                    var used = new List<(string Id, double Seconds)> { (chosen.Recorder, stitched.PrimarySeconds) };
+                    used.AddRange(others.Select((o, i) => (o.Recorder, stitched.SourceSeconds![i + 1])).Where(u => u.Item2 > 0));
+                    return Stitched(request, from, to, used, stitched, coverage, notes);
+                }
+
+                var otherNames = SourceNames.Many(others.Select(o => o.Recorder));
                 if (stitched is not null && breaks)
-                    return Exact(request, from, to, chosen.Recorder, other.Recorder, chosen.Segments, stitched, coverage, notes);
+                    return Exact(request, from, to, chosen.Recorder, otherNames, chosen.Segments, stitched, coverage, notes);
                 if (covered < windowSeconds - BreakSeconds)
-                    nothingNew = $"Neither recorder covers the whole window, and recorder {other.Recorder.ToUpperInvariant()} holds nothing {label} lacks here, so the clip comes from {label}.";
+                    nothingNew = $"Neither source covers the whole window, and {otherNames} holds nothing {SourceNames.Short(chosen.Recorder)} lacks here, so the clip comes from {SourceNames.Short(chosen.Recorder)}.";
             }
         }
 
         var all = recorders.First(r => r.Recorder == chosen.Recorder).Segments;
-        WarnEdges(label, all, pieces, from, to, warnings);
-        WarnJoins(label, pieces, warnings);
-        WarnGaps(label, chosen.Segments, from, to, warnings);
+        WarnEdges(chosen.Recorder, all, pieces, from, to, warnings);
+        WarnJoins(chosen.Recorder, pieces, warnings);
+        WarnGaps(chosen.Recorder, chosen.Segments, from, to, warnings);
 
         if (covered < windowSeconds - BreakSeconds)
-            warnings.Add($"Recorder {label} covers {covered:0.0} of {windowSeconds:0.0} seconds ({covered / windowSeconds:0%}) of the window.");
+            warnings.Add($"{SourceNames.WhoCap(chosen.Recorder)} covers {covered:0.0} of {windowSeconds:0.0} seconds ({covered / windowSeconds:0%}) of the window.");
 
         foreach (var (other, seconds) in coverage)
         {
             if (other != chosen.Recorder && seconds > covered + BreakSeconds)
-                warnings.Add($"Recorder {other.ToUpperInvariant()} would have covered more of this window ({seconds:0.0} s against {covered:0.0} s).");
+                warnings.Add($"{SourceNames.WhoCap(other)} would have covered more of this window ({seconds:0.0} s against {covered:0.0} s).");
         }
 
         if (nothingNew is not null) warnings.Add(nothingNew);
@@ -120,23 +126,23 @@ public static class ClipPlanner
     }
 
     static ClipPlan Stitched(
-        ClipRequest request, DateTimeOffset from, DateTimeOffset to, string primary, string secondary, StitchedClip stitched,
+        ClipRequest request, DateTimeOffset from, DateTimeOffset to, List<(string Id, double Seconds)> used, StitchedClip stitched,
         Dictionary<string, double> coverage, List<string> notes)
     {
-        var seconds = new Dictionary<string, double> { [primary] = stitched.PrimarySeconds, [secondary] = stitched.SecondarySeconds };
-        var parts = string.Join(", ", seconds.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Value:0.0} s from {kv.Key.ToUpperInvariant()}"));
-        var who = string.Join(" and ", seconds.Keys.Order(StringComparer.Ordinal).Select(k => k.ToUpperInvariant()));
+        var parts = string.Join(", ", used.OrderBy(kv => kv.Id, StringComparer.Ordinal).Select(kv => $"{kv.Seconds:0.0} s from {SourceNames.Short(kv.Id)}"));
+        var who = SourceNames.Many(used.Select(u => u.Id));
+        var none = used.Any(u => SourceNames.IsMerged(u.Id)) ? "any source" : "either recorder";
         var warnings = new List<string>
         {
-            $"No single recorder runs unbroken through the window, so this clip joins recorders {who} at whole MP3 frames matched by their bytes " +
+            $"No single source runs unbroken through the window, so this clip joins {who} at whole MP3 frames matched by their bytes " +
             $"({parts}; {stitched.Switches} switches). Nothing is repeated.",
         };
 
         foreach (var g in stitched.Gaps)
         {
             warnings.Add(g.Reason == ClipStitcher.MissingReason
-                ? $"No audio in either recorder from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s): the clip jumps across it with no silence inserted."
-                : $"No audio in either recorder from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s), at the edge of the window.");
+                ? $"No audio in {none} from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s): the clip jumps across it with no silence inserted."
+                : $"No audio in {none} from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s), at the edge of the window.");
         }
 
         AddCommonNotes(stitched.Pieces, notes);
@@ -151,16 +157,16 @@ public static class ClipPlanner
         ClipRequest request, DateTimeOffset from, DateTimeOffset to, string recorder, string other, List<CatalogSegment> segments,
         StitchedClip stitched, Dictionary<string, double> coverage, List<string> notes)
     {
-        var label = recorder.ToUpperInvariant();
         var warnings = new List<string>();
+        var none = SourceNames.IsMerged(recorder) || other.Contains("merged", StringComparison.Ordinal) ? "any source" : "either recorder";
         foreach (var s in segments.Where(s => s.EndedBy is not null and not "hour-boundary" && s.EndUtc > from && s.EndUtc < to))
         {
-            warnings.Add($"Recorder {label} restarted at {Utc(s.EndUtc)} ({s.EndedBy}); the join was matched frame by frame against recorder " +
-                         $"{other.ToUpperInvariant()}, so no audio is repeated there.");
+            warnings.Add($"{SourceNames.WhoCap(recorder)} restarted at {Utc(s.EndUtc)} ({s.EndedBy}); the join was matched frame by frame against " +
+                         $"{other}, so no audio is repeated there.");
         }
 
         foreach (var g in stitched.Gaps)
-            warnings.Add($"No audio in either recorder from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s): the clip jumps across it with no silence inserted.");
+            warnings.Add($"No audio in {none} from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({g.Seconds:0.0} s): the clip jumps across it with no silence inserted.");
 
         AddCommonNotes(stitched.Pieces, notes);
         return new ClipPlan(recorder, request.From, request.To, from, to, stitched.Pieces, warnings, notes, coverage, stitched.Gaps);
@@ -252,26 +258,26 @@ public static class ClipPlanner
         return pieces;
     }
 
-    static void WarnEdges(string label, IReadOnlyList<CatalogSegment> all, List<ClipPiece> pieces, DateTimeOffset from, DateTimeOffset to, List<string> warnings)
+    static void WarnEdges(string id, IReadOnlyList<CatalogSegment> all, List<ClipPiece> pieces, DateTimeOffset from, DateTimeOffset to, List<string> warnings)
     {
         var firstAudio = PositionModel.AudioStartUtc(all[0]);
         var lastAudio = all.Max(s => s.EndUtc);
         if (pieces[0].StartUtc > from.AddSeconds(BreakSeconds))
         {
             warnings.Add(firstAudio >= pieces[0].StartUtc.AddSeconds(-BreakSeconds)
-                ? $"The window starts before the first recording of recorder {label} (first audio at {Utc(firstAudio)}); the clip starts there."
-                : $"No audio in recorder {label} from {Utc(from)} to {Utc(pieces[0].StartUtc)}; the clip starts at {Utc(pieces[0].StartUtc)}.");
+                ? $"The window starts before the first recording of {SourceNames.Who(id)} (first audio at {Utc(firstAudio)}); the clip starts there."
+                : $"No audio in {SourceNames.Who(id)} from {Utc(from)} to {Utc(pieces[0].StartUtc)}; the clip starts at {Utc(pieces[0].StartUtc)}.");
         }
 
         if (pieces[^1].EndUtc < to.AddSeconds(-BreakSeconds))
         {
             warnings.Add(lastAudio <= pieces[^1].EndUtc.AddSeconds(BreakSeconds)
-                ? $"The window ends after the last recording of recorder {label} (last audio at {Utc(lastAudio)}); the clip ends there."
-                : $"No audio in recorder {label} from {Utc(pieces[^1].EndUtc)} to {Utc(to)}; the clip ends at {Utc(pieces[^1].EndUtc)}.");
+                ? $"The window ends after the last recording of {SourceNames.Who(id)} (last audio at {Utc(lastAudio)}); the clip ends there."
+                : $"No audio in {SourceNames.Who(id)} from {Utc(pieces[^1].EndUtc)} to {Utc(to)}; the clip ends at {Utc(pieces[^1].EndUtc)}.");
         }
     }
 
-    static void WarnJoins(string label, List<ClipPiece> pieces, List<string> warnings)
+    static void WarnJoins(string id, List<ClipPiece> pieces, List<string> warnings)
     {
         for (var i = 1; i < pieces.Count; i++)
         {
@@ -279,34 +285,34 @@ public static class ClipPlanner
             var next = pieces[i];
             if (prev.Segment.EndedBy is not null and not "hour-boundary")
             {
-                warnings.Add($"Recorder {label}'s segment ended by {prev.Segment.EndedBy} at {Utc(prev.Segment.EndUtc)} and the next one starts at " +
+                warnings.Add($"{SourceNames.WhoCap(id)}'s segment ended by {prev.Segment.EndedBy} at {Utc(prev.Segment.EndUtc)} and the next one starts at " +
                              $"{Utc(next.Segment.StartUtc)}: the audio breaks at this join.");
             }
 
             var missing = (next.StartUtc - prev.EndUtc).TotalSeconds;
             if (missing > BreakSeconds)
             {
-                warnings.Add($"No audio in recorder {label} from {Utc(prev.EndUtc)} to {Utc(next.StartUtc)} ({missing:0.0} s): " +
+                warnings.Add($"No audio in {SourceNames.Who(id)} from {Utc(prev.EndUtc)} to {Utc(next.StartUtc)} ({missing:0.0} s): " +
                              "the clip jumps across it with no silence inserted.");
             }
         }
     }
 
-    static void WarnGaps(string label, List<CatalogSegment> segments, DateTimeOffset from, DateTimeOffset to, List<string> warnings)
+    static void WarnGaps(string id, List<CatalogSegment> segments, DateTimeOffset from, DateTimeOffset to, List<string> warnings)
     {
         foreach (var g in segments.SelectMany(s => s.SpanGaps).Where(g => g.EndUtc > from && g.StartUtc < to).OrderBy(g => g.StartUtc))
         {
-            warnings.Add($"Gap in recorder {label} from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({(g.EndUtc - g.StartUtc).TotalSeconds:0.0} s, {g.Reason}): " +
+            warnings.Add($"Gap in {SourceNames.Who(id)} from {Utc(g.StartUtc)} to {Utc(g.EndUtc)} ({(g.EndUtc - g.StartUtc).TotalSeconds:0.0} s, {g.Reason}): " +
                          "no audio was received, and the audio jumps at this point (no silence is inserted).");
         }
     }
 
     static string NothingRecorded(string recorder, DateTimeOffset from, DateTimeOffset to, IReadOnlyList<RecorderSegments> recorders)
     {
-        var who = recorder == "auto" ? "any recorder" : $"recorder {recorder.ToUpperInvariant()}";
+        var who = recorder == "auto" ? "any recorder" : SourceNames.Who(recorder);
         var known = recorders.Select(r => r.Segments.Count == 0
-            ? $"recorder {r.Recorder.ToUpperInvariant()} has no recordings"
-            : $"recorder {r.Recorder.ToUpperInvariant()} has audio from {Utc(PositionModel.AudioStartUtc(r.Segments[0]))} to {Utc(r.Segments.Max(s => s.EndUtc))}");
+            ? $"{SourceNames.Who(r.Recorder)} has no recordings"
+            : $"{SourceNames.Who(r.Recorder)} has audio from {Utc(PositionModel.AudioStartUtc(r.Segments[0]))} to {Utc(r.Segments.Max(s => s.EndUtc))}");
         return $"No recording in {who} covers {Utc(from)} to {Utc(to)} ({string.Join("; ", known)}).";
     }
 

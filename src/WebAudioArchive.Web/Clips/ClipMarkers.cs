@@ -59,7 +59,7 @@ public static class ClipMarkers
                 Position = clock.ToClip(g.StartUtc),
                 Kind = Gap,
                 Label = string.Create(CultureInfo.InvariantCulture, $"Gap {Time(g.StartUtc)} to {Time(g.EndUtc)} ({g.Seconds:0.0} s)"),
-                Detail = $"Recorder {clip.Plan.Recorder.ToUpperInvariant()}: {g.Reason}. The audio jumps here; no silence is inserted.",
+                Detail = $"{SourceNames.WhoCap(clip.Plan.Recorder)}: {g.Reason}. The audio jumps here; no silence is inserted.",
             };
         }
 
@@ -72,7 +72,7 @@ public static class ClipMarkers
                 Position = clock.ToClip(r.AtUtc),
                 Kind = Restart,
                 Label = "Recorder restart at " + Time(r.AtUtc),
-                Detail = $"Recorder {clip.Plan.Recorder.ToUpperInvariant()}'s segment ended by {r.EndedBy}.",
+                Detail = $"{SourceNames.WhoCap(clip.Plan.Recorder)}'s segment ended by {r.EndedBy}.",
             };
         }
     }

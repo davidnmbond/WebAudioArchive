@@ -3,7 +3,7 @@ using WebAudioArchive.Core.Mp3;
 namespace WebAudioArchive.Web.Clips;
 
 /// <summary>A clip joined from two recorders: its pieces in stream order and what neither recorder has (UTC).</summary>
-public sealed record StitchedClip(IReadOnlyList<ClipPiece> Pieces, IReadOnlyList<ClipGap> Gaps, double PrimarySeconds, double SecondarySeconds, int Switches);
+public sealed record StitchedClip(IReadOnlyList<ClipPiece> Pieces, IReadOnlyList<ClipGap> Gaps, double PrimarySeconds, double SecondarySeconds, int Switches, IReadOnlyList<double>? SourceSeconds = null);
 
 /// <summary>
 /// Joins two recorders' audio for a window (issue #12). Their frames are listed and merged by identity with
@@ -23,17 +23,33 @@ public static class ClipStitcher
     /// Null only when no frame falls in the window. When the secondary adds nothing, the result is the primary alone, but
     /// with any replay at a restart removed frame by frame rather than by estimated time.
     /// </summary>
-    public static StitchedClip? Stitch(IReadOnlyList<CatalogSegment> primary, IReadOnlyList<CatalogSegment> secondary, DateTimeOffset from, DateTimeOffset to)
-    {
-        var p = Frames(primary, from - Reach, to + Reach);
-        var s = Frames(secondary, from - Reach, to + Reach);
-        var merged = FrameMerge.Merge(
-            [.. p.Select(f => new MergeFrame(f.Ref.Hash, f.EstUtc))],
-            [.. s.Select(f => new MergeFrame(f.Ref.Hash, f.EstUtc))]);
+    public static StitchedClip? Stitch(IReadOnlyList<CatalogSegment> primary, IReadOnlyList<CatalogSegment> secondary, DateTimeOffset from, DateTimeOffset to) =>
+        Stitch(primary, [secondary], from, to);
 
-        var ordered = merged.Blocks
-            .SelectMany(b => Enumerable.Range(b.Start, b.Count).Select(i => (Frame: b.Source == FrameSource.Primary ? p[i] : s[i], b.Source)))
-            .ToList();
+    /// <summary>
+    /// As the two-source form, folded over every other source in the order given (best covered first): the primary is
+    /// joined with the first, that result with the next, so each source fills what the earlier ones lack. Source 0 is
+    /// the primary; <see cref="StitchedClip.SourceSeconds"/> is indexed by position in (primary, then others).
+    /// </summary>
+    public static StitchedClip? Stitch(IReadOnlyList<CatalogSegment> primary, IReadOnlyList<IReadOnlyList<CatalogSegment>> others, DateTimeOffset from, DateTimeOffset to)
+    {
+        var accumulated = Frames(primary, from - Reach, to + Reach).Select(f => (Frame: f, Source: 0)).ToList();
+        FrameMergeResult? merged = null;
+        for (var n = 0; n < others.Count; n++)
+        {
+            var s = Frames(others[n], from - Reach, to + Reach);
+            var next = FrameMerge.Merge(
+                [.. accumulated.Select(x => new MergeFrame(x.Frame.Ref.Hash, x.Frame.EstUtc))],
+                [.. s.Select(f => new MergeFrame(f.Ref.Hash, f.EstUtc))]);
+            var current = accumulated;
+            accumulated = next.Blocks
+                .SelectMany(b => Enumerable.Range(b.Start, b.Count).Select(i => b.Source == FrameSource.Primary ? current[i] : (s[i], n + 1)))
+                .ToList();
+            merged = next;
+        }
+
+        if (merged is null) return null;
+        var ordered = accumulated.Select(x => (x.Frame, x.Source)).ToList();
         var first = ordered.FindIndex(x => x.Frame.EstUtc >= from);
         var last = ordered.FindLastIndex(x => x.Frame.EstUtc < to);
         if (first < 0 || last < first) return null;
@@ -41,7 +57,7 @@ public static class ClipStitcher
 
         var pieces = new List<ClipPiece>();
         var switches = 0;
-        double primarySeconds = 0, secondarySeconds = 0;
+        var bySource = new double[others.Count + 1];
         var start = 0;
         for (var k = 1; k <= window.Count; k++)
         {
@@ -56,8 +72,7 @@ public static class ClipStitcher
                 PositionModel.TimeAt(prev.Segment, prev.Ref.Offset + prev.Ref.Length));
             pieces.Add(piece);
             var seconds = (double)(piece.EndByte - piece.StartByte) / head.Segment.BytesPerSecond;
-            if (window[start].Source == FrameSource.Primary) primarySeconds += seconds;
-            else secondarySeconds += seconds;
+            bySource[window[start].Source] += seconds;
             if (k < window.Count && window[k].Source != window[k - 1].Source) switches++;
             start = k;
         }
@@ -70,7 +85,7 @@ public static class ClipStitcher
         if ((to - pieces[^1].EndUtc).TotalSeconds > ClipEvents.MinGapSeconds)
             gaps.Add(new ClipGap(pieces[^1].EndUtc, to, "not recorded"));
 
-        return new StitchedClip(pieces, gaps, primarySeconds, secondarySeconds, switches);
+        return new StitchedClip(pieces, gaps, bySource[0], bySource.Skip(1).Sum(), switches, bySource);
     }
 
     /// <summary>The whole frames of these segments around [from, to), in order, each with its estimated UTC.</summary>

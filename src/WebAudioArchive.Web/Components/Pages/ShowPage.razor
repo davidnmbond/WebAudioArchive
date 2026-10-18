@@ -42,7 +42,7 @@ else
                                         @foreach (var r in Coverage.Recorders)
                                         {
                                             <tr data-recorder="@r.Recorder">
-                                                <td>@r.Recorder.ToUpperInvariant()@(r.IncludesOpenSegment ? " (recording now)" : "")</td>
+                                                <td>@SourceNames.Label(r.Recorder)@(r.IncludesOpenSegment ? " (recording now)" : "")</td>
                                                 <td>@Covered(r)</td>
                                                 <td>
                                                     @if (r.Gaps.Count == 0)
@@ -150,7 +150,7 @@ else
             <ClipPlayer @ref="_player" Src="@Clip.Url" DownloadUrl="@Clip.DownloadUrl" DownloadName="@Clip.File.DownloadName" Seconds="@Clip.File.Seconds"
                         Timeline="@ClipTimeline" Markers="@Markers" Segments="@Timeline.Segments"
                         RangeStart="@Timeline.RangeStart" RangeEnd="@Timeline.RangeEnd" StartAt="@StartAt" PositionChanged="OnPosition"
-                        Title="@($"{Show.Title}: recorder {Clip.Plan.Recorder.ToUpperInvariant()}, {MarginMinutes} minute margins")" />
+                        Title="@($"{Show.Title}: {(Clip.Plan.Recorder == ClipPlan.Joined ? "recorders A and B" : SourceNames.Who(Clip.Plan.Recorder))}, {MarginMinutes} minute margins")" />
 
             <div class="show-split mt-2" id="show-split">
                 <PDSplitter Direction="SplitDirection.Horizontal" GutterSize="8" CssClass="border rounded">

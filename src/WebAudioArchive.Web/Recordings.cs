@@ -60,7 +60,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
                     var title = s.IsOpen ? $"{label}: recording" : $"{label}: segment";
                     items.Add(new RecordingCalendarItem(
                         r.Recorder + "|" + s.AudioPath, label, "segment", s.StartUtc, s.EndUtc, title,
-                        $"Recorder {label}, {ClipPlanner.Utc(s.StartUtc)} to {ClipPlanner.Utc(s.EndUtc)}{(s.IsOpen ? " (being recorded)" : $", ended by {s.EndedBy}")}, {s.SpanGaps.Count} gaps",
+                        $"{SourceNames.WhoCap(r.Recorder)}, {ClipPlanner.Utc(s.StartUtc)} to {ClipPlanner.Utc(s.EndUtc)}{(s.IsOpen ? " (being recorded)" : $", ended by {s.EndedBy}")}, {s.SpanGaps.Count} gaps",
                         $"rec-item rec-{r.Recorder}{(s.IsOpen ? " rec-open" : "")}",
                         PlayLink.For(s.StartUtc, r.Recorder)));
                 }
@@ -90,12 +90,12 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
 
     static RecordingCalendarItem Gap(string recorder, DateTimeOffset start, DateTimeOffset end, string reason)
     {
-        var label = recorder.ToUpperInvariant();
+        var label = recorder == WebSettings.MergedId ? "M" : recorder.ToUpperInvariant();
         var seconds = (end - start).TotalSeconds;
         return new RecordingCalendarItem(
             $"{recorder}|gap|{start.UtcTicks}", label, "gap", start, end,
             string.Create(CultureInfo.InvariantCulture, $"{label}: gap {seconds:0.0} s"),
-            string.Create(CultureInfo.InvariantCulture, $"Recorder {label} has no audio from {ClipPlanner.Utc(start)} to {ClipPlanner.Utc(end)} ({seconds:0.0} s, {reason})"),
+            string.Create(CultureInfo.InvariantCulture, $"{SourceNames.WhoCap(recorder)} has no audio from {ClipPlanner.Utc(start)} to {ClipPlanner.Utc(end)} ({seconds:0.0} s, {reason})"),
             $"rec-item rec-gap rec-{recorder}",
             PlayLink.For(start, recorder));
     }
@@ -120,7 +120,7 @@ public sealed class RecordingsQuery(SegmentCatalog catalog, TimeProvider time)
     public static RecordingRow ToRow(CatalogSegment s) => new()
     {
         Key = s.Recorder + "|" + s.AudioPath,
-        Recorder = s.Recorder.ToUpperInvariant(),
+        Recorder = SourceNames.Label(s.Recorder),
         StartUtc = s.StartUtc.UtcDateTime,
         EndUtc = s.EndUtc.UtcDateTime,
         AudioSeconds = Math.Round(s.AudioSeconds, 1),

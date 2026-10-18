@@ -38,7 +38,7 @@ public sealed record ShowCoverageResult(
     /// <summary>All of the show is recorded, but only across recorders: each one has a gap that another fills.</summary>
     public bool NeedsBoth => State == ShowState.Full && FullRecorders.Count == 0;
 
-    string Together => string.Join(" and ", Recorders.Select(r => r.Recorder.ToUpperInvariant())) + " together";
+    string Together => string.Join(" and ", Recorders.Select(r => SourceNames.Short(r.Recorder))) + " together";
 
     public string CssClass => State switch
     {
@@ -72,9 +72,9 @@ public sealed record ShowCoverageResult(
     {
         get
         {
-            var full = FullRecorders.Select(r => r.Recorder.ToUpperInvariant()).ToList();
+            var full = FullRecorders.Select(r => SourceNames.Short(r.Recorder)).ToList();
             var parts = string.Join(", ", Recorders.Select(r =>
-                string.Create(CultureInfo.InvariantCulture, $"{r.Recorder.ToUpperInvariant()} {r.Fraction:0%}")));
+                string.Create(CultureInfo.InvariantCulture, $"{SourceNames.Short(r.Recorder)} {r.Fraction:0%}")));
             var together = string.Create(CultureInfo.InvariantCulture, $"{Together} {Combined.Fraction:0%}");
             return State switch
             {

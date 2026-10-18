@@ -66,7 +66,7 @@ public sealed partial class ShowPage
     string? _scrollTo;
 
     List<RecorderChoice> RecorderChoices =>
-        [new("auto", "Auto (best coverage)"), .. Settings.Recorders.Select(r => new RecorderChoice(r.Id, "Recorder " + r.Label))];
+        [new("auto", "Auto (best coverage)"), .. (Settings.MergedRoot is null ? Enumerable.Empty<RecorderChoice>() : [new RecorderChoice(WebSettings.MergedId, "The merged copy")]), .. Settings.Recorders.Select(r => new RecorderChoice(r.Id, "Recorder " + r.Label))];
 
     RecorderChoice SelectedRecorder => RecorderChoices.FirstOrDefault(c => c.Id == Recorder) ?? RecorderChoices[0];
 
