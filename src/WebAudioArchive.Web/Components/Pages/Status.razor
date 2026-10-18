@@ -54,6 +54,51 @@ else
             </div>
         </section>
     }
+    @if (Consolidation is not null)
+    {
+        <section class="card border-2 @BorderClass(Consolidation.Level) mb-3" data-card="consolidation" data-level="@Consolidation.Level" aria-label="Consolidation">
+            <div class="card-header d-flex align-items-center flex-wrap gap-2">
+                <PDLabel Text="@LevelText(Consolidation.Level)" IconCssClass="@LevelIcon(Consolidation.Level)" CssClass="@($"badge {BadgeClass(Consolidation.Level)} status-badge")" />
+                <strong>Consolidation</strong>
+                <a class="ms-auto small" href="consolidation">Review originals ready to delete</a>
+            </div>
+            <div class="card-body">
+                <p class="mb-2">@Consolidation.Summary</p>
+                @if (Consolidation.Health is { } c)
+                {
+                    <table class="table table-sm mb-0">
+                        <tbody>
+                            <tr><th scope="row">Mode</th><td>@c.Mode</td></tr>
+                            <tr><th scope="row">Last merged hour</th><td class="utc">@Utc(c.LastMergedHourUtc)</td></tr>
+                            <tr><th scope="row">Backlog</th><td>@c.BacklogHours @(c.BacklogHours == 1 ? "hour" : "hours")</td></tr>
+                            <tr><th scope="row">Waiting for analysis</th><td>@c.WaitingForAnalysis @(c.WaitingForAnalysis == 1 ? "hour" : "hours")</td></tr>
+                            <tr>
+                                <th scope="row">Failures</th>
+                                <td>
+                                    @if (c.Failures.Count == 0)
+                                    {
+                                        <span>none</span>
+                                    }
+                                    else
+                                    {
+                                        <ul class="mb-0 ps-3">
+                                            @foreach (var f in c.Failures)
+                                            {
+                                                <li><span class="utc">@Utc(f.HourUtc)</span>: @f.Reason</li>
+                                            }
+                                        </ul>
+                                    }
+                                </td>
+                            </tr>
+                            <tr><th scope="row">Held originals</th><td>@c.Held</td></tr>
+                            <tr><th scope="row">Ready to delete</th><td>@c.Ready</td></tr>
+                            <tr><th scope="row">Space freed</th><td>@Bytes(c.DeletedBytes)</td></tr>
+                        </tbody>
+                    </table>
+                }
+            </div>
+        </section>
+    }
     <div class="row g-3">
         @foreach (var s in Statuses)
         {

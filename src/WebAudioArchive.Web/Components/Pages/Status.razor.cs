@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.AspNetCore.Components;
 using WebAudioArchive.Web.Clips;
+using WebAudioArchive.Web.Consolidation;
 using WebAudioArchive.Web.Status;
 
 namespace WebAudioArchive.Web.Components.Pages;
@@ -18,6 +19,7 @@ public sealed partial class Status
 
     IReadOnlyList<RecorderStatus>? Statuses { get; set; }
     CombinedCoverage? Combined { get; set; }
+    ConsolidationStatus? Consolidation { get; set; }
     DateTimeOffset? Checked { get; set; }
     Timer? _timer;
 
@@ -62,12 +64,15 @@ public sealed partial class Status
     {
         Statuses = s.Statuses;
         Combined = s.Combined;
+        Consolidation = s.Consolidation;
         Checked = s.CheckedUtc;
     }
 
     public void Dispose() => _timer?.Dispose();
 
     static string Utc(DateTimeOffset? t) => t is null ? "-" : ClipPlanner.Utc(t.Value);
+
+    static string Bytes(long b) => ByteText.Humanize(b);
 
     static string YesNo(bool? b) => b is null ? "-" : b.Value ? "yes" : "no";
 

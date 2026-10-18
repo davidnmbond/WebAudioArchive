@@ -1,5 +1,6 @@
 using System.Text.Json;
 using WebAudioArchive.Web.Clips;
+using WebAudioArchive.Web.Consolidation;
 
 namespace WebAudioArchive.Web.Status;
 
@@ -36,6 +37,19 @@ public sealed record RecorderStatus(
     CatalogSegment? Latest)
 {
     public double Coverage24hFraction => Math.Min(1, Coverage24hSeconds / TimeSpan.FromHours(24).TotalSeconds);
+}
+
+/// <summary>The consolidator health with its level (unreachable is amber, a failure red), or why it could not be read.</summary>
+public sealed record ConsolidationStatus(ConsolidatorHealth? Health, HealthLevel Level, string Summary)
+{
+    public static ConsolidationStatus From(ConsolidatorHealth? h, string? error)
+    {
+        if (h is null) return new(null, HealthLevel.Amber, $"Consolidator unreachable: {error}");
+        if (h.Failures.Count > 0) return new(h, HealthLevel.Red, $"{h.Failures.Count} {(h.Failures.Count == 1 ? "hour" : "hours")} could not be merged.");
+        if (h.LastError is not null) return new(h, HealthLevel.Red, $"The last run failed: {h.LastError}");
+        if (h.HeldFailed > 0) return new(h, HealthLevel.Red, $"{h.HeldFailed} held originals failed their recheck.");
+        return new(h, HealthLevel.Green, "Merging normally.");
+    }
 }
 
 public static class StatusRules
@@ -104,10 +118,10 @@ public static class StatusRules
 }
 
 /// <summary>The recorders' statuses, the UTC time they were read, and the last 24 hours of all recorders together.</summary>
-public sealed record StatusSnapshot(IReadOnlyList<RecorderStatus> Statuses, DateTimeOffset CheckedUtc, CombinedCoverage? Combined = null);
+public sealed record StatusSnapshot(IReadOnlyList<RecorderStatus> Statuses, DateTimeOffset CheckedUtc, CombinedCoverage? Combined = null, ConsolidationStatus? Consolidation = null);
 
 /// <summary>Builds the Status page: each recorder's health (fetched server side) and its last 24 hours of coverage.</summary>
-public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, IHttpClientFactory http, TimeProvider time)
+public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, IHttpClientFactory http, TimeProvider time, ConsolidatorClient consolidator)
 {
     public const string HttpClientName = "recorder-health";
 
@@ -123,12 +137,22 @@ public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, 
     /// <summary>Reads every recorder now and keeps the result as <see cref="Last"/>.</summary>
     public async Task<StatusSnapshot> ReadAsync(CancellationToken ct)
     {
-        var statuses = await ReadStatusesAsync(ct);
+        var statusesTask = ReadStatusesAsync(ct);
+        var consolidationTask = ReadConsolidationAsync(ct);
+        var statuses = await statusesTask;
+        var consolidation = await consolidationTask;
         var now = time.GetUtcNow();
         var combined = WindowCoverage.Combined(catalog.All(), now.AddHours(-24), now, ClipEvents.MinGapSeconds, WindowCoverage.LiveEdgeSeconds);
-        var snapshot = new StatusSnapshot(statuses, now, combined);
+        var snapshot = new StatusSnapshot(statuses, now, combined, consolidation);
         Last = snapshot;
         return snapshot;
+    }
+
+    async Task<ConsolidationStatus?> ReadConsolidationAsync(CancellationToken ct)
+    {
+        if (!consolidator.IsConfigured) return null;
+        var (health, error) = await consolidator.TryHealthAsync(ct);
+        return ConsolidationStatus.From(health, error);
     }
 
     async Task<IReadOnlyList<RecorderStatus>> ReadStatusesAsync(CancellationToken ct)

@@ -13,7 +13,7 @@ public sealed class SettingsException(string message) : Exception(message);
 /// <summary>
 /// Web app settings, read from environment variables (or any configuration source with the same names):
 /// WAA_STATION (default burst), WAA_RECORDERS (a=/data/a,b=/data/b), WAA_RECORDER_HEALTH
-/// (a=http://recorder-a:8080/healthz,...), WAA_MERGED (optional, the consolidator's merged root), WAA_CACHE (default /cache).
+/// (a=http://recorder-a:8080/healthz,...), WAA_MERGED (optional, the consolidator's merged root), WAA_CONSOLIDATOR (optional, its base URL, http://consolidator:8080), WAA_CACHE (default /cache).
 /// </summary>
 public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderSettings> Recorders, string CacheDir)
 {
@@ -28,6 +28,9 @@ public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderS
 
     /// <summary>The consolidator's output root (WAA_MERGED, read-only: data/merged), or null when merged hours are not read.</summary>
     public string? MergedRoot { get; init; }
+
+    /// <summary>The consolidator base URL (WAA_CONSOLIDATOR), or null when the consolidator is not used.</summary>
+    public Uri? ConsolidatorUrl { get; init; }
 
     public RecorderSettings? Find(string id) => Recorders.FirstOrDefault(r => r.Id == id);
 
@@ -65,10 +68,16 @@ public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderS
         var cache = get("WAA_CACHE");
         var analysis = get("WAA_ANALYSIS");
         var merged = get("WAA_MERGED");
+        var consolidator = get("WAA_CONSOLIDATOR");
+        Uri? consolidatorUrl = null;
+        if (!string.IsNullOrWhiteSpace(consolidator)
+            && (!Uri.TryCreate(consolidator.Trim(), UriKind.Absolute, out consolidatorUrl) || consolidatorUrl.Scheme is not ("http" or "https")))
+            throw new SettingsException($"WAA_CONSOLIDATOR: '{consolidator}' is not an absolute http(s) URL.");
         return new WebSettings(station, recorders, string.IsNullOrWhiteSpace(cache) ? "/cache" : cache.Trim())
         {
             AnalysisDir = string.IsNullOrWhiteSpace(analysis) ? null : analysis.Trim(),
             MergedRoot = string.IsNullOrWhiteSpace(merged) ? null : merged.Trim(),
+            ConsolidatorUrl = consolidatorUrl,
         };
     }
 

@@ -5,6 +5,7 @@ using WebAudioArchive.Web;
 using WebAudioArchive.Web.Analysis;
 using WebAudioArchive.Web.Clips;
 using WebAudioArchive.Web.Components;
+using WebAudioArchive.Web.Consolidation;
 using WebAudioArchive.Web.Schedule;
 using WebAudioArchive.Web.Status;
 
@@ -49,6 +50,7 @@ builder.Services.AddSingleton(settings);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<SegmentCatalog>();
 builder.Services.AddSingleton<ClipService>();
+builder.Services.AddSingleton<ConsolidatorClient>();
 builder.Services.AddSingleton<StatusService>();
 builder.Services.AddSingleton<RecordingsQuery>();
 builder.Services.AddSingleton<AnalysisReader>();
@@ -60,6 +62,7 @@ builder.Services.AddSingleton<ScheduleService>();
 builder.Services.AddHostedService<ScheduleRefresher>();
 builder.Services.AddHttpClient(ScheduleService.HttpClientName, c => c.Timeout = ScheduleService.FetchTimeout + TimeSpan.FromSeconds(5));
 builder.Services.AddHttpClient(StatusService.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(3));
+builder.Services.AddHttpClient(ConsolidatorClient.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(3));
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddPanoramicDataBlazor();
 

@@ -1,0 +1,93 @@
+@page "/consolidation"
+@using WebAudioArchive.Web.Consolidation
+
+<PageTitle>Consolidation - WebAudioArchive</PageTitle>
+
+<h1 class="h3">Consolidation: originals ready to delete</h1>
+<p class="text-body-secondary">
+    Each original below has been merged into a verified hourly copy, held for 7 days and checked again. Nothing is deleted
+    by opening this page: choose the originals, press <em>Delete confirmed originals</em>, then confirm. The consolidator
+    refuses any original whose recheck is not fresh or that has changed. All times are UTC.
+</p>
+
+<PDToolbar CssClass="mb-3">
+    <PDToolbarPlaceholder>
+        <span class="text-body-secondary toolbar-text" id="consolidation-count">@Review.Items.Count ready, @Review.Selected.Count chosen (@ByteText.Humanize(Review.Selected.Sum(i => i.Bytes)))</span>
+    </PDToolbarPlaceholder>
+    <PDToolbarButton Key="reload" Text="Reload" IconCssClass="fas fa-sync-alt" CssClass="btn-outline-secondary" Size="ButtonSizes.Small" Click="_ => ReloadAsync()" />
+    <PDToolbarButton Key="delete" Text="Delete confirmed originals" IconCssClass="fas fa-trash" CssClass="btn-outline-danger" Size="ButtonSizes.Small"
+                     IsEnabled="@(Review.Selected.Count > 0 && !Busy)" Click="_ => Review.RequestConfirmation()" />
+</PDToolbar>
+
+@if (Review.Error is not null)
+{
+    <div class="alert alert-warning" role="alert" id="consolidation-error">Could not reach the consolidator: @Review.Error</div>
+}
+
+@if (Review.Confirming)
+{
+    <section class="card border-2 border-danger mb-3" id="consolidation-confirm" aria-label="Confirm deletion">
+        <div class="card-header text-danger fw-semibold">Confirm permanent deletion</div>
+        <div class="card-body">
+            <p>
+                These @Review.Selected.Count broadcast audio files (@ByteText.Humanize(Review.Selected.Sum(i => i.Bytes))) will be deleted from
+                the recorders and cannot be recovered. The merged copies stay. The deletion is logged as confirmed by <strong>@ConfirmedBy</strong>.
+            </p>
+            <ul class="small">
+                @foreach (var i in Review.Selected)
+                {
+                    <li><span class="utc">@Start(i)</span>, recorder @i.RecorderLabel (<code>@i.File</code>)</li>
+                }
+            </ul>
+            <PDButton Id="consolidation-confirm-yes" Text="@($"Yes, delete {Review.Selected.Count} originals")" IconCssClass="fas fa-trash" CssClass="btn-danger" Size="ButtonSizes.Small"
+                      IsEnabled="@(!Busy)" Click="_ => ConfirmAsync()" />
+            <PDButton Id="consolidation-confirm-no" Text="Cancel" CssClass="btn-outline-secondary ms-2" Size="ButtonSizes.Small" Click="_ => Review.Cancel()" />
+        </div>
+    </section>
+}
+
+@if (Review.Results.Count > 0)
+{
+    <section class="card mb-3" id="consolidation-results" aria-label="Deletion results">
+        <div class="card-header fw-semibold">Result: @Review.Results.Count(r => r.Deleted) deleted, @Review.Results.Count(r => !r.Deleted) not deleted</div>
+        <ul class="list-group list-group-flush">
+            @foreach (var r in Review.Results)
+            {
+                <li class="list-group-item @(r.Deleted ? "text-success" : "text-danger")" data-deleted="@r.Deleted">
+                    @(r.Deleted ? "Deleted" : "Not deleted"): recorder @(r.Recorder?.ToUpperInvariant()) <code>@r.File</code>@(r.Reason is null ? "" : " (" + r.Reason + ")")
+                </li>
+            }
+        </ul>
+    </section>
+}
+
+@if (Review.Error is null && Review.Items.Count == 0)
+{
+    <p id="consolidation-none">No originals are ready to delete.</p>
+}
+
+@foreach (var day in Days)
+{
+    <section class="mb-4" data-day="@day.Key" aria-label="Ready on @day.Key">
+        <h2 class="h5">@day.Key UTC</h2>
+        <table class="table table-sm align-middle">
+            <thead>
+                <tr><th scope="col">Delete</th><th scope="col">Segment start</th><th scope="col">Recorder</th><th scope="col">Size</th><th scope="col">Held since</th><th scope="col">Last checked</th></tr>
+            </thead>
+            <tbody>
+                @foreach (var i in day)
+                {
+                    var item = i;
+                    <tr>
+                        <td><input type="checkbox" class="form-check-input" aria-label="Delete recorder @item.RecorderLabel @item.File" checked="@Review.IsSelected(item)" @onchange="() => Review.Toggle(item)" /></td>
+                        <td class="utc">@Start(item)</td>
+                        <td>Recorder @item.RecorderLabel</td>
+                        <td>@ByteText.Humanize(item.Bytes)</td>
+                        <td class="utc">@Utc(item.HeldUtc)</td>
+                        <td class="utc">@Utc(item.CheckedUtc)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </section>
+}
