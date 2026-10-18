@@ -2,10 +2,13 @@
 
 ## Run
 
-    docker compose -f docker/docker-compose.yml up -d --build
+The recorders are their own compose project (`waa-recorders`), so building or restarting anything else never recreates them.
+Start them first (they create the shared network `waa`), then the rest:
 
-That starts everything the first time. Once the recorders are running, always name a service (`recorder-a`,
-`recorder-b` or `web`); an `up` without a service name may rebuild and restart the recorders.
+    docker compose -f docker/docker-compose.recorders.yml up -d --build recorder-a recorder-b
+    docker compose -f docker/docker-compose.yml up -d --build web consolidator
+
+Always name the services, and never use `--remove-orphans`.
 
 Set `WAA_INSTANCE_ID` (for example `home` or `cluster`) and `WAA_DATA_DIR` in the environment or a `.env` file
 beside the compose file. On Linux the data folder must be writable by uid 1654.
@@ -49,16 +52,27 @@ makes clips on request); no disk-space guard (plan 5). Two instances are indepen
 
 ## Dual recording (A and B)
 
-The compose file runs two recorders, `waa-recorder-a` and `waa-recorder-b`, each with its own stream connection,
+The recorders compose file (`docker/docker-compose.recorders.yml`) runs two recorders, `waa-recorder-a` and `waa-recorder-b`, each with its own stream connection,
 instance id (`<WAA_INSTANCE_ID>-a`, `-b`) and data folder (`data/a`, `data/b`). They do not talk to each other.
 Their segments overlap and are not byte-identical (see the Known limits). To get a period, use whichever
 recorder has no gap in it (read each segment's `.json`), or stitch from both.
 
 Upgrade one at a time and never stop both together:
 
-    docker compose -f docker/docker-compose.yml up -d --build recorder-a
+    docker compose -f docker/docker-compose.recorders.yml up -d --build recorder-a
     curl http://127.0.0.1:8080/healthz      # wait for connected true and a recent lastFrameWrittenUtc
-    docker compose -f docker/docker-compose.yml up -d --build recorder-b
+    docker compose -f docker/docker-compose.recorders.yml up -d --build recorder-b
+
+One-time migration from the old single project (when the recorders still belong to the `docker` project). Do one
+recorder at a time and never use `--remove-orphans`:
+
+1. `docker compose -f docker/docker-compose.recorders.yml build recorder-a`
+2. `docker stop waa-recorder-a; docker rm waa-recorder-a`, then
+   `docker compose -f docker/docker-compose.recorders.yml up -d recorder-a`. Wait for `/healthz` to show connected and
+   a frame in the last 10 s.
+3. The same for `recorder-b` (ports 8081).
+4. `docker compose -f docker/docker-compose.yml up -d --build web consolidator` (always name services; never
+   `--remove-orphans`).
 
 Containers use `restart: always`, so Docker restarts them after a crash. They only run while Docker Desktop is
 running: Docker Desktop must start on login, the computer must not sleep, and a reboot (for example for Windows
@@ -222,6 +236,8 @@ the recorders must not be restarted for one. Rebuild and restart only the web ap
 
     docker compose -f docker/docker-compose.yml up -d --build web
 
+The consolidator (`waa-consolidator`, the recorder image started with `--consolidate`, health at
+`http://127.0.0.1:8096/healthz`) is in the same file and is restarted the same way, naming `consolidator`.
 Look and feel: the pages follow the operating system's light or dark preference ("Auto"), or a choice of Light or
 Dark from the toggle at the top right, remembered in the browser (localStorage; without it the page simply follows
 the OS). The theme is set by a small script in the page head before anything is drawn, so there is no flash of the

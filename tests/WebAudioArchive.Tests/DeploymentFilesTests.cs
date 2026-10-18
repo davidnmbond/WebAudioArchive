@@ -8,6 +8,7 @@ public class DeploymentFilesTests
     const string AnalysisFile = "docker/docker-compose.analysis.yml";
     static readonly Dictionary<string, string> Compose = RepoFiles.ComposeServices("docker/docker-compose.yml");
     static readonly Dictionary<string, string> Analysis = RepoFiles.ComposeServices(AnalysisFile);
+    static readonly Dictionary<string, string> Recorders = RepoFiles.ComposeServices("docker/docker-compose.recorders.yml");
 
     /// <summary>The file without its comment lines: comments may say "no CUDA"; only real configuration is checked.</summary>
     static string Code(string text) => string.Join('\n', text.Split('\n').Where(l => !l.TrimStart().StartsWith('#')));
@@ -74,9 +75,9 @@ public class DeploymentFilesTests
     {
         foreach (var name in new[] { "recorder-a", "recorder-b" })
         {
-            Assert.DoesNotContain("analysis", Compose[name]);
-            Assert.DoesNotContain("gpu", Compose[name]);
-            Assert.DoesNotContain("depends_on", Compose[name]);
+            Assert.DoesNotContain("analysis", Recorders[name]);
+            Assert.DoesNotContain("gpu", Recorders[name]);
+            Assert.DoesNotContain("depends_on", Recorders[name]);
         }
     }
 

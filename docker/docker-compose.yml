@@ -1,38 +1,10 @@
-# Two independent recorders (A and B) for the same stations. Each holds its own stream connection and writes to
-# its own data folder, so one can be stopped, rebuilt or upgraded while the other keeps recording.
-# Upgrade one at a time: `docker compose -f docker/docker-compose.yml up -d --build recorder-a`, confirm it is
-# healthy and recording, then do the same for recorder-b. Never stop both together.
-x-recorder: &recorder
-  build:
-    context: ..
-    dockerfile: docker/Dockerfile
-  image: webaudioarchive:local
-  restart: always
-  stop_grace_period: 30s
+# The web app and the consolidator. The recorders are NOT here: they are their own compose project in
+# docker-compose.recorders.yml (name: waa-recorders), so nothing in this file can recreate, restart or rebuild a
+# recorder (issue #102). This file keeps its implicit project name (docker) because the analysis project joins the
+# docker_web-cache volume by that name. Always name the service you start, and never use --remove-orphans.
+# Both services reach the recorders over the external network "waa", created by the recorders project.
 
 services:
-  recorder-a:
-    <<: *recorder
-    container_name: waa-recorder-a
-    environment:
-      WAA_INSTANCE_ID: ${WAA_INSTANCE_ID:-home}-a
-    volumes:
-      - ${WAA_DATA_DIR:-../data}/a:/data
-      - ../config:/config:ro
-    ports:
-      - "127.0.0.1:8080:8080"
-
-  recorder-b:
-    <<: *recorder
-    container_name: waa-recorder-b
-    environment:
-      WAA_INSTANCE_ID: ${WAA_INSTANCE_ID:-home}-b
-    volumes:
-      - ${WAA_DATA_DIR:-../data}/b:/data
-      - ../config:/config:ro
-    ports:
-      - "127.0.0.1:8081:8080"
-
   # The web app: Status, Shows, Recordings and Player pages plus the clip API, at http://127.0.0.1:8090.
   # NO SIGN-IN in this version, so it is published on loopback only. It reads the recorders' data read-only and talks
   # to them only through /healthz; it has its own image, so it is rebuilt and restarted on its own and never touches
@@ -51,12 +23,53 @@ services:
       WAA_CACHE: /cache
       # The Shows tab reads the station's scheduleUrl and timezone from here (read-only).
       WAA_STATIONS_CONFIG: /config/stations.json
+      # The merged archive and the consolidator's /healthz (issue #104).
+      WAA_MERGED: /data/merged
+      WAA_CONSOLIDATOR: http://consolidator:8080
     volumes:
       - ${WAA_DATA_DIR:-../data}:/data:ro
       - ../config:/config:ro
       - web-cache:/cache
     ports:
       - "127.0.0.1:8090:8080"
+    networks:
+      - waa
+
+  # The consolidator (issue #104): the recorder image started with --consolidate. It merges the A and B hours into
+  # data/merged once analysis has finished them, holds and rechecks the originals, and deletes only on confirmation.
+  # The image is built only from the recorders file, so this service has no build and no depends_on: starting or
+  # rebuilding it can never recreate a recorder. Health: http://127.0.0.1:8096/healthz.
+  #   docker compose -f docker/docker-compose.yml up -d --build web consolidator   (name the services)
+  consolidator:
+    image: webaudioarchive:local
+    container_name: waa-consolidator
+    command: ["--consolidate"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      WAA_STATION: burst
+      WAA_SOURCES: a=/data/a,b=/data/b
+      WAA_MERGED: /data/merged
+      WAA_ANALYSIS: /data/analysis
+      WAA_CONSOLIDATE_MODE: merge
+    volumes:
+      - ${WAA_DATA_DIR:-../data}/a:/data/a
+      - ${WAA_DATA_DIR:-../data}/b:/data/b
+      - ${WAA_DATA_DIR:-../data}/merged:/data/merged
+      - ${WAA_DATA_DIR:-../data}/analysis:/data/analysis:ro
+    ports:
+      - "127.0.0.1:8096:8080"
+    healthcheck:
+      test: ["CMD", "dotnet", "WebAudioArchive.Worker.dll", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - waa
+
+networks:
+  waa:
+    external: true
 
 volumes:
   web-cache:
