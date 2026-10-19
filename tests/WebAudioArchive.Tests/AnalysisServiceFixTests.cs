@@ -227,6 +227,7 @@ public sealed partial class AnalysisServiceTests
         File.WriteAllText(lockFile, File.ReadAllText(lockFile).Replace(Environment.MachineName, "another-container"));
 
         Assert.Contains("Stop the service first", ServiceLock.RunningMessage(dir, now));
+        Assert.DoesNotContain("docker compose", ServiceLock.RunningMessage(dir, now));  // environment neutral: also read in Kubernetes
         var second = new ServiceLock(dir);
         Assert.False(second.TryAcquire(now, out var why));
         Assert.Contains("already running", why);

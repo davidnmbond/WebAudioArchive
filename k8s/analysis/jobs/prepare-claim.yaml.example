@@ -1,0 +1,56 @@
+# One-off Job, run ONCE after the analysis claim is created and before the Deployment starts: it makes the claim writable by
+# uid 1654 (the user in the analysis pod). Without it the service cannot create its lock file and crash-loops.
+# TEMPLATE: the .example extension keeps it out of `kubectl apply -f <folder>` and out of every kustomization. Set the image
+# (any image with chown, the analysis image has it), the claim name and the namespace.
+#
+# It runs as root with ONE capability (CHOWN) and mounts ONLY the analysis claim: it cannot see the recordings or any other
+# volume. A namespace that enforces the Pod Security Standard "restricted" (runAsNonRoot) refuses this Job. Then use one of:
+#   - a storage class or PV option that sets the owner (NFS export with anonuid=1654, CSI fsGroup policy, mountOptions), or
+#   - an initContainer with the same securityContext on the analysis Deployment, run by a cluster admin once, or
+#   - the namespace label pod-security.kubernetes.io/enforce=baseline for the length of this Job.
+# Do NOT set fsGroup on the Deployment: it would also chown every other volume that is not read only.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: waa-analysis-prepare-claim
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: waa-analysis-maintenance
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: chown
+          image: webaudioarchive-analysis:local
+          imagePullPolicy: IfNotPresent
+          command: ["chown", "1654:1654", "/analysis"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: data-analysis
+              mountPath: /analysis
+      volumes:
+        - name: data-analysis
+          persistentVolumeClaim:
+            claimName: waa-data-analysis

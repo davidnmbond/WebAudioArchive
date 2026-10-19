@@ -1,0 +1,110 @@
+# One-off maintenance Job: `--unpark` puts parked jobs back to waiting (`--rebuild` is the same with that argument).
+# TEMPLATE: the .example extension keeps it out of `kubectl apply -f <folder>` and out of every kustomization. Copy it, set the
+# image (the one the Deployment runs), the claim names (the same as in your overlay) and the namespace, then apply it ONLY
+# while the Deployment is scaled to 0: the command refuses to run while the service holds its lock (README, un-park).
+# Same volumes, items, environment and security context as the Deployment; the recordings stay read only.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: waa-analysis-unpark
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: waa-analysis-maintenance
+    spec:
+      restartPolicy: Never
+      serviceAccountName: waa-analysis
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      priorityClassName: analysis-low
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: unpark
+          image: webaudioarchive-analysis:local
+          imagePullPolicy: IfNotPresent
+          args: ["--unpark"]
+          envFrom:
+            - configMapRef:
+                name: waa-analysis-settings
+            - secretRef:
+                name: waa-analysis-secrets
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          volumeMounts:
+            - name: data-a
+              mountPath: /data/a
+              readOnly: true
+            - name: data-b
+              mountPath: /data/b
+              readOnly: true
+            - name: data-analysis
+              mountPath: /analysis
+            - name: web-cache
+              mountPath: /web-cache
+              readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: scratch
+              mountPath: /scratch
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data-a
+          persistentVolumeClaim:
+            claimName: waa-data-a
+            readOnly: true
+        - name: data-b
+          persistentVolumeClaim:
+            claimName: waa-data-b
+            readOnly: true
+        - name: data-analysis
+          persistentVolumeClaim:
+            claimName: waa-data-analysis
+        - name: web-cache
+          persistentVolumeClaim:
+            claimName: waa-web-cache
+            readOnly: true
+        - name: config
+          configMap:
+            name: waa-analysis-files
+            items:
+              - key: analysis.json
+                path: analysis/analysis.json
+              - key: swearwords.json
+                path: analysis/swearwords.json
+              - key: enrich-v1.system.md
+                path: analysis/prompts/enrich-v1.system.md
+              - key: enrich-v1.user.md
+                path: analysis/prompts/enrich-v1.user.md
+              - key: enrich-v1.schema.json
+                path: analysis/prompts/enrich-v1.schema.json
+              - key: stations.json
+                path: stations.json
+        - name: scratch
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

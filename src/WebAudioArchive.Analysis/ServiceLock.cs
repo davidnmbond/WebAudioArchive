@@ -76,7 +76,7 @@ public sealed class ServiceLock(string dir)
     public static string? RunningMessage(string dir, DateTimeOffset now)
     {
         var holder = Describe(dir, now);
-        return holder is null ? null : holder + " Stop the service first (docker compose stop analysis), run the command, then start it again.";
+        return holder is null ? null : holder + " Stop the service first (stop the analysis container, or scale its Kubernetes deployment to 0), run the command, then start it again.";
     }
 
     static string Stamp(DateTimeOffset t) => t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);

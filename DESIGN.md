@@ -174,7 +174,7 @@ flowchart TB
     wc[("volume: web-cache")]
     lw["optional dev Whisper<br/>(local GPU, :8178)"]
   end
-  subgraph r2["pdl-rune-02, 192.168.1.107"]
+  subgraph r2["pdl-rune-02"]
     w2["whisper.cpp server :8080"]
     o2["Ollama :11434"]
   end
@@ -218,7 +218,7 @@ flowchart TB
     end
     np{{"NetworkPolicy egress<br/>rune :8080, :11434 only"}}
   end
-  subgraph r1["pdl-rune-01, 10.210.3.1"]
+  subgraph r1["pdl-rune-01"]
     w1["whisper.cpp server :8080"]
     o1["Ollama :11434"]
   end
@@ -240,13 +240,13 @@ flowchart TB
   `PodDisruptionBudget` with `maxUnavailable: 0` for each recorder makes a voluntary node drain wait for the owner.
   Rolling out analysis, web or the consolidator never touches them.
 - **Volumes:** the same layout as on the PC. Several pods mount the recorder volumes, so the storage class must offer
-  `ReadWriteMany` (NFS, CephFS, Azure Files and so on), or all pods must be pinned to one node with `ReadWriteOnce`
+  `ReadWriteMany` (NFS, CephFS, Azure Files and so on), or (`ReadWriteOnce`) analysis must be scaled to 0 before any recorder moves, with a required pod affinity to the recorder pods (k8s/README.md). A fixed node is never used
   volumes. Analysis mounts the recordings read only and only `data/analysis` read and write.
-- **Analysis pod:** CPU and memory requests about 1 CPU and 1.5 GiB, limits 4 CPU and 6 GiB (the 2 Gi memory-backed
-  scratch counts toward the limit). Liveness on the process, readiness on `/healthz` returning 200 (a 503 means lag,
-  not a dead process, so it must not trigger restarts). No GPU request, no CUDA, no model files.
+- **Analysis pod:** CPU and memory requests 250m CPU and 1.5 GiB, limits 4 CPU and 6 GiB (the 2 Gi memory-backed
+  scratch counts toward the limit). Startup, liveness and readiness are TCP checks on the port; `/healthz` is for monitoring (a 503 means lag,
+  not a dead process, so it must not remove the pod or restart it; issue 113 adds `/livez`). No GPU request, no CUDA, no model files.
 - **Egress:** the cluster must reach `pdl-rune-01` on 8080 (Whisper) and 11434 (Ollama). If cluster DNS cannot
-  resolve `pdl-rune-01.panoramicdata.com`, use the IP `10.210.3.1` (a private address, accepted by the allow-list).
+  resolve `pdl-rune-01.panoramicdata.com`, use the private address of the server (resolve the hostname; a private address is accepted by the allow-list).
 
 ## Job lifecycle
 

@@ -9613,7 +9613,7 @@ public sealed class ServiceLock(string dir)
     public static string? RunningMessage(string dir, DateTimeOffset now)
     {
         var holder = Describe(dir, now);
-        return holder is null ? null : holder + " Stop the service first (docker compose stop analysis), run the command, then start it again.";
+        return holder is null ? null : holder + " Stop the service first (stop the analysis container, or scale its Kubernetes deployment to 0), run the command, then start it again.";
     }
 
     static string? Describe(string dir, DateTimeOffset now)
@@ -11864,7 +11864,7 @@ production path.
 > value -100 with `preemptionPolicy: Never`), `k8s/analysis/base/secret.yaml.example` (placeholders only; the extension keeps it out of
 > `kubectl apply -f` and out of the kustomization), `k8s/analysis/overlays/example` and `k8s/README.md`; (2) the service has no
 > purely-alive endpoint (`/healthz` is 503 for `lagging`, `failing` and `stalled`) and the `--healthcheck --alive` flag of the first draft
-> was not built: startup and liveness are `tcpSocket` on 8080 and only readiness uses `/healthz` (a not-ready pod just leaves the Service),
+> was not built: startup and liveness are `tcpSocket` on 8080 (readiness too, after review fix round 1),
 > and a follow-up issue asks for `/livez`; (3) no `fsGroup` (it would chown every volume that is not read only; the analysis claim is
 > prepared once for uid 1654, see the README); (4) requests are `cpu: 250m`, `memory: 1536Mi`, limits `cpu: 4`, `memory: 6Gi`, plus a
 > 256 Mi `/tmp` emptyDir because the root filesystem is read only; (5) the `/config` files are a ConfigMap `waa-analysis-files` created
@@ -11874,6 +11874,18 @@ production path.
 > pods labelled `app.kubernetes.io/name: waa-web`; (8) the web cache claim `waa-web-cache` and the recordings claims `waa-data-a` and
 > `waa-data-b` are placeholder names, referenced and never created; (9) the tests are text checks in `KubernetesManifestTests.cs` (no YAML
 > package was added). Validated offline with `kubectl kustomize` and kubeconform (`-strict`, Kubernetes 1.31.0): 7 of 7 valid, base and overlay.
+
+> **Review fix round 1 (2026-10-19).** (1) Readiness is a `tcpSocket` check like startup and liveness, not `/healthz`: a 503 (lagging, failing,
+> stalled) must not take the pod out of the Service, because monitors and the web app need the JSON then and a rollout must finish when
+> the GPU server is down; `/healthz` is for monitoring, `/livez` stays issue #113. (2) `WAA_MIN_FREE_GB` is 2 (it guards the analysis
+> claim in Kubernetes, 20Gi) and `WAA_SCRATCH_MAX_MB` is 1900 inside the 2Gi emptyDir; `DOTNET_GCHeapHardLimitPercent` is 32 (hex, 50
+> percent); a test keeps the guard below the claim size. (3) The README requires `ReadWriteMany` recordings (or `ReadOnlyMany` on the same
+> export) and never advises a fixed node; for `ReadWriteOnce` it requires a required pod affinity to the recorder pods and scaling analysis
+> to 0 before a recorder moves. (4) `k8s/analysis/jobs/unpark.yaml.example` is a complete Job (same volumes, items, env and security context
+> as the Deployment, checked by a test) and `k8s/analysis/jobs/prepare-claim.yaml.example` makes the claim writable by uid 1654 (root, CHOWN
+> only, only the analysis claim mounted). (5) The overlay patches volumes by name with strategic merge patches. (6) The service lock
+> message is environment neutral. (7) The tests parse the YAML (YamlDotNet, tests only) and compare env values with compose. (8) Raw
+> private addresses were removed from DESIGN.md and this plan; hostnames stay.
 
 **Files:**
 - Create: `k8s/analysis/base/*` and `k8s/analysis/overlays/example/kustomization.yaml` as above, `k8s/README.md`
@@ -11934,7 +11946,7 @@ there). If a rune server is instead a Kubernetes node with a GPU, use the manife
   `probability`. `chunk.wav` is any 16 kHz mono 16-bit WAV (never commit it).
 - [ ] **Step 5: Firewall.** Allow 8080 only from the cluster's egress addresses and the owner's PC (for example
   `ufw allow from <cluster egress CIDR> to any port 8080 proto tcp`). TLS and a token: issue #112.
-- [ ] **Step 6: Repeat on pdl-rune-01** (production, 10.210.3.1) once the test cluster has run for a day; record
+- [ ] **Step 6: Repeat on pdl-rune-01** (production) once the test cluster has run for a day; record
   both GPUs, the realtime factor from `/healthz` and the image digest in `docs/analysis-validation.md`.
 
 ---

@@ -62,7 +62,7 @@ public sealed class WhisperServerSettingsTests : IDisposable
     [InlineData("http://localhost:8080")]
     [InlineData("http://[::1]:8080")]
     [InlineData("http://192.168.1.20:8080")]
-    [InlineData("http://10.210.3.1:8080")]
+    [InlineData("http://10.9.8.7:8080")]
     [InlineData("http://172.20.0.3:8080")]
     [InlineData("http://host.docker.internal:8178")]
     public void Loopback_and_private_hosts_are_accepted(string url)

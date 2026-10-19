@@ -1,5 +1,8 @@
 # Copy this folder (for example to k8s/analysis/overlays/prod) and edit; do not commit real addresses of private servers.
 #   kubectl kustomize k8s/analysis/overlays/prod | kubectl diff -f -
+# The Deployment patch is a strategic merge patch: volumes are matched by NAME (data-a, data-b, web-cache), never by position,
+# so reordering the base cannot send a claim name to the wrong volume. Only claimName is given: readOnly stays as in the base.
+# The analysis claim keeps its base name unless you rename the claim in pvc.yaml too.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: webaudioarchive
@@ -15,45 +18,76 @@ patches:
       kind: ConfigMap
       name: waa-analysis-settings
     patch: |-
-      - op: replace
-        path: /data/WAA_WHISPER_URL
-        value: http://pdl-rune-01.panoramicdata.com:8080
-      - op: replace
-        path: /data/WAA_OLLAMA_URL
-        value: http://pdl-rune-01.panoramicdata.com:11434
-      - op: replace
-        path: /data/WAA_OLLAMA_MODEL
-        value: qwen3.6:27b
-  # Storage: the analysis claim class (and size if needed).
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: waa-analysis-settings
+      data:
+        WAA_WHISPER_URL: http://pdl-rune-01.panoramicdata.com:8080
+        WAA_OLLAMA_URL: http://pdl-rune-01.panoramicdata.com:11434
+        WAA_OLLAMA_MODEL: qwen3.6:27b
+  # Storage: the analysis claim class (and size if needed; keep WAA_MIN_FREE_GB well below it).
   - target:
       kind: PersistentVolumeClaim
       name: waa-data-analysis
     patch: |-
-      - op: add
-        path: /spec/storageClassName
-        value: replace-me-rwx-class
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: waa-data-analysis
+      spec:
+        storageClassName: replace-me-rwx-class
   # The claim names of the recordings and of the web cache, as they exist in your cluster (the Deployment only references them).
   - target:
       kind: Deployment
       name: waa-analysis
     patch: |-
-      - op: replace
-        path: /spec/template/spec/volumes/0/persistentVolumeClaim/claimName
-        value: replace-me-data-a
-      - op: replace
-        path: /spec/template/spec/volumes/1/persistentVolumeClaim/claimName
-        value: replace-me-data-b
-      - op: replace
-        path: /spec/template/spec/volumes/3/persistentVolumeClaim/claimName
-        value: replace-me-web-cache
-  # Network: the GPU server addresses (a NetworkPolicy cannot use names).
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: waa-analysis
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: data-a
+                persistentVolumeClaim:
+                  claimName: replace-me-data-a
+              - name: data-b
+                persistentVolumeClaim:
+                  claimName: replace-me-data-b
+              - name: web-cache
+                persistentVolumeClaim:
+                  claimName: replace-me-web-cache
+  # Network: the GPU server addresses (a NetworkPolicy cannot use names). A list without a merge key is replaced as a whole,
+  # so give the complete egress list (DNS first, then one block per GPU server address).
   - target:
       kind: NetworkPolicy
       name: waa-analysis
     patch: |-
-      - op: replace
-        path: /spec/egress/1/to/0/ipBlock/cidr
-        value: 192.0.2.10/32
-      - op: replace
-        path: /spec/egress/2/to/0/ipBlock/cidr
-        value: 192.0.2.11/32
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: waa-analysis
+      spec:
+        egress:
+          - to:
+              - namespaceSelector:
+                  matchLabels:
+                    kubernetes.io/metadata.name: kube-system
+                podSelector:
+                  matchLabels:
+                    k8s-app: kube-dns
+            ports:
+              - protocol: UDP
+                port: 53
+              - protocol: TCP
+                port: 53
+          - to:
+              - ipBlock:
+                  cidr: 192.0.2.10/32
+            ports:
+              - protocol: TCP
+                port: 8080
+              - protocol: TCP
+                port: 11434

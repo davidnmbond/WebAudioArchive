@@ -11,8 +11,11 @@ data:
   WAA_ANALYSIS_PREFERENCE: a,b
   WAA_ANALYSIS_OUT: /analysis
   WAA_SCRATCH: /scratch
-  WAA_SCRATCH_MAX_MB: "2048"
-  WAA_MIN_FREE_GB: "20"
+  WAA_SCRATCH_MAX_MB: "1900"
+  # In Kubernetes the free-space guard protects the analysis claim (the recorders have their own volumes), so it must be well below
+  # the claim size in pvc.yaml (20Gi) or the service pauses for ever on a claim that starts with less free space. 1900 MB of
+  # scratch leaves headroom inside the 2Gi memory-backed emptyDir.
+  WAA_MIN_FREE_GB: "2"
   WAA_LAG_ALARM_HOURS: "6"
   WAA_ANALYSIS_CONFIG: /config/analysis/analysis.json
   WAA_STATIONS_CONFIG: /config/stations.json
@@ -29,3 +32,6 @@ data:
   WAA_OLLAMA_MODEL: qwen3.6:latest
   WAA_OLLAMA_KEEP_ALIVE: 5m
   WAA_ENRICHMENT: "on"
+  # .NET reads GC settings as hexadecimal: 32 is 50 percent. The managed heap may use half of the 6Gi limit, so with the 2Gi
+  # memory-backed scratch the pod stays under the limit and the GC collects instead of the kernel killing the pod.
+  DOTNET_GCHeapHardLimitPercent: "32"

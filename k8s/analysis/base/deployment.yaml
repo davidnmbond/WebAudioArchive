@@ -5,10 +5,10 @@
 # block every node drain for ever and maxUnavailable 1 allows what is allowed anyway; analysis is batch work that resumes
 # where it stopped (a graceful stop restores the job attempts), so a drain may evict it.
 #
-# Probes (the service has no purely-alive endpoint yet, see the issue to add /livez): /healthz returns 503 for lagging,
-# failing and stalled, and 200 for ok, catching-up and paused, so it is an alarm for monitoring, never a reason to restart.
-# Therefore the startup and liveness probes are TCP checks on the port (they fail only when the process is not listening)
-# and /healthz is used for readiness only (a not ready pod just leaves the Service endpoints, nothing is restarted).
+# Probes (the service has no purely-alive endpoint yet, issue 113 adds /livez): /healthz returns 503 for lagging, failing
+# and stalled, and 200 for ok, catching-up and paused. That is an alarm for monitoring and the analysis API, never a reason
+# to restart the pod or to take it out of the Service (monitors and the web app need the JSON most when it is 503, and a
+# rollout must finish when the GPU server is down). So startup, liveness and readiness are all TCP checks on the port.
 #
 # No fsGroup: it would recursively chown every volume that is not mounted read only. The recordings are read only, but the
 # rule is that nothing here may be able to change them; the analysis claim is prepared once instead (README).
@@ -86,8 +86,7 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 6
           readinessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: http
             periodSeconds: 30
             timeoutSeconds: 5
