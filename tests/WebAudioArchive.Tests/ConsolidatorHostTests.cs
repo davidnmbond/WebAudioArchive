@@ -352,6 +352,44 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.Empty(JsonDocument.Parse(File.ReadAllText(failures)).RootElement.EnumerateArray());
     }
 
+    [Fact]
+    public async Task An_hour_waits_for_an_earlier_hour_still_waiting_for_analysis_and_then_joins_it_by_its_tail()
+    {
+        Record();
+        // A minute at 10:59 too, so 10:00 runs up to 11:00 and 11:00 can join it by its tail.
+        foreach (var id in new[] { "a", "b" }) SegmentFiles.Live(Root(id), "burst", Epoch, T0.AddMinutes(59), T0.AddHours(1));
+        var analysis = Path.Combine(_root, "analysis");
+        AnalysisState(analysis, $"a/2026/10-15/{Starts[0]:HHmmss}", JobStatus.Done);
+        AnalysisState(analysis, "a/2026/10-15/100000", JobStatus.Waiting);
+        AnalysisState(analysis, "a/2026/10-15/105900", JobStatus.Waiting);
+        AnalysisState(analysis, "a/2026/10-15/110000", JobStatus.Done);
+        var clock = new ManualClock(Now);
+
+        await using var factory = Host("merge", clock, analysis);
+        var (client, service) = await StartAsync(factory);
+
+        Assert.True(File.Exists(MergedMp3(T0.AddHours(-1))));
+        Assert.False(File.Exists(MergedMp3(T0)), "10:00 is waiting for analysis");
+        Assert.False(File.Exists(MergedMp3(T0.AddHours(1))), "11:00 is ready but must wait for 10:00, so it can join it by its tail");
+        var health = await Healthz(client);
+        Assert.Equal(T0, Utc(health.GetProperty("oldestWaitingHourUtc")));
+        Assert.Equal(1, health.GetProperty("waitingForAnalysis").GetInt32());
+        Assert.Equal(1, health.GetProperty("backlogHours").GetInt32());
+
+        AnalysisState(analysis, "a/2026/10-15/100000", JobStatus.Done);
+        AnalysisState(analysis, "a/2026/10-15/105900", JobStatus.Done);
+        clock.Advance(TimeSpan.FromHours(1));
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(MergedMp3(T0)));
+        var eleven = SegmentMetaStore.Read(Path.ChangeExtension(MergedMp3(T0.AddHours(1)), ".json"));
+        Assert.NotNull(eleven?.Merge);
+        Assert.False(eleven.Merge.JoinedByTime);
+        health = await Healthz(client);
+        Assert.Equal(0, health.GetProperty("backlogHours").GetInt32());
+        Assert.Equal(JsonValueKind.Null, health.GetProperty("oldestWaitingHourUtc").ValueKind);
+    }
+
     /// <summary>A and B each record a minute at 10:00 and 11:00 only: nothing at all in 09:00.</summary>
     void RecordFromTen()
     {

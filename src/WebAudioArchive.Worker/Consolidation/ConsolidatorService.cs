@@ -151,18 +151,21 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         var open = EarliestOpenStart();
         var eligible = Eligibility.Hours(a, b, merged, open, now, HourSettled);
         var eligibleSet = eligible.ToHashSet();
-        // Old enough and closed, but analysis is not finished with them.
-        var waitingHours = Eligibility.Hours(a, b, merged, open, now, _ => true).Where(h => !eligibleSet.Contains(h)).ToList();
+        // Every hour old enough and closed, analysis aside; those not eligible are waiting for analysis.
+        var ripe = Eligibility.Hours(a, b, merged, open, now, _ => true);
+        var waitingHours = ripe.Where(h => !eligibleSet.Contains(h)).ToList();
         var failures = Failures().ToDictionary(f => f.HourUtc);
         var empties = ReadEmpty();
         var emptiesChanged = false;
 
-        // Oldest first. Merging stops at the earliest unresolved failure, so the hour after it is merged only once the
-        // failed hour is, and joins it by its tail; until then the later hours count in the backlog.
+        // Oldest first. Merging stops at the earliest hour still waiting for analysis and at the earliest unresolved
+        // failure, so the hour after it is merged only once that hour is, and joins it by its tail; until then the later
+        // hours count in the backlog.
         var settledHours = 0;
-        foreach (var hour in eligible)
+        foreach (var hour in ripe)
         {
             ct.ThrowIfCancellationRequested();
+            if (!eligibleSet.Contains(hour)) break;
             if (failures.TryGetValue(hour, out var failed))
             {
                 if (SameInputs(failed.Sources, Inputs(hour, a, b)))
