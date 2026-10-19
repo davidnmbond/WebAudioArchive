@@ -57,6 +57,8 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
 {
     static readonly TimeSpan Interval = TimeSpan.FromHours(1);
 
+    public const string HeldSidecarMissing = "merged hour sidecar missing while its originals are held";
+
     /// <summary>At most this many refused originals are named on /healthz; the count covers them all.</summary>
     const int MaxRefusedShown = 5;
 
@@ -171,6 +173,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         // failure, so the hour after it is merged only once that hour is, and joins it by its tail; until then the later
         // hours count in the backlog.
         var settledHours = 0;
+        HashSet<DateTimeOffset>? heldAgainst = null;
         foreach (var hour in ripe)
         {
             ct.ThrowIfCancellationRequested();
@@ -189,6 +192,15 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
             }
             else if (failures.Keys.Any(f => f < hour && !merged.Contains(f)))
             {
+                break;
+            }
+
+            // Originals of this hour were held (or deleted) against its merged copy: what is left in master/ is not the
+            // whole hour, so it is never merged again from it. A person has to look.
+            if ((heldAgainst ??= HoursHeldAgainst()).Contains(hour))
+            {
+                Record(new ConsolidationFailure(hour, HeldSidecarMissing, now, Inputs(hour, a, b)));
+                logger.LogError("{Hour:O}: {Reason}; merging stops here", hour, HeldSidecarMissing);
                 break;
             }
 
@@ -216,7 +228,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
 
             try
             {
-                MergedHourWriter.Write(plan, settings.MergedMasterDir, settings.Station);
+                MergedHourWriter.Write(plan, settings.MergedMasterDir, settings.Station, now);
                 merged.Add(hour);
                 settledHours++;
                 logger.LogInformation("{Hour:O}: merged from {Pieces} piece(s), {Missing} stretch(es) missing from both", hour, plan.Pieces.Count, plan.Missing.Count);
@@ -526,6 +538,61 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
             last?.OldestWaitingHourUtc,
             refused.Count,
             [.. refused.Take(MaxRefusedShown)]);
+    }
+
+    /// <summary>
+    /// The merged hours that any held record, whatever its status, or any deletion in the log names among its merged
+    /// files: originals were moved out of master/ (or deleted) on the strength of them.
+    /// </summary>
+    HashSet<DateTimeOffset> HoursHeldAgainst()
+    {
+        var hours = new HashSet<DateTimeOffset>();
+        void Add(string? mergedFile)
+        {
+            if (MergedFileHour(mergedFile) is { } hour) hours.Add(hour);
+        }
+
+        foreach (var (_, record) in Records())
+            foreach (var file in record.MergedFiles ?? []) Add(file);
+
+        if (!File.Exists(DeletionsLog)) return hours;
+        try
+        {
+            using var stream = new FileStream(DeletionsLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            while (reader.ReadLine() is { } line)
+            {
+                if (line.Length == 0) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object
+                        && doc.RootElement.TryGetProperty("mergedFiles", out var files) && files.ValueKind == JsonValueKind.Array)
+                        foreach (var f in files.EnumerateArray())
+                            if (f.ValueKind == JsonValueKind.String) Add(f.GetString());
+                }
+                catch (JsonException)
+                {
+                    // a torn line from a crash
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning("{File} could not be read: {Reason}", DeletionsLog, ex.Message);
+        }
+
+        return hours;
+    }
+
+    /// <summary>The UTC hour a merged file path names (…/yyyy/MM-dd/HHmmss.mp3), whatever folder it was written from.</summary>
+    static DateTimeOffset? MergedFileHour(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+        var parts = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3) return null;
+        return DateTimeOffset.TryParseExact(string.Join('/', parts[^3..]), "yyyy/MM-dd/HHmmss'.mp3'", CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var hour) ? hour : null;
     }
 
     /// <summary>The bytes of every deletion in the log. While the log is being written the last total is reported.</summary>

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using WebAudioArchive.Core.Mp3;
 using WebAudioArchive.Core.Recording;
@@ -16,14 +17,17 @@ public static class MergedHourWriter
 {
     const int CopyBufferBytes = 1 << 20;
 
-    public static SegmentMeta Write(MergedHourPlan plan, string mergedStationMasterDir, string station)
+    public static SegmentMeta Write(MergedHourPlan plan, string mergedStationMasterDir, string station, DateTimeOffset? now = null)
     {
         var hour = plan.Hour.ToUniversalTime();
         var dir = Path.Combine(mergedStationMasterDir, hour.ToString("yyyy"), hour.ToString("MM-dd"));
         var mp3 = Path.Combine(dir, hour.ToString("HHmmss") + ".mp3");
         var part = mp3 + ".part";
+        var sidecar = Path.ChangeExtension(mp3, ".json");
+        if (File.Exists(mp3) && File.Exists(sidecar))
+            throw new MergeVerificationException($"{mp3} is already merged with its sidecar; it is never overwritten");
         Directory.CreateDirectory(dir);
-        if (File.Exists(part)) File.Delete(part); // left by an interrupted run
+        if (File.Exists(part)) File.Delete(part); // left by an interrupted run, never published
 
         try
         {
@@ -40,17 +44,22 @@ public static class MergedHourWriter
                 if (CheckSource(source) != input) throw new MergeVerificationException($"source {source.Recorder} {source.RelativeFile} changed while the hour was written");
 
             var meta = BuildMeta(plan, station, Path.GetFileName(mp3), bytes, before, Sha256(part));
+            // An earlier merged audio (or sidecar) without its partner may be the only copy of the hour left: it is moved
+            // aside, never overwritten or deleted.
+            var suffix = ".replaced-" + (now ?? DateTimeOffset.UtcNow).UtcDateTime.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
+            MoveAside(mp3, suffix);
+            MoveAside(sidecar, suffix);
+
             // Audio first, then the sidecar readers find it by: a sidecar never describes audio that is not there.
-            File.Move(part, mp3, overwrite: true);
-            var json = Path.ChangeExtension(mp3, ".json");
+            File.Move(part, mp3, overwrite: false);
             try
             {
-                SegmentMetaStore.Write(json, meta);
+                SegmentMetaStore.Write(sidecar, meta);
             }
             catch
             {
-                File.Delete(mp3);
-                if (File.Exists(json + ".tmp")) File.Delete(json + ".tmp");
+                File.Delete(mp3); // published by this call a moment ago
+                if (File.Exists(sidecar + ".tmp")) File.Delete(sidecar + ".tmp");
                 throw;
             }
 
@@ -61,6 +70,14 @@ public static class MergedHourWriter
             if (File.Exists(part)) File.Delete(part);
             throw;
         }
+    }
+
+    static void MoveAside(string path, string suffix)
+    {
+        if (!File.Exists(path)) return;
+        var aside = path + suffix;
+        for (var n = 1; File.Exists(aside); n++) aside = path + suffix + "-" + n.ToString(CultureInfo.InvariantCulture);
+        File.Move(path, aside, overwrite: false);
     }
 
     /// <summary>

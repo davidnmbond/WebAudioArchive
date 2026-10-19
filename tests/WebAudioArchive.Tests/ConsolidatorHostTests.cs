@@ -492,7 +492,68 @@ public sealed class ConsolidatorHostTests : IDisposable
 
         Assert.True(File.Exists(json));
         Assert.Equal(good, File.ReadAllBytes(mp3));
+        Assert.Equal(good[..(good.Length / 2)], File.ReadAllBytes(mp3 + ".replaced-" + Now.ToString("yyyyMMdd'T'HHmmss'Z'")));
         Assert.Equal(T0.AddHours(1), Utc((await Healthz(client)).GetProperty("lastMergedHourUtc")));
+    }
+
+    const string HeldReason = "merged hour sidecar missing while its originals are held";
+
+    [Fact]
+    public async Task A_merged_hour_whose_sidecar_went_missing_after_its_originals_were_held_is_not_merged_again()
+    {
+        Record();
+        // A's 11:00 is refused by holding (wrong day folder), so it stays in master/ and 11:00 could be planned again from it alone.
+        var moved = Path.Combine(Root("a"), "burst", "master", "2026", "10-14");
+        Directory.CreateDirectory(moved);
+        var aMp3 = MasterMp3("a", T0.AddHours(1));
+        File.Move(aMp3, Path.Combine(moved, "110000.mp3"));
+        File.Move(Path.ChangeExtension(aMp3, ".json"), Path.Combine(moved, "110000.json"));
+        var clock = new ManualClock(Now);
+        await using var factory = Host("hold", clock);
+        var (client, service) = await StartAsync(factory);
+        Assert.True(File.Exists(HeldMp3("b", T0.AddHours(1))));
+
+        var mp3 = MergedMp3(T0.AddHours(1));
+        var whole = File.ReadAllBytes(mp3);
+        File.Delete(Path.ChangeExtension(mp3, ".json"));
+        clock.Advance(TimeSpan.FromHours(1));
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(whole, File.ReadAllBytes(mp3));
+        Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(mp3)!, "*.replaced-*"));
+        var failure = Assert.Single((await Healthz(client)).GetProperty("failures").EnumerateArray());
+        Assert.Equal(T0.AddHours(1), Utc(failure.GetProperty("hourUtc")));
+        Assert.Contains(HeldReason, failure.GetProperty("reason").GetString());
+    }
+
+    [Fact]
+    public async Task A_merged_hour_named_in_the_deletions_log_is_not_merged_again()
+    {
+        Record();
+        var clock = new ManualClock(Now);
+        await using var factory = Host("merge", clock);
+        var (client, service) = await StartAsync(factory);
+
+        var mp3 = MergedMp3(T0);
+        var whole = File.ReadAllBytes(mp3);
+        File.WriteAllText(Path.Combine(MergedRoot, "burst", "deletions.jsonl"), JsonSerializer.Serialize(new
+        {
+            utc = Now,
+            confirmedBy = "manager",
+            recorder = "a",
+            file = "2026/10-15/100000.mp3",
+            sha256 = new string('a', 64),
+            bytes = 1,
+            mergedFiles = new[] { MergedMp3(T0.AddHours(-1)), mp3, MergedMp3(T0.AddHours(1)) },
+        }) + "\n");
+        File.Delete(Path.ChangeExtension(mp3, ".json"));
+        clock.Advance(TimeSpan.FromHours(1));
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(whole, File.ReadAllBytes(mp3));
+        var failure = Assert.Single((await Healthz(client)).GetProperty("failures").EnumerateArray());
+        Assert.Equal(T0, Utc(failure.GetProperty("hourUtc")));
+        Assert.Contains(HeldReason, failure.GetProperty("reason").GetString());
     }
 
     [Fact]

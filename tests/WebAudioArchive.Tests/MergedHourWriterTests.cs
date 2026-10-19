@@ -148,6 +148,56 @@ public sealed class MergedHourWriterTests : IDisposable
         Assert.False(File.Exists(Path.ChangeExtension(Mp3, ".json") + ".tmp"));
     }
 
+    static readonly DateTimeOffset WrittenAt = new(2026, 10, 17, 12, 34, 56, TimeSpan.Zero);
+
+    string Replaced => Mp3 + ".replaced-20261017T123456Z";
+
+    [Fact]
+    public void An_existing_merged_audio_without_a_sidecar_is_moved_aside_never_overwritten()
+    {
+        var plan = PlanMixed();
+        Directory.CreateDirectory(Path.GetDirectoryName(Mp3)!);
+        byte[] earlier = [.. Enumerable.Range(0, 5000).Select(i => (byte)i)];
+        File.WriteAllBytes(Mp3, earlier);
+
+        MergedHourWriter.Write(plan, Merged, "burst", WrittenAt);
+
+        Assert.Equal(earlier, File.ReadAllBytes(Replaced));
+        using var fs = File.OpenRead(Mp3);
+        Assert.Equal(plan.FrameHashes, FrameIndex.Read(fs, 0, fs.Length).Select(f => f.Hash));
+    }
+
+    [Fact]
+    public void A_sidecar_that_cannot_be_written_deletes_only_the_audio_this_write_published()
+    {
+        var plan = PlanMixed();
+        Directory.CreateDirectory(Path.GetDirectoryName(Mp3)!);
+        byte[] earlier = [.. Enumerable.Range(0, 5000).Select(i => (byte)i)];
+        File.WriteAllBytes(Mp3, earlier);
+        Directory.CreateDirectory(Path.ChangeExtension(Mp3, ".json")); // a directory where the sidecar must go
+
+        Assert.ThrowsAny<Exception>(() => MergedHourWriter.Write(plan, Merged, "burst", WrittenAt));
+
+        Assert.False(File.Exists(Mp3), "the audio this write published goes");
+        Assert.Equal(earlier, File.ReadAllBytes(Replaced));
+    }
+
+    [Fact]
+    public void An_hour_already_merged_with_its_sidecar_is_refused_and_left_alone()
+    {
+        var plan = PlanMixed();
+        MergedHourWriter.Write(plan, Merged, "burst");
+        var audio = File.ReadAllBytes(Mp3);
+        var sidecar = File.ReadAllText(Path.ChangeExtension(Mp3, ".json"));
+
+        var ex = Assert.Throws<MergeVerificationException>(() => MergedHourWriter.Write(plan, Merged, "burst", WrittenAt));
+
+        Assert.Contains("already merged", ex.Message);
+        Assert.Equal(audio, File.ReadAllBytes(Mp3));
+        Assert.Equal(sidecar, File.ReadAllText(Path.ChangeExtension(Mp3, ".json")));
+        Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(Mp3)!, "*.replaced-*"));
+    }
+
     [Fact]
     public void A_tail_that_cannot_be_found_starts_the_hour_by_time_and_the_sidecar_says_so()
     {

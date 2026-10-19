@@ -81,6 +81,30 @@ running: Docker Desktop must start on login, the computer must not sleep, and a 
 Update) stops recording until Docker Desktop is back. This setup does not protect against the host or its disk
 failing.
 
+## Consolidation (A and B merged)
+
+The consolidator (`waa-consolidator`) merges A and B into one verified copy per UTC hour under `data/merged`, once
+the hour has been closed for 24 hours and analysis has finished with it (no segment of the hour waiting or running in
+analysis, and at least one done or failed). In `hold` mode it then moves each original whose frames are all in the
+merged copy to `<recorder>/<station>/held/`, rechecks it after 7 days, and deletes it only when a manager confirms on
+`/consolidation`.
+
+Originals that holding refuses. When every hour an original overlaps is merged but holding refuses it (for example
+some of its frames are not in the merged copy, or it is not in the folder for its start time), it stays in `master/`
+and is tried again on every run, never re-merged automatically. `/healthz` reports `refused` and the latest reasons
+(`refusedOriginals`), and the Status card turns amber. A person needs to look: compare the original with the merged
+hour's sidecar (`data/merged/<station>/master/<yyyy>/<MM-dd>/<HHmmss>.json`, its `merge.sources` and `merge.inputs`)
+and the recorder's own sidecar. To have the hour merged again, delete the merged hour's `.json` sidecar (the next run
+moves the old merged `.mp3` aside to `<HHmmss>.mp3.replaced-<utc>`, never deletes it) and, if the hour is listed under
+failures, `POST /retry` with `{"hourUtc":"<hour>"}`.
+
+A merged hour is never re-merged from what is left in `master/` once originals were held against it. If its sidecar is
+missing while any held record (whatever its status) or any line of `deletions.jsonl` names it among its merged files,
+the hour is recorded as the failure "merged hour sidecar missing while its originals are held" and nothing is written.
+To re-merge such an hour, first return its held originals: deleting an original's `<stem>.held.json` makes the next
+run move its `.mp3` and `.json` back to `master/` (only while its audio is still held; a deleted original cannot come
+back, so that hour is never re-merged). Then delete the merged sidecar and `POST /retry` as above.
+
 ## Web app (MVP)
 
 Open `http://127.0.0.1:8090`. The container is `waa-web` (image `webaudioarchive-web:local`, built from
