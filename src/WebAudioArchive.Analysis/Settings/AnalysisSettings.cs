@@ -195,7 +195,7 @@ public sealed partial record AnalysisSettings(
 
         if (optional("WAA_WHISPER_URL") is not { } urlText)
             throw new AnalysisSettingsException("WAA_WHISPER_URL is not set: transcription runs on the whisper.cpp server on the GPU servers, for example WAA_WHISPER_URL=http://pdl-rune-02.panoramicdata.com:8080 with WAA_WHISPER_ALLOWED_HOSTS=pdl-rune-02.panoramicdata.com (docs/analysis.md).");
-        var url = HttpUrl("WAA_WHISPER_URL", urlText);
+        var url = WhisperServerTranscriber.WithTrailingSlash(HttpUrl("WAA_WHISPER_URL", urlText));
         var allowed = (optional("WAA_WHISPER_ALLOWED_HOSTS") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(h => h.ToLowerInvariant()).ToHashSet();
         if (!IsLocalOrPrivate(url, allowed))
             throw new AnalysisSettingsException($"WAA_WHISPER_URL: the host '{url.Host}' is not on this machine or a private network, so the audio would leave it (or the URL carries user info: use WAA_WHISPER_TOKEN instead). Use a local server, list the host in WAA_WHISPER_ALLOWED_HOSTS (comma separated) if it is yours on a private network.");
@@ -216,7 +216,10 @@ public sealed partial record AnalysisSettings(
             TimeSpan.FromMinutes(number("WAA_WHISPER_TIMEOUT_MINUTES", 10, OllamaClient.MinTimeout.TotalMinutes, 240)),
             (int)number("WAA_WHISPER_CONCURRENCY", 1, 1, 16),
             token,
-            (int)number("WAA_WHISPER_RETRIES", 3, 0, 10));
+            (int)number("WAA_WHISPER_RETRIES", 3, 0, 10))
+        {
+            MaxProcessFailures = (int)number("WAA_WHISPER_MAX_PROCESS_FAILURES", 10, 1, 1000),
+        };
     }
 
     static Uri HttpUrl(string name, string value) =>

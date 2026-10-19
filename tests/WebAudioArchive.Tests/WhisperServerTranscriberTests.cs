@@ -137,7 +137,8 @@ public sealed class WhisperServerTranscriberTests
     {
         var segments = await Make(Ok()).TranscribeAsync(Request(), CancellationToken.None);
 
-        var s = Assert.Single(segments);
+        Assert.Equal(2, segments.Count);
+        var s = segments[0];
         Assert.Equal("Um, hello and welcome.", s.Text);
         Assert.Equal(new[] { "Um,", "hello", "and", "welcome." }, s.Words.Select(w => w.Text));
         Assert.Equal(0.1, s.Words[0].Start, 6);
@@ -145,8 +146,16 @@ public sealed class WhisperServerTranscriberTests
         Assert.Equal(0.7, s.Words[3].Probability, 6);
         Assert.Equal(0, s.Start);
         Assert.Equal(3.5, s.End);
-        Assert.Equal(-0.159, s.AvgLogProb, 6);
+        // avg_logprob is the mean of ln(probability) over the words of the segment, not the server's own figure (-0.159, diluted).
+        var expected = new[] { 0.8, 0.95, 0.97, 0.99, 0.9, 0.7, 0.9 }.Average(Math.Log);
+        Assert.Equal(expected, s.AvgLogProb, 3);
         Assert.Equal(0, s.NoSpeechProb, 6);
+
+        var annotation = segments[1];
+        Assert.Equal("[BLANK_AUDIO]", annotation.Text);
+        Assert.Empty(annotation.Words);
+        Assert.Equal(0, annotation.AvgLogProb);
+        Assert.Equal(0.9, annotation.NoSpeechProb, 6);
 
         var shifted = s.Shift(300);
         Assert.Equal(300.1, shifted.Words[0].Start, 6);
@@ -156,13 +165,37 @@ public sealed class WhisperServerTranscriberTests
     [Fact]
     public async Task Segment_scores_feed_the_hallucination_filter_unchanged()
     {
-        const string body = """{"segments":[{"text":" Thanks.","start":1,"end":2,"words":[],"avg_logprob":-1.2,"no_speech_prob":0.8}]}""";
+        // The real server divides the text tokens' log probabilities by ALL tokens including special and timestamp ones, so a short
+        // segment's avg_logprob arrives diluted (-0.72 here for a true mean of -1.2). The client must use the words' probabilities.
+        var p = Math.Exp(-1.2).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        var body = "{\"segments\":[{\"text\":\" Thank you.\",\"start\":1,\"end\":2,\"words\":["
+            + "{\"word\":\" Thank\",\"start\":1,\"end\":1.4,\"t_dtw\":-1,\"probability\":" + p + "},"
+            + "{\"word\":\" you.\",\"start\":1.4,\"end\":2,\"t_dtw\":-1,\"probability\":" + p + "}],"
+            + "\"avg_logprob\":-0.72,\"no_speech_prob\":0.8}]}";
         var o = AnalysisConfigLoader.Load(Path.Combine(AppContext.BaseDirectory, "config", "analysis", "analysis.json")).Config.Transcription;
 
         var segments = await Make(Ok(body)).TranscribeAsync(Request(), CancellationToken.None);
 
+        Assert.Equal(-1.2, Assert.Single(segments).AvgLogProb, 3);
         var reasons = TranscriptFilter.Reasons([.. segments.Select(s => (s.Text, s.NoSpeechProb, s.AvgLogProb))], o);
         Assert.Equal(TranscriptFilter.NoSpeech, Assert.Single(reasons));
+    }
+
+    [Fact]
+    public async Task A_segment_with_no_text_words_has_zero_avg_logprob_and_does_not_divide_by_zero()
+    {
+        const string body = """
+            {"segments":[
+             {"text":" x","start":0,"end":1,"words":[{"word":"[_TT_50]","start":0,"end":0,"t_dtw":-1,"probability":0.5},{"word":"<|endoftext|>","start":1,"end":1,"t_dtw":-1,"probability":0.5}],"avg_logprob":-0.4,"no_speech_prob":0.1},
+             {"text":" y","start":1,"end":2,"words":[],"avg_logprob":-0.4,"no_speech_prob":0.1},
+             {"text":" z","start":2,"end":3,"avg_logprob":-0.4,"no_speech_prob":0.1}]}
+            """;
+
+        var segments = await Make(Ok(body)).TranscribeAsync(Request(), CancellationToken.None);
+
+        Assert.Equal(3, segments.Count);
+        Assert.All(segments, s => Assert.Equal(0, s.AvgLogProb));
+        Assert.All(segments, s => Assert.Empty(s.Words));
     }
 
     [Fact]
@@ -235,7 +268,7 @@ public sealed class WhisperServerTranscriberTests
 
         var segments = await Make(handler).TranscribeAsync(Request(), CancellationToken.None);
 
-        Assert.Single(segments);
+        Assert.Equal(2, segments.Count);
         Assert.Equal(3, handler.Calls);
     }
 
@@ -587,7 +620,17 @@ public sealed class WhisperServerTranscriberTests
     // ---- the client ----
 
     [Fact]
-    public void The_http_client_does_not_follow_redirects_or_use_a_proxy_and_waits_at_least_ten_minutes()
+    public void The_handler_does_not_follow_redirects_or_use_a_proxy_and_follows_dns_changes()
+    {
+        using var handler = WhisperServerTranscriber.CreateHandler();
+
+        Assert.False(handler.AllowAutoRedirect);
+        Assert.False(handler.UseProxy);
+        Assert.Equal(TimeSpan.FromMinutes(5), handler.PooledConnectionLifetime);
+    }
+
+    [Fact]
+    public void The_http_client_waits_at_least_ten_minutes()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => WhisperServerTranscriber.CreateHttpClient(TimeSpan.FromMinutes(9)));
 
@@ -615,7 +658,8 @@ public sealed class WhisperServerTranscriberTests
         Assert.Equal("verbose_json", seen.Fields["response_format"]);
         Assert.Equal("Um, er, Burst Radio.", seen.Fields["prompt"]);
         Assert.Equal("Bearer tok", seen.Authorization);
-        Assert.Equal("Um, hello and welcome.", Assert.Single(segments).Text);
+        Assert.Equal("Um, hello and welcome.", segments[0].Text);
+        Assert.Equal(2, segments.Count);
     }
 
     [Fact]
@@ -720,6 +764,98 @@ public sealed class WhisperServerTranscriberTests
 
         Assert.Equal(2, server.Requests);
         Assert.Equal(1, server.MaxInFlight);
+    }
+
+    // ---- a failed whisper_full on the server (GPU contention) ----
+
+    const string ProcessFailureBody = "{\"error\":\"failed to process audio\"}";
+
+    static HttpResponseMessage ProcessFailure() =>
+        new(HttpStatusCode.InternalServerError) { Content = new StringContent(ProcessFailureBody, System.Text.Encoding.UTF8, "application/json") };
+
+    [Fact]
+    public async Task Failed_to_process_audio_is_transient_after_the_retries_like_a_busy_gpu()
+    {
+        var handler = new StubHttpHandler(_ => ProcessFailure());
+
+        var ex = await Assert.ThrowsAsync<TransientTranscriptionException>(() => Make(handler, Options(retries: 2)).TranscribeAsync(Request(), CancellationToken.None));
+
+        Assert.Equal(3, handler.Calls);
+        Assert.Contains("failed to process audio", ex.Message);
+    }
+
+    [Fact]
+    public async Task The_same_chunk_failing_to_process_more_than_the_cap_becomes_a_counted_failure()
+    {
+        var handler = new StubHttpHandler(_ => ProcessFailure());
+        var t = Make(handler, Options(retries: 0) with { MaxProcessFailures = 3 });
+        var chunk = Request();
+
+        for (var i = 0; i < 3; i++)
+            await Assert.ThrowsAsync<TransientTranscriptionException>(() => t.TranscribeAsync(chunk, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<TranscriptionFailedException>(() => t.TranscribeAsync(chunk, CancellationToken.None));
+
+        Assert.Contains("4 times", ex.Message);
+        Assert.Contains("WAA_WHISPER_MAX_PROCESS_FAILURES", ex.Message);
+    }
+
+    [Fact]
+    public async Task The_failure_count_is_per_chunk_and_a_success_clears_it()
+    {
+        var failing = true;
+        var handler = new StubHttpHandler(_ => failing ? ProcessFailure() : StubHttpHandler.Json(StubWhisperServer.CannedJson));
+        var t = Make(handler, Options(retries: 0) with { MaxProcessFailures = 2 });
+        var a = Request("a");
+        var b = new TranscriptionRequest(WavFile.Build(16000, 1, new byte[6400]), "b", "en");
+
+        await Assert.ThrowsAsync<TransientTranscriptionException>(() => t.TranscribeAsync(a, CancellationToken.None));
+        await Assert.ThrowsAsync<TransientTranscriptionException>(() => t.TranscribeAsync(a, CancellationToken.None));
+        await Assert.ThrowsAsync<TransientTranscriptionException>(() => t.TranscribeAsync(b, CancellationToken.None)); // another chunk starts at 1
+        failing = false;
+        await t.TranscribeAsync(a, CancellationToken.None); // success clears a
+        failing = true;
+        await Assert.ThrowsAsync<TransientTranscriptionException>(() => t.TranscribeAsync(a, CancellationToken.None));
+        await Assert.ThrowsAsync<TransientTranscriptionException>(() => t.TranscribeAsync(a, CancellationToken.None));
+        await Assert.ThrowsAsync<TranscriptionFailedException>(() => t.TranscribeAsync(a, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_500_with_another_body_never_counts_toward_the_process_failure_cap_and_stays_counted_after_the_retries()
+    {
+        var handler = new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("{\"error\":\"something else\"}") });
+        var t = Make(handler, Options(retries: 1) with { MaxProcessFailures = 1 });
+
+        await Assert.ThrowsAsync<TranscriptionFailedException>(() => t.TranscribeAsync(Request(), CancellationToken.None));
+        await Assert.ThrowsAsync<TranscriptionFailedException>(() => t.TranscribeAsync(Request(), CancellationToken.None));
+
+        Assert.Equal(4, handler.Calls);
+    }
+
+    // ---- minors ----
+
+    [Fact]
+    public async Task A_url_with_a_path_prefix_and_no_trailing_slash_keeps_the_prefix()
+    {
+        var handler = Ok();
+
+        await Make(handler, Options(new Uri("http://127.0.0.1:9/whisper"))).TranscribeAsync(Request(), CancellationToken.None);
+        await Make(handler, Options(new Uri("http://127.0.0.1:9/whisper"))).IsReadyAsync(CancellationToken.None);
+
+        Assert.Equal(["/whisper/inference", "/whisper/health"], handler.Seen.Select(s => s.Path));
+    }
+
+    [Fact]
+    public async Task A_cancellation_that_surfaces_as_an_io_error_on_the_last_retry_is_a_cancellation()
+    {
+        using var cts = new CancellationTokenSource();
+        var handler = new StubHttpHandler(async (_, _) =>
+        {
+            await cts.CancelAsync();
+            throw new IOException("the connection was closed");
+        });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Make(handler, Options(retries: 0)).TranscribeAsync(Request(), cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Make(handler, Options(retries: 0)).IsReadyAsync(cts.Token));
     }
 
     // ---- the version key ----

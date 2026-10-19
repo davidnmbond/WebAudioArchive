@@ -5,7 +5,8 @@ namespace WebAudioArchive.Analysis.Transcription;
 
 /// <summary>
 /// Reads whisper.cpp's server <c>verbose_json</c> (v1.9.5, measured in the D19 spike) into <see cref="RawSegment"/>s:
-/// <c>segments[]</c> with <c>start</c>, <c>end</c>, <c>text</c>, <c>avg_logprob</c>, <c>no_speech_prob</c> and <c>words[]</c>,
+/// <c>segments[]</c> with <c>start</c>, <c>end</c>, <c>text</c>, <c>no_speech_prob</c>, <c>avg_logprob</c> (read only to check it is there:
+/// the mean log probability is recomputed from the words, see <see cref="WhisperResponse.AverageLogProbability"/>) and <c>words[]</c>,
 /// which are whisper tokens (<c>word</c> with a leading space starts a word, <c>start</c> and <c>end</c> in seconds,
 /// <c>t_dtw</c> in centiseconds or -1, <c>probability</c>). <see cref="WhisperResponse.MergeTokens"/> merges the tokens into
 /// words exactly as it did for Whisper.net; the scores feed <see cref="TranscriptFilter"/> unchanged. Times are seconds from
@@ -63,13 +64,16 @@ public static class WhisperServerResponse
                     }
                 }
 
-                if (!complete) withoutWords++;
-                result.Add(new RawSegment(start, end, text, Math.Round(noSpeech ?? 0, 4), Math.Round(avgLogProb ?? 0, 4), WhisperResponse.MergeTokens(tokens)));
+                // A segment of only special tokens (for example [BLANK_AUDIO]) has no words in the real server's answer: not a defect.
+                if (!complete && !IsAnnotation(text)) withoutWords++;
+                result.Add(new RawSegment(start, end, text, Math.Round(noSpeech ?? 0, 4), Math.Round(WhisperResponse.AverageLogProbability(tokens), 4), WhisperResponse.MergeTokens(tokens)));
             }
 
             return new WhisperServerResult(result, withoutScores, withoutWords);
         }
     }
+
+    static bool IsAnnotation(string text) => text.Length == 0 || (text.Length >= 2 && ((text[0] == '[' && text[^1] == ']') || (text[0] == '(' && text[^1] == ')')));
 
     static double? Number(JsonElement o, string name) =>
         o.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) && double.IsFinite(d) ? d : null;

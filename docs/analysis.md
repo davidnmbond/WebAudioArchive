@@ -24,13 +24,14 @@ unchanged, `response_format=verbose_json`, `language`, `prompt`, `carry_initial_
 |---|---|
 | connection refused, DNS failure, reset, timeout, 502, 503 (also while the model loads), 504 | retried with backoff, then the job waits (no attempt used); `/healthz` goes `paused`, then `catching-up` |
 | 500 whose body mentions memory or CUDA | the same (transient) |
-| any other 500, 4xx, a redirect, a body that is not the expected JSON, an answer over 32 MB | the chunk fails with a clear message (an attempt is used) |
+| 500 `{"error":"failed to process audio"}` (the server's `whisper_full` failed, usually a busy shared GPU) | the same (transient), until the SAME chunk has done it more than `WAA_WHISPER_MAX_PROCESS_FAILURES` times (default 10, counted per chunk in memory, cleared by a success or a restart); then the chunk fails (an attempt is used) |
+| any other 500 (after the retries), 4xx, a redirect, a body that is not the expected JSON, an answer over 32 MB | the chunk fails with a clear message (an attempt is used) |
 | the service is stopping | the request is aborted at once and no attempt is used |
 
 The client never follows a redirect (a 307 would resend the audio to another host), uses no proxy, and logs no audio,
 transcript text or token. `GET /health` is the readiness check (10 s). `/healthz` shows `whisperReady` and `whisperUrl`
 (scheme, host and port only). Transcripts made by the retired in-process engine (`whisper.net 1`) stay current: the
-engine, model and device are not part of the job version, so the switch re-transcribes nothing.
+the engine family (`whisper.cpp`; a stored `whisper.net 1` counts as equal) and the transcript options are the job version, while the model, the server and the device are not, so the switch re-transcribes nothing. The segment `avg_logprob` is the mean of ln(probability) over the segment's words, recomputed by the client: the server divides by all tokens including special ones, which makes short segments look about 40 percent more confident and would stop the hallucination filter's rule from firing.
 
 ### Live contract check (manual, never in CI)
 
@@ -85,7 +86,8 @@ Environment variables (compose sets the defaults):
 | `WAA_WHISPER_LANGUAGE` | the language in `analysis.json` (`en`) | override only |
 | `WAA_WHISPER_TIMEOUT_MINUTES` | 10 (10 to 240) | per request. A 300 s chunk takes 11 to 16 s on an RTX 3060, a whole hour 127 s, so 10 minutes leaves room for a slower or shared GPU |
 | `WAA_WHISPER_CONCURRENCY` | 1 (1 to 16) | requests in flight; the server handles one at a time, so more helps only with several servers behind a load balancer |
-| `WAA_WHISPER_RETRIES` | 3 (0 to 10) | retries inside one chunk (2, 4, 8 s, then 16 s, at most 30 s, with jitter) for a connection error, 502, 503, 504, a timeout or a 500 before the job waits |
+| `WAA_WHISPER_RETRIES` | 3 (0 to 10) | retries inside one chunk (2, 4, 8 s, then 16 s, at most 30 s, with jitter) for a connection error, 502, 503, 504, a timeout, a memory or CUDA 500 or a "failed to process audio" 500 before the job waits (no attempt used); any other 500 is retried too but then fails the chunk (an attempt is used) |
+| `WAA_WHISPER_MAX_PROCESS_FAILURES` | 10 (1 to 1000) | how often the same chunk may end in the server's "failed to process audio" answer before that counts as a failed attempt, so a chunk the server can never process is eventually parked while a busy GPU never parks a segment |
 | `WAA_WHISPER_TOKEN` | none | optional bearer token sent as `Authorization: Bearer`; never logged or shown in an error (issue #112) |
 
 The old in-process settings `WAA_WHISPER_MODEL_PATH`, `WAA_WHISPER_DEVICE`, `WAA_WHISPER_THREADS` and `WAA_WHISPER_DTW` are gone: setting one
@@ -206,3 +208,6 @@ The web app shows analysis only when its service has `WAA_ANALYSIS` and a read-o
   at most) and shows (the analysis and the enrichment, with LLM-derived names). The analysis `/healthz` on `127.0.0.1:8095` shows last-error
   strings. The spec 3.8 requirement of no separate API surface needs plan 4a coverage.
 - The first catch-up runs newest first, so lag stays above the alarm for days; `catching-up` is the status for it.
+- Changing `WAA_WHISPER_LANGUAGE` does not invalidate existing transcripts: the job version holds the language of `analysis.json`, not this override. Re-transcribe with `WAA_RETRANSCRIBE` or by changing the transcript options.
+- A proxy in front of the server that answers 408, 429 or an HTML 200 makes the chunk fail at once and uses an attempt (only connection errors, 502, 503, 504, timeouts and the GPU errors above wait).
+- A request that always times out is retried for ever: a timeout is transient and uses no attempt (plan-mandated). Each try can hold the server's GPU for the whole `WAA_WHISPER_TIMEOUT_MINUTES`, so watch `/healthz` and the server if one chunk keeps timing out.

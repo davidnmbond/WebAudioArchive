@@ -31,6 +31,7 @@ public sealed class WhisperServerSettingsTests : IDisposable
         Assert.Equal(TimeSpan.FromMinutes(10), w.Timeout);
         Assert.Equal(1, w.Concurrency);
         Assert.Equal(3, w.Retries);
+        Assert.Equal(10, w.MaxProcessFailures);
         Assert.Null(w.Token);
     }
 
@@ -44,6 +45,7 @@ public sealed class WhisperServerSettingsTests : IDisposable
             ("WAA_WHISPER_TIMEOUT_MINUTES", "30"),
             ("WAA_WHISPER_CONCURRENCY", "2"),
             ("WAA_WHISPER_RETRIES", "5"),
+            ("WAA_WHISPER_MAX_PROCESS_FAILURES", "25"),
             ("WAA_WHISPER_TOKEN", "abc.DEF-123"))).WhisperServer!;
 
         Assert.Equal("ggml-base.en", w.Model);
@@ -51,6 +53,7 @@ public sealed class WhisperServerSettingsTests : IDisposable
         Assert.Equal(TimeSpan.FromMinutes(30), w.Timeout);
         Assert.Equal(2, w.Concurrency);
         Assert.Equal(5, w.Retries);
+        Assert.Equal(25, w.MaxProcessFailures);
         Assert.Equal("abc.DEF-123", w.Token);
     }
 
@@ -105,6 +108,8 @@ public sealed class WhisperServerSettingsTests : IDisposable
     [InlineData("WAA_WHISPER_CONCURRENCY", "17", "WAA_WHISPER_CONCURRENCY")]
     [InlineData("WAA_WHISPER_RETRIES", "-1", "WAA_WHISPER_RETRIES")]
     [InlineData("WAA_WHISPER_RETRIES", "50", "WAA_WHISPER_RETRIES")]
+    [InlineData("WAA_WHISPER_MAX_PROCESS_FAILURES", "0", "WAA_WHISPER_MAX_PROCESS_FAILURES")]
+    [InlineData("WAA_WHISPER_MAX_PROCESS_FAILURES", "1001", "WAA_WHISPER_MAX_PROCESS_FAILURES")]
     [InlineData("WAA_WHISPER_LANGUAGE", "english please", "WAA_WHISPER_LANGUAGE")]
     [InlineData("WAA_WHISPER_MODEL", "a/b", "WAA_WHISPER_MODEL")]
     [InlineData("WAA_WHISPER_TOKEN", "has space", "WAA_WHISPER_TOKEN")]
@@ -115,6 +120,14 @@ public sealed class WhisperServerSettingsTests : IDisposable
 
         Assert.Contains(expected, ex.Message);
         if (name == "WAA_WHISPER_TOKEN") Assert.DoesNotContain(value, ex.Message);
+    }
+
+    [Fact]
+    public void A_path_prefix_gets_a_trailing_slash_so_it_is_not_lost()
+    {
+        Assert.Equal("/whisper/", AnalysisSettings.Load(Env(("WAA_WHISPER_URL", "http://127.0.0.1:8080/whisper"))).WhisperServer.BaseUrl.AbsolutePath);
+        Assert.Equal("/whisper/", AnalysisSettings.Load(Env(("WAA_WHISPER_URL", "http://127.0.0.1:8080/whisper/"))).WhisperServer.BaseUrl.AbsolutePath);
+        Assert.Equal("/", AnalysisSettings.Load(Env(("WAA_WHISPER_URL", "http://127.0.0.1:8080"))).WhisperServer.BaseUrl.AbsolutePath);
     }
 
     [Fact]

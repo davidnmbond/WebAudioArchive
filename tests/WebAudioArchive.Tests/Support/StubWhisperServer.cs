@@ -15,19 +15,22 @@ namespace WebAudioArchive.Tests.Support;
 /// </summary>
 public sealed class StubWhisperServer : IAsyncDisposable
 {
-    /// <summary>The shape measured in the D19 spike (whisper.cpp v1.9.5 verbose_json), with synthetic text.</summary>
+    /// <summary>
+    /// The shape measured in the D19 spike (whisper.cpp v1.9.5 verbose_json), with synthetic text. Like the real server it drops special
+    /// and timestamp tokens (id at or above eot) from "words", and a segment with only special tokens has no "words" key at all.
+    /// </summary>
     public const string CannedJson = """
         {"task":"transcribe","language":"english","duration":6.0,"text":" Um, hello and welcome.","segments":[
          {"id":0,"text":" Um, hello and welcome.","start":0,"end":3.5,"tokens":[1,2,3],
-          "words":[{"word":"[_BEG_]","start":0,"end":0,"t_dtw":-1,"probability":0.9},
-                   {"word":" Um","start":0.1,"end":0.3,"t_dtw":-1,"probability":0.8},
+          "words":[{"word":" Um","start":0.1,"end":0.3,"t_dtw":-1,"probability":0.8},
                    {"word":",","start":0.3,"end":0.32,"t_dtw":-1,"probability":0.95},
                    {"word":" hello","start":0.5,"end":0.9,"t_dtw":-1,"probability":0.97},
                    {"word":" and","start":0.9,"end":1.0,"t_dtw":-1,"probability":0.99},
                    {"word":" wel","start":1.1,"end":1.3,"t_dtw":-1,"probability":0.9},
                    {"word":"come","start":1.3,"end":1.6,"t_dtw":-1,"probability":0.7},
                    {"word":".","start":1.6,"end":1.62,"t_dtw":-1,"probability":0.9}],
-          "temperature":0,"avg_logprob":-0.159,"no_speech_prob":9.4e-11}]}
+          "temperature":0,"avg_logprob":-0.159,"no_speech_prob":9.4e-11},
+         {"id":1,"text":" [BLANK_AUDIO]","start":3.5,"end":6,"tokens":[50257,50365],"temperature":0,"avg_logprob":-0.05,"no_speech_prob":0.9}]}
         """;
 
     readonly WebApplication _app;

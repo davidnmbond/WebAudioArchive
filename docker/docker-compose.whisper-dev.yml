@@ -19,7 +19,8 @@ name: waa-whisper-dev
 services:
   whisper:
     # The v1.9.5 release commit (decision D19). The image's entrypoint is "bash -c", so the server command is one string.
-    image: ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037
+    # The digest is the registry's answer for this tag (checked 2026-10-18 against the GHCR manifest), so a moved tag cannot change the image.
+    image: ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037@sha256:24f8c99e826de7b1f4fa76406fed87626a8322c880ea4cd15bd339a3c0d42c3a
     container_name: waa-whisper-dev
     restart: "no"
     # No --convert (the client sends WAV, so no ffmpeg and no temporary files) and no --print-realtime (keeps transcript text out of the log).

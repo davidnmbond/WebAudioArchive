@@ -39,6 +39,27 @@ public static class WhisperResponse
         return words;
     }
 
+    /// <summary>
+    /// The mean of ln(probability) over the segment's text tokens (special and timestamp tokens and empty ones left out), 0 when there
+    /// are none. This is the figure <see cref="TranscriptFilter"/> was tuned on (the in-process engine's definition). whisper.cpp's
+    /// server reports its own avg_logprob, but divides by all tokens including the special ones, so short segments arrive about
+    /// 40 percent too close to 0 and the filter's MinAvgLogProb rule would stop firing; the client therefore recomputes it.
+    /// </summary>
+    public static double AverageLogProbability(IEnumerable<Token> tokens)
+    {
+        double sum = 0;
+        var n = 0;
+        foreach (var t in tokens)
+        {
+            var trimmed = t.Text.Trim();
+            if (trimmed.Length == 0 || IsSpecial(trimmed)) continue;
+            sum += Math.Log(Math.Max(t.Probability, 1e-10));
+            n++;
+        }
+
+        return n == 0 ? 0 : sum / n;
+    }
+
     static bool IsSpecial(string s) =>
         (s.StartsWith("[_", StringComparison.Ordinal) && s.EndsWith(']')) || (s.StartsWith("<|", StringComparison.Ordinal) && s.EndsWith("|>", StringComparison.Ordinal));
 }

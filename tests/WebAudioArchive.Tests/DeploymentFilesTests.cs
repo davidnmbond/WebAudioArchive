@@ -126,7 +126,7 @@ public class DeploymentFilesTests
         Assert.Matches("(?m)^name: waa-whisper-dev$", text);
         Assert.Equal(new[] { "whisper" }, services.Keys.Order(StringComparer.Ordinal));
         var whisper = Code(services["whisper"]);
-        Assert.Contains("image: ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037", whisper);
+        Assert.Contains("image: ghcr.io/ggml-org/whisper.cpp:main-cuda-d1be6fde11ac6e0407606b4e42fe72d34add8037@sha256:24f8c99e826de7b1f4fa76406fed87626a8322c880ea4cd15bd339a3c0d42c3a", whisper);
         Assert.Contains("\"127.0.0.1:8178:8080\"", whisper);
         foreach (var port in whisper.Split('\n').Where(l => l.Contains(":8080\"", StringComparison.Ordinal)))
             Assert.Contains("127.0.0.1:", port);

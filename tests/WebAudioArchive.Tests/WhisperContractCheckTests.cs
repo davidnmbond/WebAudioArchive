@@ -32,7 +32,7 @@ public sealed class WhisperContractCheckTests
 
         Assert.Equal(0, code);
         Assert.Contains("PASS", output);
-        Assert.Contains("1 segments", output);
+        Assert.Contains("2 segments", output);
         var seen = Assert.Single(server.Seen);
         Assert.Equal("chunk.wav", seen.FileName);
         Assert.True(seen.File!.Length > 600_000, "the synthetic clip is 20 s of 16 kHz mono 16-bit audio");

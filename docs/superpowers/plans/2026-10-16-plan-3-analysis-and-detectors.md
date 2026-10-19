@@ -11724,6 +11724,17 @@ use `docker/docker-compose.gpu.yml` or download models into `models/`, Tasks 21 
 > (5) whisper.cpp v1.9.5 reports no device and no model, so `Device` is `remote` unless `/health` carries a `device` field, and the model
 > is the configured name; (6) the request body is parsed with `System.Text.Json` into `WhisperServerResponse`, size limited to 32 MB.
 > Until Task 21 an unset `WAA_WHISPER_URL` still selects the in-process engine.
+>
+> **Fix round 1 (2026-10-18, reviewer findings).** (1) `avg_logprob` is no longer taken from the server: whisper.cpp v1.9.5 divides
+> the text tokens' log probabilities by all tokens (special and timestamp ones too), so short segments arrive diluted and the
+> `MinAvgLogProb` rule stopped firing. The client recomputes it as the mean of ln(probability) over the non-special tokens
+> (`WhisperResponse.AverageLogProbability`, the old Whisper.net definition; 0 when there are none). (2) A 500
+> `{"error":"failed to process audio"}` (server.cpp, `whisper_full` failed, GPU contention) is transient and uses no attempt, until the
+> same chunk (hash of its audio, in memory per process) has done it more than `WAA_WHISPER_MAX_PROCESS_FAILURES` times (default 10),
+> then it is a counted failure; any other 500 stays counted after the retries. I did not add a health check to the classification: the
+> failure is treated as transient whatever `/health` says, because the cap already bounds it. Minors: a base URL with a path prefix gets
+> a trailing slash; a cancellation surfacing as an IO error is a cancellation; the stub server drops special tokens like the real one;
+> the dev compose image is pinned by digest (checked against the GHCR manifest); docs and the Limits list corrected.
 
 **Files:**
 - Create: `src/WebAudioArchive.Analysis/Transcription/WhisperServerTranscriber.cs`, `src/WebAudioArchive.Analysis/Transcription/WhisperServerResponse.cs`

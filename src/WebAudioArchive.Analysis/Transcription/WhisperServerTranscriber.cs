@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using WebAudioArchive.Analysis.Enrichment;
@@ -17,6 +18,9 @@ public sealed record WhisperServerOptions(Uri BaseUrl, string Model, string? Lan
 {
     /// <summary>The largest answer read (a 300 s chunk is well under 1 MB of verbose_json).</summary>
     public int MaxResponseBytes { get; init; } = 32 * 1024 * 1024;
+
+    /// <summary>How many times the same chunk may end in the server's "failed to process audio" answer (a failed whisper_full, usually a busy GPU) before it counts as a failed attempt.</summary>
+    public int MaxProcessFailures { get; init; } = 10;
 
     /// <summary>How long the readiness check (GET /health) may take.</summary>
     public TimeSpan ReadyTimeout { get; init; } = TimeSpan.FromSeconds(10);
@@ -51,6 +55,13 @@ public sealed class WhisperServerTranscriber : ITranscriber
     readonly Func<double> _jitter;
     readonly SemaphoreSlim _gate;
     readonly string _host;
+    readonly Uri _baseUrl;
+    readonly object _processFailuresLock = new();
+    readonly Dictionary<string, int> _processFailures = [];
+    readonly Queue<string> _processFailureOrder = new();
+
+    /// <summary>The most chunks remembered by the process-failure counter (oldest forgotten first).</summary>
+    const int MaxRememberedChunks = 512;
     volatile string _device = "remote";
 
     public WhisperServerTranscriber(HttpClient http, WhisperServerOptions options, ILogger? log = null,
@@ -63,6 +74,7 @@ public sealed class WhisperServerTranscriber : ITranscriber
         _jitter = jitter ?? Random.Shared.NextDouble;
         _gate = new SemaphoreSlim(Math.Max(1, options.Concurrency));
         _host = $"{options.BaseUrl.Host}:{options.BaseUrl.Port}";
+        _baseUrl = WithTrailingSlash(options.BaseUrl);
     }
 
     /// <summary>For information, recorded in the transcript: the engine and the server's host and port (never the path or any user info).</summary>
@@ -88,9 +100,12 @@ public sealed class WhisperServerTranscriber : ITranscriber
     {
         if (timeout < OllamaClient.MinTimeout)
             throw new ArgumentOutOfRangeException(nameof(timeout), timeout, $"the whisper timeout must be at least {OllamaClient.MinTimeout.TotalMinutes:0} minutes");
-        var handler = new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false, PooledConnectionLifetime = TimeSpan.FromMinutes(5) };
-        return new HttpClient(handler) { Timeout = timeout + TimeSpan.FromMinutes(1) };
+        return new HttpClient(CreateHandler()) { Timeout = timeout + TimeSpan.FromMinutes(1) };
     }
+
+    /// <summary>The handler behind <see cref="CreateHttpClient"/>: no redirects, no proxy, pooled connections that follow DNS changes.</summary>
+    internal static SocketsHttpHandler CreateHandler() =>
+        new() { AllowAutoRedirect = false, UseProxy = false, PooledConnectionLifetime = TimeSpan.FromMinutes(5) };
 
     /// <summary>2 s, 4 s, 8 s, 16 s, capped at 30 s, plus up to a quarter of that again as jitter (<paramref name="jitter01"/> from 0 to 1).</summary>
     public static TimeSpan Backoff(int retry, double jitter01)
@@ -99,7 +114,11 @@ public sealed class WhisperServerTranscriber : ITranscriber
         return TimeSpan.FromSeconds(Math.Min(MaxBackoff.TotalSeconds, seconds * (1 + 0.25 * Math.Clamp(jitter01, 0, 1))));
     }
 
-    Uri Url(string path) => new(_options.BaseUrl, path);
+    /// <summary>A base URL with a path prefix and no trailing slash would lose the prefix when a relative path is added; "http://h/whisper" becomes "http://h/whisper/".</summary>
+    public static Uri WithTrailingSlash(Uri url) =>
+        url.AbsolutePath.EndsWith('/') ? url : new UriBuilder(url) { Path = url.AbsolutePath + "/" }.Uri;
+
+    Uri Url(string path) => new(_baseUrl, path);
 
     public async Task<bool> IsReadyAsync(CancellationToken ct)
     {
@@ -132,6 +151,7 @@ public sealed class WhisperServerTranscriber : ITranscriber
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or ResponseTooLargeException)
         {
+            ct.ThrowIfCancellationRequested();
             LastError = $"the whisper server at {_host} is not reachable: {Describe(ex)}";
             return false;
         }
@@ -163,13 +183,19 @@ public sealed class WhisperServerTranscriber : ITranscriber
         await _gate.WaitAsync(ct);
         try
         {
+            var chunk = Convert.ToHexString(SHA256.HashData(request.Wav));
             for (var retry = 0; ; retry++)
             {
                 ct.ThrowIfCancellationRequested();
                 var (result, failure) = await AttemptAsync(request, ct);
-                if (result is not null) return result;
+                if (result is not null)
+                {
+                    ForgetProcessFailures(chunk);
+                    return result;
+                }
+
                 if (failure!.Final is { } final) throw final;
-                if (retry >= _options.Retries) throw failure.AfterRetries();
+                if (retry >= _options.Retries) throw failure.ProcessFailure ? ProcessFailureAfterRetries(chunk, failure) : failure.AfterRetries();
 
                 var wait = Backoff(retry + 1, _jitter());
                 _log?.LogWarning("The whisper server at {Host} failed ({Reason}); retry {Retry} of {Max} in {Seconds:0.#} s", _host, failure.Reason, retry + 1, _options.Retries, wait.TotalSeconds);
@@ -182,11 +208,46 @@ public sealed class WhisperServerTranscriber : ITranscriber
         }
     }
 
-    sealed record Failure(string Reason, Exception? Final, bool Transient, bool MemoryError = false)
+    sealed record Failure(string Reason, Exception? Final, bool Transient, bool MemoryError = false, bool ProcessFailure = false)
     {
         public Exception AfterRetries() => Transient || MemoryError
             ? new TransientTranscriptionException($"the whisper server is not available: {Reason}")
             : new TranscriptionFailedException($"the whisper server could not transcribe this chunk: {Reason}");
+    }
+
+    /// <summary>
+    /// The server answered 500 {"error":"failed to process audio"}: whisper_full failed, which on a GPU shared with Ollama usually
+    /// means contention, not a bad chunk. That waits (transient, no attempt used). The same chunk failing this way more than
+    /// WAA_WHISPER_MAX_PROCESS_FAILURES times (counted per chunk, by the hash of its audio, in memory: it starts again after a restart
+    /// and a success clears it) becomes a counted failure so a chunk that can never be processed is eventually parked.
+    /// </summary>
+    Exception ProcessFailureAfterRetries(string chunk, Failure failure)
+    {
+        int count;
+        lock (_processFailuresLock)
+        {
+            count = _processFailures.GetValueOrDefault(chunk) + 1;
+            if (!_processFailures.ContainsKey(chunk))
+            {
+                _processFailureOrder.Enqueue(chunk);
+                while (_processFailureOrder.Count > MaxRememberedChunks) _processFailures.Remove(_processFailureOrder.Dequeue());
+            }
+
+            _processFailures[chunk] = count;
+        }
+
+        if (count > _options.MaxProcessFailures)
+        {
+            return new TranscriptionFailedException(
+                $"the whisper server at {_host} failed to process the audio of this chunk {count} times (answer: failed to process audio), so it is treated as a bad chunk. Raise WAA_WHISPER_MAX_PROCESS_FAILURES if the GPU is only busy");
+        }
+
+        return failure.AfterRetries();
+    }
+
+    void ForgetProcessFailures(string chunk)
+    {
+        lock (_processFailuresLock) _processFailures.Remove(chunk);
     }
 
     MultipartFormDataContent Build(TranscriptionRequest request)
@@ -248,6 +309,8 @@ public sealed class WhisperServerTranscriber : ITranscriber
                 return (null, new Failure($"{_host} answered {status}{(excerpt.Length > 0 ? ": " + excerpt : "")}", Final: null, Transient: true));
             if (status >= 500)
             {
+                if (body.Contains("failed to process audio", StringComparison.OrdinalIgnoreCase))
+                    return (null, new Failure($"{_host} answered {status}: {excerpt}", Final: null, Transient: true, ProcessFailure: true));
                 var memory = MemoryMarkers.Any(m => body.Contains(m, StringComparison.OrdinalIgnoreCase));
                 return (null, new Failure($"{_host} answered {status}{(excerpt.Length > 0 ? ": " + excerpt : "")}", Final: null, Transient: false, MemoryError: memory));
             }
@@ -268,6 +331,7 @@ public sealed class WhisperServerTranscriber : ITranscriber
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException)
         {
+            ct.ThrowIfCancellationRequested(); // a caller's cancellation can surface as an IO error: it is a cancellation, never "unavailable"
             return (null, new Failure($"{_host} is not reachable: {Describe(ex)}", null, Transient: true));
         }
     }
