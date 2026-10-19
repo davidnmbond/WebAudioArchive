@@ -105,19 +105,57 @@ public sealed class ConsolidatorHostTests : IDisposable
 
     static DateTimeOffset Utc(JsonElement e) => DateTimeOffset.Parse(e.GetString()!, System.Globalization.CultureInfo.InvariantCulture);
 
+    static void AnalysisState(string analysisRoot, string jobId, string status)
+    {
+        var dir = new AnalysisPaths(analysisRoot, "burst").SegmentDir(jobId);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, AnalysisPaths.StateFile), $$"""{"status":"{{status}}"}""");
+    }
+
+    [Fact]
+    public void The_consolidator_refuses_to_start_when_its_analysis_folder_does_not_exist()
+    {
+        Record();
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["WAA_STATION"] = "burst",
+            ["WAA_SOURCES"] = $"a={Root("a")},b={Root("b")}",
+            ["WAA_MERGED"] = MergedRoot,
+            ["WAA_ANALYSIS"] = Path.Combine(_root, "no-analysis-here"),
+        });
+        builder.WebHost.UseTestServer();
+
+        // The recorders and the merged root exist, so the data error (exit code 3) can only be the analysis folder.
+        var (app, exitCode) = ConsolidatorHost.Build(builder);
+        Assert.Null(app);
+        Assert.Equal(3, exitCode);
+    }
+
+    [Fact]
+    public async Task A_running_fill_in_job_on_b_holds_the_hour_back_and_healthz_names_the_oldest_waiting_hour()
+    {
+        Record();
+        var analysis = Path.Combine(_root, "analysis");
+        foreach (var start in Starts) AnalysisState(analysis, $"a/2026/10-15/{start:HHmmss}", JobStatus.Done);
+        AnalysisState(analysis, $"b/2026/10-15/{T0:HHmmss}", JobStatus.Running);
+
+        await using var factory = Host("merge", new ManualClock(Now), analysis);
+        var (client, _) = await StartAsync(factory);
+
+        Assert.True(File.Exists(MergedMp3(T0.AddHours(-1))));
+        Assert.False(File.Exists(MergedMp3(T0)), "B's 10:00 segment is still being analysed");
+        var health = await Healthz(client);
+        Assert.Equal(T0, Utc(health.GetProperty("oldestWaitingHourUtc")));
+    }
+
     [Fact]
     public async Task In_merge_mode_an_eligible_hour_is_merged_and_nothing_moves()
     {
         Record();
         var analysis = Path.Combine(_root, "analysis");
-        var paths = new AnalysisPaths(analysis, "burst");
-        foreach (var id in new[] { "a", "b" })
-            foreach (var start in Starts.Take(2))
-            {
-                var dir = paths.SegmentDir($"{id}/2026/10-15/{start:HHmmss}");
-                Directory.CreateDirectory(dir);
-                File.WriteAllText(Path.Combine(dir, AnalysisPaths.StateFile), $$"""{"status":"{{JobStatus.Done}}"}""");
-            }
+        // As deployed: analysis queues only the preferred recorder (A); B has no state at all where A covers it.
+        foreach (var start in Starts.Take(2)) AnalysisState(analysis, $"a/2026/10-15/{start:HHmmss}", JobStatus.Done);
 
         var before = Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories)
             .Where(f => f.StartsWith(Root("a")) || f.StartsWith(Root("b")))
@@ -139,6 +177,7 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.Equal(T0, Utc(health.GetProperty("lastMergedHourUtc")));
         Assert.Equal(0, health.GetProperty("backlogHours").GetInt32());
         Assert.Equal(1, health.GetProperty("waitingForAnalysis").GetInt32());
+        Assert.Equal(T0.AddHours(1), Utc(health.GetProperty("oldestWaitingHourUtc")));
         Assert.Equal(0, health.GetProperty("failures").GetArrayLength());
         Assert.Equal(0, health.GetProperty("held").GetInt32());
         Assert.Equal(0, health.GetProperty("ready").GetInt32());

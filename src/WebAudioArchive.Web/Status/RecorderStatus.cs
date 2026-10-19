@@ -39,17 +39,35 @@ public sealed record RecorderStatus(
     public double Coverage24hFraction => Math.Min(1, Coverage24hSeconds / TimeSpan.FromHours(24).TotalSeconds);
 }
 
-/// <summary>The consolidator health with its level (unreachable is amber, a failure red), or why it could not be read.</summary>
+/// <summary>
+/// The consolidator health with its level, or why it could not be read. A failure is red; unreachable, a run more than
+/// <see cref="MaxRunAge"/> ago, or an hour waiting for analysis more than <see cref="MaxAnalysisWait"/> after it became
+/// old enough to merge is amber.
+/// </summary>
 public sealed record ConsolidationStatus(ConsolidatorHealth? Health, HealthLevel Level, string Summary)
 {
-    public static ConsolidationStatus From(ConsolidatorHealth? h, string? error)
+    /// <summary>The consolidator runs hourly; no finished run for this long means it is stuck or stopped.</summary>
+    public static readonly TimeSpan MaxRunAge = TimeSpan.FromHours(3);
+
+    /// <summary>How long an hour may wait for analysis after it became old enough to merge.</summary>
+    public static readonly TimeSpan MaxAnalysisWait = TimeSpan.FromHours(48);
+
+    public static ConsolidationStatus From(ConsolidatorHealth? h, string? error, DateTimeOffset now)
     {
         if (h is null) return new(null, HealthLevel.Amber, $"Consolidator unreachable: {error}");
         if (h.Failures.Count > 0) return new(h, HealthLevel.Red, $"{h.Failures.Count} {(h.Failures.Count == 1 ? "hour" : "hours")} could not be merged.");
         if (h.LastError is not null) return new(h, HealthLevel.Red, $"The last run failed: {h.LastError}");
         if (h.HeldFailed > 0) return new(h, HealthLevel.Red, $"{h.HeldFailed} held originals failed their recheck.");
+        if (h.LastRunUtc is not { } lastRun) return new(h, HealthLevel.Amber, "No consolidation run has finished yet.");
+        if (now - lastRun > MaxRunAge)
+            return new(h, HealthLevel.Amber, $"The last consolidation run finished at {ClipPlanner.Utc(lastRun)}, more than {MaxRunAge.TotalHours:0} hours ago.");
+        if (h.OldestWaitingHourUtc is { } waiting && now - EligibleAt(waiting) > MaxAnalysisWait)
+            return new(h, HealthLevel.Amber, $"The hour {ClipPlanner.Utc(waiting)} has been waiting for analysis for more than {MaxAnalysisWait.TotalHours:0} hours; merging stops there.");
         return new(h, HealthLevel.Green, "Merging normally.");
     }
+
+    /// <summary>When an hour became old enough to merge: its end plus the consolidator's minimum age.</summary>
+    static DateTimeOffset EligibleAt(DateTimeOffset hour) => hour.ToUniversalTime().AddHours(1) + Core.Consolidation.Eligibility.MinAge;
 }
 
 public static class StatusRules
@@ -152,7 +170,7 @@ public sealed class StatusService(WebSettings settings, SegmentCatalog catalog, 
     {
         if (!consolidator.IsConfigured) return null;
         var (health, error) = await consolidator.TryHealthAsync(ct);
-        return ConsolidationStatus.From(health, error);
+        return ConsolidationStatus.From(health, error, time.GetUtcNow());
     }
 
     async Task<IReadOnlyList<RecorderStatus>> ReadStatusesAsync(CancellationToken ct)

@@ -71,7 +71,17 @@ else
                             <tr><th scope="row">Mode</th><td>@c.Mode</td></tr>
                             <tr><th scope="row">Last merged hour</th><td class="utc">@Utc(c.LastMergedHourUtc)</td></tr>
                             <tr><th scope="row">Backlog</th><td>@c.BacklogHours @(c.BacklogHours == 1 ? "hour" : "hours")</td></tr>
-                            <tr><th scope="row">Waiting for analysis</th><td>@c.WaitingForAnalysis @(c.WaitingForAnalysis == 1 ? "hour" : "hours")</td></tr>
+                            <tr>
+                                <th scope="row">Waiting for analysis</th>
+                                <td>
+                                    @c.WaitingForAnalysis @(c.WaitingForAnalysis == 1 ? "hour" : "hours")
+                                    @if (c.OldestWaitingHourUtc is { } oldest)
+                                    {
+                                        <span>, the oldest <span class="utc">@Utc(oldest)</span></span>
+                                    }
+                                </td>
+                            </tr>
+                            <tr><th scope="row">Last run</th><td class="utc">@Utc(c.LastRunUtc)</td></tr>
                             <tr>
                                 <th scope="row">Failures</th>
                                 <td>

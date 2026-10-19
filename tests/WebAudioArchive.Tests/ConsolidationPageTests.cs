@@ -26,6 +26,7 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
     bool _unreachable;
     TimeSpan _deletionDelay = TimeSpan.Zero;
     bool _deletionFailsAfterSend;
+    readonly ManualTimeProvider _time = new(new DateTimeOffset(2026, 10, 17, 13, 0, 0, TimeSpan.Zero));
 
     const string Healthy = """
         { "station": "burst", "mode": "hold", "lastMergedHourUtc": "2026-10-15T11:00:00+01:00", "backlogHours": 3, "waitingForAnalysis": 2,
@@ -70,6 +71,7 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
             b.UseSetting("WAA_CACHE", Path.Combine(_root, "cache"));
             b.ConfigureTestServices(services =>
             {
+                services.AddSingleton<TimeProvider>(_time);
                 services.AddHttpClient(ConsolidatorClient.HttpClientName).ConfigurePrimaryHttpMessageHandler(() => _consolidator);
                 services.AddHttpClient(ConsolidatorClient.DeletionsHttpClientName).ConfigurePrimaryHttpMessageHandler(() => new SlowDeletions(this) { InnerHandler = _consolidator });
             });
@@ -143,6 +145,39 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
 
         Assert.Contains("data-card=\"consolidation\" data-level=\"Amber\"", html);
         Assert.Contains("did not answer", html);
+    }
+
+    async Task<string> StatusWith(string healthJson)
+    {
+        _healthJson = healthJson;
+        await _factory.Services.GetRequiredService<StatusService>().ReadAsync(CancellationToken.None);
+        return WebUtility.HtmlDecode(await _client.GetStringAsync("/"));
+    }
+
+    [Fact]
+    public async Task Status_marks_an_hour_waiting_for_analysis_more_than_48_hours_past_eligibility_amber()
+    {
+        // 2026-10-15 10:00 became eligible (old enough) at 2026-10-16 11:00; at 2026-10-17 13:00 that is 26 h ago: still green.
+        var waiting = Healthy.Replace("\"lastError\": null", "\"lastError\": null, \"oldestWaitingHourUtc\": \"2026-10-15T10:00:00Z\"", StringComparison.Ordinal);
+        Assert.Contains("data-card=\"consolidation\" data-level=\"Green\"", await StatusWith(waiting));
+
+        // 48 h after it became eligible it is amber, and the card says which hour.
+        _time.Set(new DateTimeOffset(2026, 10, 18, 11, 1, 0, TimeSpan.Zero));
+        var html = await StatusWith(waiting.Replace("2026-10-17T12:00:00Z", "2026-10-18T11:00:00Z", StringComparison.Ordinal));
+        Assert.Contains("data-card=\"consolidation\" data-level=\"Amber\"", html);
+        Assert.Contains("2026-10-15 10:00:00 UTC", html);
+        Assert.Contains("waiting for analysis", html);
+    }
+
+    [Fact]
+    public async Task Status_marks_a_consolidator_that_has_not_run_for_3_hours_amber()
+    {
+        Assert.Contains("data-card=\"consolidation\" data-level=\"Green\"", await StatusWith(Healthy));
+
+        _time.Set(new DateTimeOffset(2026, 10, 17, 15, 1, 0, TimeSpan.Zero));
+        var html = await StatusWith(Healthy);
+        Assert.Contains("data-card=\"consolidation\" data-level=\"Amber\"", html);
+        Assert.Contains("2026-10-17 12:00:00 UTC", html);
     }
 
     [Fact]

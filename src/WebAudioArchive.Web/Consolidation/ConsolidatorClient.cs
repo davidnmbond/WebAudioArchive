@@ -21,7 +21,8 @@ public sealed record ConsolidatorHealth(
     int HeldFailed,
     long DeletedBytes,
     DateTimeOffset? LastRunUtc,
-    string? LastError);
+    string? LastError,
+    DateTimeOffset? OldestWaitingHourUtc = null);
 
 /// <summary>A held original that is ready to delete: recorder id and the file under held/ (yyyy/MM-dd/HHmmss.mp3).</summary>
 public sealed partial record HeldItem(string Recorder, string File, long Bytes, DateTimeOffset? HeldUtc, DateTimeOffset? CheckedUtc)

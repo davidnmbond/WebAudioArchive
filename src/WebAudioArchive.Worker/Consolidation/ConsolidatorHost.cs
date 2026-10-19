@@ -39,7 +39,10 @@ public static class ConsolidatorHost
             return (null, 2);
         }
 
-        var missing = settings.Sources.Select(s => s.Root).Append(settings.MergedRoot).Where(d => !Directory.Exists(d)).ToList();
+        // An analysis folder that is set but missing would leave every hour waiting for analysis forever.
+        var missing = settings.Sources.Select(s => s.Root).Append(settings.MergedRoot)
+            .Concat(settings.AnalysisRoot is { } analysis ? [analysis] : [])
+            .Where(d => !Directory.Exists(d)).ToList();
         if (missing.Count > 0)
         {
             foreach (var d in missing) Console.Error.WriteLine($"data error: {d} does not exist");

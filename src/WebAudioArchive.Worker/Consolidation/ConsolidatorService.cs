@@ -31,7 +31,8 @@ public sealed record ConsolidatorHealth(
     int HeldFailed,
     long DeletedBytes,
     DateTimeOffset? LastRunUtc,
-    string? LastError);
+    string? LastError,
+    DateTimeOffset? OldestWaitingHourUtc);
 
 public sealed record DeletionItem(string? Recorder, string? File);
 
@@ -75,7 +76,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
     volatile string? _lastError;
     long _deletedBytes;
 
-    sealed record RunSummary(DateTimeOffset Utc, int BacklogHours, int WaitingForAnalysis);
+    sealed record RunSummary(DateTimeOffset Utc, int BacklogHours, int WaitingForAnalysis, DateTimeOffset? OldestWaitingHourUtc);
 
     /// <summary>Completes when the run made at start has finished (or failed).</summary>
     public Task FirstRun => _firstRun.Task;
@@ -148,8 +149,10 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         var b = Scan(settings.B);
         var merged = MergedHours();
         var open = EarliestOpenStart();
-        var eligible = Eligibility.Hours(a, b, merged, open, now, Settled);
-        var waiting = settings.AnalysisRoot is null ? 0 : Eligibility.Hours(a, b, merged, open, now, _ => true).Count - eligible.Count;
+        var eligible = Eligibility.Hours(a, b, merged, open, now, HourSettled);
+        var eligibleSet = eligible.ToHashSet();
+        // Old enough and closed, but analysis is not finished with them.
+        var waitingHours = Eligibility.Hours(a, b, merged, open, now, _ => true).Where(h => !eligibleSet.Contains(h)).ToList();
         var failures = Failures().ToDictionary(f => f.HourUtc);
         var empties = ReadEmpty();
         var emptiesChanged = false;
@@ -215,7 +218,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         }
 
         if (emptiesChanged) WriteEmpty(empties);
-        _last = new RunSummary(now, eligible.Count - settledHours, waiting);
+        _last = new RunSummary(now, eligible.Count - settledHours, waitingHours.Count, waitingHours.Count == 0 ? null : waitingHours[0]);
 
         // Holding and rechecks run on every pass, a failed one included, so ready records stay fresh.
         var unresolved = Failures().Select(f => f.HourUtc).ToHashSet();
@@ -223,7 +226,11 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         WithHeld(ct, () => Recheck(now, ct));
     }
 
-    bool Settled(SourceSegment s) => Eligibility.AnalysisSettled(settings.AnalysisRoot, settings.Station, s);
+    bool HourSettled(IReadOnlyList<SourceSegment> overlapping) => Eligibility.HourSettled(settings.AnalysisRoot, settings.Station, overlapping);
+
+    /// <summary>True while analysis is waiting for or running on the segment, so it must stay where analysis reads it.</summary>
+    bool AnalysisPending(SourceSegment s) =>
+        settings.AnalysisRoot is not null && Eligibility.AnalysisOf(settings.AnalysisRoot, settings.Station, s) == SegmentAnalysis.Pending;
 
     void WithHeld(CancellationToken ct, Action action)
     {
@@ -260,7 +267,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         foreach (var s in segments)
         {
             ct.ThrowIfCancellationRequested();
-            if (s.Meta.EndUtc + Eligibility.MinAge > now || !Settled(s)) continue;
+            if (s.Meta.EndUtc + Eligibility.MinAge > now || AnalysisPending(s)) continue;
 
             var first = FloorHour(s.Meta.StartUtc);
             var last = FloorHour(s.Meta.EndUtc > s.Meta.StartUtc ? s.Meta.EndUtc.AddTicks(-1) : s.Meta.StartUtc);
@@ -497,7 +504,8 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
             records.Count(r => r.Status == Holding.Failed),
             DeletedBytes(),
             last?.Utc,
-            _lastError);
+            _lastError,
+            last?.OldestWaitingHourUtc);
     }
 
     /// <summary>The bytes of every deletion in the log. While the log is being written the last total is reported.</summary>
