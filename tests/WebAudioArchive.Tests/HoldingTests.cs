@@ -225,9 +225,17 @@ public sealed class HoldingTests : IDisposable
         var when = Now + Holding.HoldPeriod + TimeSpan.FromHours(2);
         Holding.Delete(heldJson, "station.manager@example.org", when, Log);
 
+        // Only the audio goes. The source sidecar (stream, ICY titles, the recorder's own gaps) and the record stay as a
+        // permanent tombstone saying who confirmed the deletion and when.
         Assert.False(File.Exists(heldMp3));
-        Assert.False(File.Exists(Path.Combine(HeldDay, "100000.json")));
-        Assert.False(File.Exists(heldJson));
+        var sourceSidecar = SegmentMetaStore.Read(Path.Combine(HeldDay, "100000.json"))!;
+        Assert.Equal("100000.mp3", sourceSidecar.File);
+        var tombstone = Holding.ReadRecord(heldJson)!;
+        Assert.Equal("deleted", tombstone.Status);
+        Assert.Equal(when, tombstone.DeletedUtc);
+        Assert.Equal("station.manager@example.org", tombstone.ConfirmedBy);
+        Assert.Equal(held.Sha256, tombstone.Sha256);
+        Assert.Equal(held.MergedFiles, tombstone.MergedFiles);
         Assert.All(merged, m => Assert.True(File.Exists(m)));
         var lines = File.ReadAllLines(Log);
         var entry = Assert.Single(lines);
@@ -240,6 +248,7 @@ public sealed class HoldingTests : IDisposable
         Assert.Equal("2026/10-15/100000.mp3", e.GetProperty("file").GetString());
         Assert.Equal(held.Sha256, e.GetProperty("sha256").GetString());
         Assert.Equal(held.Bytes, e.GetProperty("bytes").GetInt64());
+        Assert.Equal(merged, e.GetProperty("mergedFiles").EnumerateArray().Select(m => m.GetString()));
 
         // A second deletion appends a line; a torn last line is not joined to it.
         var b10 = Scan("b").Single(s => s.Meta.StartUtc == T0);
@@ -253,6 +262,101 @@ public sealed class HoldingTests : IDisposable
         Assert.Equal(entry, after[0]);
         using var second = JsonDocument.Parse(after[2]);
         Assert.Equal("b", second.RootElement.GetProperty("recorder").GetString());
+    }
+
+    /// <summary>A's 10:00 held, rechecked ready and deleted at the returned time; the record path is returned too.</summary>
+    (string HeldJson, DateTimeOffset When) DeleteA10()
+    {
+        var (merged, a10) = MergeThreeHours();
+        Holding.Hold(a10, merged, Now);
+        var heldJson = Path.Combine(HeldDay, "100000.held.json");
+        Holding.Recheck(heldJson, Now + Holding.HoldPeriod);
+        var when = Now + Holding.HoldPeriod + TimeSpan.FromHours(2);
+        Holding.Delete(heldJson, "manager", when, Log);
+        return (heldJson, when);
+    }
+
+    static string[] Files(string dir) =>
+        Directory.Exists(dir) ? [.. Directory.EnumerateFiles(dir).Select(Path.GetFileName).Order(StringComparer.Ordinal)!] : [];
+
+    [Fact]
+    public void A_deleted_record_is_never_deleted_again_rechecked_or_moved()
+    {
+        var (heldJson, when) = DeleteA10();
+        var record = File.ReadAllText(heldJson);
+        var heldFiles = Files(HeldDay);
+        var masterFiles = Files(MasterDay);
+        var log = File.ReadAllText(Log);
+
+        var again = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", when.AddMinutes(1), Log));
+        Assert.Contains("deleted", again.Message);
+        Assert.Equal("deleted", Holding.Recheck(heldJson, when + Holding.HoldPeriod).Status);
+        Holding.Repair(Root("a"), "burst");
+
+        Assert.Equal(record, File.ReadAllText(heldJson));
+        Assert.Equal(heldFiles, Files(HeldDay));
+        Assert.Equal(masterFiles, Files(MasterDay));
+        Assert.Equal(log, File.ReadAllText(Log));
+    }
+
+    [Fact]
+    public void Repair_after_a_deletion_stopped_part_way_changes_nothing()
+    {
+        var (merged, a10) = MergeThreeHours();
+        Holding.Hold(a10, merged, Now);
+        var heldJson = Path.Combine(HeldDay, "100000.held.json");
+        Holding.Recheck(heldJson, Now + Holding.HoldPeriod);
+
+        // Stopped after the log line and the audio's deletion, before the record said deleted.
+        File.Delete(Path.Combine(HeldDay, "100000.mp3"));
+        var record = File.ReadAllText(heldJson);
+        var heldFiles = Files(HeldDay);
+        var masterFiles = Files(MasterDay);
+
+        Holding.Repair(Root("a"), "burst");
+
+        Assert.Equal(record, File.ReadAllText(heldJson));
+        Assert.Equal(heldFiles, Files(HeldDay));
+        Assert.Equal(masterFiles, Files(MasterDay));
+        Assert.DoesNotContain(Scan("a"), s => s.Meta.StartUtc == T0);
+    }
+
+    [Fact]
+    public void A_failed_record_is_not_deleted_and_nothing_is_logged()
+    {
+        var (merged, a10) = MergeThreeHours();
+        Holding.Hold(a10, merged, Now);
+        var heldJson = Path.Combine(HeldDay, "100000.held.json");
+        var heldMp3 = Path.Combine(HeldDay, "100000.mp3");
+        File.AppendAllBytes(heldMp3, [1]);
+        Assert.Equal("failed", Holding.Recheck(heldJson, Now + Holding.HoldPeriod).Status);
+        var bytes = File.ReadAllBytes(heldMp3);
+
+        var ex = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", Now + Holding.HoldPeriod + TimeSpan.FromHours(1), Log));
+
+        Assert.Contains("failed, not ready", ex.Message);
+        Assert.Equal(bytes, File.ReadAllBytes(heldMp3));
+        Assert.True(File.Exists(Path.Combine(HeldDay, "100000.json")));
+        Assert.Equal("failed", Holding.ReadRecord(heldJson)!.Status);
+        Assert.False(File.Exists(Log));
+    }
+
+    [Fact]
+    public void A_held_record_not_yet_rechecked_is_not_deleted_and_nothing_is_logged()
+    {
+        var (merged, a10) = MergeThreeHours();
+        Holding.Hold(a10, merged, Now);
+        var heldJson = Path.Combine(HeldDay, "100000.held.json");
+        var heldMp3 = Path.Combine(HeldDay, "100000.mp3");
+        var bytes = File.ReadAllBytes(heldMp3);
+
+        var ex = Assert.Throws<HoldingException>(() => Holding.Delete(heldJson, "manager", Now + Holding.HoldPeriod + TimeSpan.FromHours(1), Log));
+
+        Assert.Contains("held, not ready", ex.Message);
+        Assert.Equal(bytes, File.ReadAllBytes(heldMp3));
+        Assert.True(File.Exists(Path.Combine(HeldDay, "100000.json")));
+        Assert.Equal("held", Holding.ReadRecord(heldJson)!.Status);
+        Assert.False(File.Exists(Log));
     }
 
     [Fact]

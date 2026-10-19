@@ -87,7 +87,10 @@ The consolidator (`waa-consolidator`) merges A and B into one verified copy per 
 the hour has been closed for 24 hours and analysis has finished with it (no segment of the hour waiting or running in
 analysis, and at least one done or failed). In `hold` mode it then moves each original whose frames are all in the
 merged copy to `<recorder>/<station>/held/`, rechecks it after 7 days, and deletes it only when a manager confirms on
-`/consolidation`.
+`/consolidation`. A deletion removes only the held `.mp3`: the original's own `.json` sidecar (stream URL, how it was
+found, ICY titles, the recorder's gaps) stays in `held/`, and its `<stem>.held.json` stays as a permanent tombstone
+with status `deleted`, `deletedUtc` and `confirmedBy`. Each deletion is also a line of
+`data/merged/<station>/deletions.jsonl` (who, when, checksum, bytes and the merged files that hold its frames).
 
 Originals that holding refuses. When every hour an original overlaps is merged but holding refuses it (for example
 some of its frames are not in the merged copy, or it is not in the folder for its start time), it stays in `master/`

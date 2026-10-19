@@ -13,7 +13,7 @@ public sealed class HoldingException(string message) : Exception(message);
 
 /// <summary>
 /// One original segment in held/. Status is held (waiting for its recheck), ready (rechecked, may be deleted once a
-/// manager confirms) or failed (Reason says why). File is relative to the recorder's station master folder, as in
+/// manager confirms), failed (Reason says why) or deleted (the audio is gone, DeletedUtc and ConfirmedBy say when and on whose word; the record and the source sidecar stay). File is relative to the recorder's station master folder, as in
 /// <see cref="SourceSegment.RelativeFile"/>; MergedFiles are the merged hours that hold its frames.
 /// </summary>
 public sealed record HeldRecord(
@@ -26,7 +26,9 @@ public sealed record HeldRecord(
     IReadOnlyList<string> MergedFiles,
     string Status,
     DateTimeOffset? CheckedUtc,
-    string? Reason);
+    string? Reason,
+    DateTimeOffset? DeletedUtc = null,
+    string? ConfirmedBy = null);
 
 /// <summary>
 /// Issue #104: originals whose every frame is in a verified merged copy move to &lt;recorderRoot&gt;/&lt;station&gt;/held, are
@@ -43,6 +45,9 @@ public static class Holding
     public const string Held = "held";
     public const string Ready = "ready";
     public const string Failed = "failed";
+
+    /// <summary>The held audio was deleted on a manager's confirmation; the record and the source sidecar stay as a tombstone.</summary>
+    public const string Deleted = "deleted";
 
     const string RecordSuffix = ".held.json";
 
@@ -201,6 +206,7 @@ public static class Holding
     public static HeldRecord Recheck(string heldJson, DateTimeOffset now)
     {
         var record = Load(heldJson);
+        if (record.Status == Deleted) return record;
         if (now < record.HeldUtc + HoldPeriod) return record;
 
         var reason = CheckHeld(heldJson, record);
@@ -233,7 +239,8 @@ public static class Holding
     /// <summary>
     /// Deletes a held segment a manager has confirmed: only when its record is ready, the held audio still matches its
     /// checksum, it was rechecked within <see cref="ReadyValidFor"/> and the merged files are still there. The deletion
-    /// is logged before anything is removed, as one JSON line of {utc, confirmedBy, recorder, file, sha256, bytes}.
+    /// is logged before anything is removed, as one JSON line of {utc, confirmedBy, recorder, file, sha256, bytes, mergedFiles}. Only the held audio is removed: the
+    /// source sidecar stays and the record becomes a deleted tombstone.
     /// Anything else throws and deletes nothing.
     /// </summary>
     public static void Delete(string heldJson, string confirmedBy, DateTimeOffset now, string deletionsLog)
@@ -256,16 +263,18 @@ public static class Holding
         try
         {
             AppendLine(deletionsLog, JsonSerializer.Serialize(
-                new DeletionEntry(now.ToUniversalTime(), confirmedBy, record.Recorder, record.File, record.Sha256, record.Bytes), LogOptions));
+                new DeletionEntry(now.ToUniversalTime(), confirmedBy, record.Recorder, record.File, record.Sha256, record.Bytes, record.MergedFiles), LogOptions));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             throw new HoldingException($"not deleted: the deletions log {deletionsLog} could not be written: {ex.Message}");
         }
 
+        // Only the audio goes. The source sidecar (stream, how it was found, ICY titles, the recorder's own gaps) and the
+        // record stay as a permanent tombstone. A stop between these two steps leaves a ready record whose audio is gone,
+        // which Repair leaves alone and the next recheck reports as failed; the log already holds the deletion.
         File.Delete(heldMp3);
-        File.Delete(Path.ChangeExtension(heldMp3, ".json"));
-        File.Delete(heldJson);
+        WriteRecord(heldJson, record with { Status = Deleted, DeletedUtc = now.ToUniversalTime(), ConfirmedBy = confirmedBy });
     }
 
     /// <summary>
@@ -310,6 +319,7 @@ public static class Holding
 
             if (record is not null)
             {
+                if (record.Status == Deleted) continue; // a tombstone: its audio is gone and nothing of it ever moves
                 var noneHeld = !File.Exists(hMp3) && !File.Exists(hJson);
                 if (noneHeld)
                 {
@@ -343,7 +353,7 @@ public static class Holding
         }
     }
 
-    sealed record DeletionEntry(DateTimeOffset Utc, string ConfirmedBy, string Recorder, string File, string Sha256, long Bytes);
+    sealed record DeletionEntry(DateTimeOffset Utc, string ConfirmedBy, string Recorder, string File, string Sha256, long Bytes, IReadOnlyList<string> MergedFiles);
 
     static void MoveIfFree(string from, string to)
     {

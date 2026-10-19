@@ -282,8 +282,13 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.False(results[2].GetProperty("deleted").GetBoolean());
         Assert.Contains("c", results[2].GetProperty("reason").GetString());
         Assert.False(File.Exists(HeldMp3("a", T0)));
+        Assert.True(File.Exists(Path.ChangeExtension(HeldMp3("a", T0), ".json")), "the source sidecar stays as evidence");
+        Assert.Equal("deleted", Holding.ReadRecord(Holding.RecordPath(HeldMp3("a", T0)))!.Status);
         Assert.True(File.Exists(HeldMp3("b", T0)));
         Assert.Contains("\"manager\"", File.ReadAllText(Path.Combine(MergedRoot, "burst", "deletions.jsonl")));
+        var listed = await Json(await client.GetAsync("/held"));
+        Assert.Equal(5, listed.GetArrayLength());
+        Assert.DoesNotContain(listed.EnumerateArray(), r => r.GetProperty("recorder").GetString() == "a" && r.GetProperty("file").GetString() == "2026/10-15/100000.mp3");
 
         var health = await Healthz(client);
         Assert.Equal(5, health.GetProperty("ready").GetInt32());
