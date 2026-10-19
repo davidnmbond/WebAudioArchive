@@ -65,4 +65,61 @@ public sealed class MergedSidecarTests : IDisposable
         Assert.Equal("hour-boundary", read.EndedBy);
         Assert.Empty(read.Gaps);
     }
+
+    /// <summary>A recorder sidecar exactly as plan 1 writes it: no merge key at all.</summary>
+    const string Plan1Sidecar = """
+        {
+          "schema": 1,
+          "instance": "recorder-a",
+          "station": "burst",
+          "file": "140000.mp3",
+          "startUtc": "2026-10-16T14:00:00+00:00",
+          "endUtc": "2026-10-16T15:00:00+00:00",
+          "bytes": 57600000,
+          "frames": 137812,
+          "audioSeconds": 3600.026,
+          "format": {
+            "codec": "MPEG-1 Layer III",
+            "bitrateKbps": 128,
+            "sampleRateHz": 44100,
+            "channels": 2
+          },
+          "stream": {
+            "url": "https://stream.example.org/live",
+            "howFound": "listen page",
+            "icyName": "Example",
+            "icyGenre": null,
+            "icyMetaInt": 16000
+          },
+          "titles": [
+            {
+              "title": "Artist - Song",
+              "atFileByte": 1000,
+              "utc": "2026-10-16T14:00:01+00:00"
+            }
+          ],
+          "gaps": [],
+          "endedBy": "hour-boundary"
+        }
+        """;
+
+    [Fact]
+    public void A_plan_1_sidecar_with_no_merge_key_reads_and_is_written_back_byte_identical()
+    {
+        var path = Path.Combine(_root, "140000.json");
+        File.WriteAllText(path, Plan1Sidecar);
+
+        var read = SegmentMetaStore.Read(path)!;
+        Assert.Null(read.Merge);
+        Assert.Equal("recorder-a", read.Instance);
+        Assert.Equal(137812, read.Frames);
+        Assert.Equal("Artist - Song", Assert.Single(read.Titles).Title);
+
+        var copy = Path.Combine(_root, "copy.json");
+        SegmentMetaStore.Write(copy, read);
+        var written = File.ReadAllText(copy);
+
+        Assert.DoesNotContain("merge", written, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(Plan1Sidecar.ReplaceLineEndings(), written.ReplaceLineEndings());
+    }
 }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace WebAudioArchive.Core.Recording;
 
@@ -45,7 +46,7 @@ public sealed record SegmentMeta(
     IReadOnlyList<SegmentTitle> Titles,
     IReadOnlyList<SegmentGap> Gaps,
     string EndedBy,
-    MergeInfo? Merge = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] MergeInfo? Merge = null);
 
 public static class SegmentMetaStore
 {
