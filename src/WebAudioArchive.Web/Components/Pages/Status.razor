@@ -101,6 +101,25 @@ else
                                 </td>
                             </tr>
                             <tr><th scope="row">Held originals</th><td>@c.Held</td></tr>
+                            <tr>
+                                <th scope="row">Refused by holding</th>
+                                <td>
+                                    @if (c.Refused == 0)
+                                    {
+                                        <span>none</span>
+                                    }
+                                    else
+                                    {
+                                        <span>@c.Refused</span>
+                                        <ul class="mb-0 ps-3">
+                                            @foreach (var r in c.RefusedOriginals ?? [])
+                                            {
+                                                <li>Recorder @r.Recorder.ToUpperInvariant() <code>@r.File</code>: @r.Reason</li>
+                                            }
+                                        </ul>
+                                    }
+                                </td>
+                            </tr>
                             <tr><th scope="row">Ready to delete</th><td>@c.Ready</td></tr>
                             <tr><th scope="row">Space freed</th><td>@Bytes(c.DeletedBytes)</td></tr>
                         </tbody>

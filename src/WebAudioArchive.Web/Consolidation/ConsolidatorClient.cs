@@ -22,7 +22,12 @@ public sealed record ConsolidatorHealth(
     long DeletedBytes,
     DateTimeOffset? LastRunUtc,
     string? LastError,
-    DateTimeOffset? OldestWaitingHourUtc = null);
+    DateTimeOffset? OldestWaitingHourUtc = null,
+    int Refused = 0,
+    IReadOnlyList<RefusedOriginal>? RefusedOriginals = null);
+
+/// <summary>An original whose hours are merged but that the consolidator refused to hold, and why.</summary>
+public sealed record RefusedOriginal(string Recorder, string File, string Reason);
 
 /// <summary>A held original that is ready to delete: recorder id and the file under held/ (yyyy/MM-dd/HHmmss.mp3).</summary>
 public sealed partial record HeldItem(string Recorder, string File, long Bytes, DateTimeOffset? HeldUtc, DateTimeOffset? CheckedUtc)

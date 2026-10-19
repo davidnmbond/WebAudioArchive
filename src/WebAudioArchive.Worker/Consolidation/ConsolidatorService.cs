@@ -18,6 +18,9 @@ public sealed record EmptyHour(DateTimeOffset HourUtc, DateTimeOffset Utc, IRead
 
 public sealed record FailureSummary(DateTimeOffset HourUtc, string Reason);
 
+/// <summary>A closed original whose hours are all merged but that holding refused to move, and why. It stays in master/ for a person to look at.</summary>
+public sealed record RefusedOriginal(string Recorder, string File, string Reason);
+
 /// <summary>What /healthz reports. Failures are reported here, never as an unhealthy status.</summary>
 public sealed record ConsolidatorHealth(
     string Station,
@@ -32,7 +35,9 @@ public sealed record ConsolidatorHealth(
     long DeletedBytes,
     DateTimeOffset? LastRunUtc,
     string? LastError,
-    DateTimeOffset? OldestWaitingHourUtc);
+    DateTimeOffset? OldestWaitingHourUtc,
+    int Refused,
+    IReadOnlyList<RefusedOriginal> RefusedOriginals);
 
 public sealed record DeletionItem(string? Recorder, string? File);
 
@@ -51,6 +56,9 @@ public sealed record RetryRequest(DateTimeOffset? HourUtc);
 public sealed partial class ConsolidatorService(ConsolidatorSettings settings, IClock clock, ILogger<ConsolidatorService> logger) : BackgroundService
 {
     static readonly TimeSpan Interval = TimeSpan.FromHours(1);
+
+    /// <summary>At most this many refused originals are named on /healthz; the count covers them all.</summary>
+    const int MaxRefusedShown = 5;
 
     /// <summary>
     /// A ready record is rechecked again once its check is this old, so a confirmed deletion (which needs a check within
@@ -74,6 +82,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
     readonly TaskCompletionSource _firstRun = new(TaskCreationOptions.RunContinuationsAsynchronously);
     volatile RunSummary? _last;
     volatile string? _lastError;
+    volatile IReadOnlyList<RefusedOriginal> _refused = [];
     long _deletedBytes;
 
     sealed record RunSummary(DateTimeOffset Utc, int BacklogHours, int WaitingForAnalysis, DateTimeOffset? OldestWaitingHourUtc);
@@ -260,6 +269,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         var b = Scan(settings.B);
         var segments = a.Concat(b).ToList();
         var resolved = new Dictionary<DateTimeOffset, bool>();
+        var refused = new List<RefusedOriginal>();
         bool Neighbour(DateTimeOffset h)
         {
             if (hours.Contains(h)) return true;
@@ -290,12 +300,16 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
             catch (HoldingException ex)
             {
                 logger.LogWarning("{Recorder} {File}: {Reason}", s.Recorder, s.RelativeFile, ex.Message);
+                refused.Add(new RefusedOriginal(s.Recorder, s.RelativeFile, ex.Message));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 logger.LogWarning("{Recorder} {File}: not held: {Reason}", s.Recorder, s.RelativeFile, ex.Message);
+                refused.Add(new RefusedOriginal(s.Recorder, s.RelativeFile, $"not held: {ex.Message}"));
             }
         }
+
+        _refused = refused;
     }
 
     /// <summary>
@@ -493,6 +507,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
     public ConsolidatorHealth Health()
     {
         var records = HeldRecords();
+        var refused = _refused;
         var hours = MergedHours();
         var last = _last;
         return new ConsolidatorHealth(
@@ -508,7 +523,9 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
             DeletedBytes(),
             last?.Utc,
             _lastError,
-            last?.OldestWaitingHourUtc);
+            last?.OldestWaitingHourUtc,
+            refused.Count,
+            [.. refused.Take(MaxRefusedShown)]);
     }
 
     /// <summary>The bytes of every deletion in the log. While the log is being written the last total is reported.</summary>

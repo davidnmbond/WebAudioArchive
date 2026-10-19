@@ -58,6 +58,8 @@ public sealed record ConsolidationStatus(ConsolidatorHealth? Health, HealthLevel
         if (h.Failures.Count > 0) return new(h, HealthLevel.Red, $"{h.Failures.Count} {(h.Failures.Count == 1 ? "hour" : "hours")} could not be merged.");
         if (h.LastError is not null) return new(h, HealthLevel.Red, $"The last run failed: {h.LastError}");
         if (h.HeldFailed > 0) return new(h, HealthLevel.Red, $"{h.HeldFailed} held originals failed their recheck.");
+        if (h.Refused > 0)
+            return new(h, HealthLevel.Amber, $"{h.Refused} {(h.Refused == 1 ? "original" : "originals")} could not be held and {(h.Refused == 1 ? "stays" : "stay")} with the recorders; a person needs to look (see the operations guide).");
         if (h.LastRunUtc is not { } lastRun) return new(h, HealthLevel.Amber, "No consolidation run has finished yet.");
         if (now - lastRun > MaxRunAge)
             return new(h, HealthLevel.Amber, $"The last consolidation run finished at {ClipPlanner.Utc(lastRun)}, more than {MaxRunAge.TotalHours:0} hours ago.");

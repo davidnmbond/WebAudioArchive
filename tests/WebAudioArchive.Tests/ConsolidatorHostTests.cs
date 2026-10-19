@@ -390,6 +390,36 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.Equal(JsonValueKind.Null, health.GetProperty("oldestWaitingHourUtc").ValueKind);
     }
 
+    [Fact]
+    public async Task An_original_that_holding_refuses_stays_in_master_and_healthz_reports_it_with_its_reason()
+    {
+        Record();
+        // A's 11:00 segment sits in the wrong day's folder: it is merged, but holding refuses to move it.
+        var moved = Path.Combine(Root("a"), "burst", "master", "2026", "10-14");
+        Directory.CreateDirectory(moved);
+        var mp3 = MasterMp3("a", T0.AddHours(1));
+        File.Move(mp3, Path.Combine(moved, "110000.mp3"));
+        File.Move(Path.ChangeExtension(mp3, ".json"), Path.Combine(moved, "110000.json"));
+
+        await using var factory = Host("hold", new ManualClock(Now));
+        var (client, service) = await StartAsync(factory);
+
+        Assert.True(File.Exists(MergedMp3(T0.AddHours(1))));
+        Assert.True(File.Exists(Path.Combine(moved, "110000.mp3")), "refused, so it stays where it is");
+        Assert.True(File.Exists(HeldMp3("b", T0.AddHours(1))));
+
+        var health = await Healthz(client);
+        Assert.Equal(1, health.GetProperty("refused").GetInt32());
+        var refused = Assert.Single(health.GetProperty("refusedOriginals").EnumerateArray());
+        Assert.Equal("a", refused.GetProperty("recorder").GetString());
+        Assert.Equal("2026/10-14/110000.mp3", refused.GetProperty("file").GetString());
+        Assert.Contains("not in the folder for its start time", refused.GetProperty("reason").GetString());
+
+        // Still refused on the next pass, and still reported; never retried into a re-merge.
+        await service.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(1, (await Healthz(client)).GetProperty("refused").GetInt32());
+    }
+
     /// <summary>A and B each record a minute at 10:00 and 11:00 only: nothing at all in 09:00.</summary>
     void RecordFromTen()
     {

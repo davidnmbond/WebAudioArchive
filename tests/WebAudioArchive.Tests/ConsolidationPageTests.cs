@@ -181,6 +181,21 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Status_marks_originals_that_holding_refused_amber_and_lists_why()
+    {
+        var refused = Healthy.Replace("\"lastError\": null", """
+            "lastError": null, "refused": 1,
+            "refusedOriginals": [ { "recorder": "a", "file": "2026/10-15/100000.mp3", "reason": "not held: 12 frame(s) of a 2026/10-15/100000.mp3 are not in the merged files" } ]
+            """, StringComparison.Ordinal);
+
+        var html = await StatusWith(refused);
+
+        Assert.Contains("data-card=\"consolidation\" data-level=\"Amber\"", html);
+        Assert.Contains("1 original could not be held", html);
+        Assert.Contains("12 frame(s) of a 2026/10-15/100000.mp3 are not in the merged files", html);
+    }
+
+    [Fact]
     public async Task The_review_page_lists_ready_originals_by_utc_day()
     {
         var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/consolidation"));
