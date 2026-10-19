@@ -169,12 +169,15 @@ Pages:
   ended by, number of gaps, open), newest first, with a UTC date filter.
 - **Consolidation** (`/consolidation`, only when `WAA_CONSOLIDATOR` is set, for example `http://consolidator:8080`): the
   originals the consolidator holds and has rechecked as ready to delete, by UTC day, each with a checkbox. Opening the
-  page deletes nothing. Choose originals, press "Delete confirmed originals", read the list and press "Yes, delete N
+  page deletes nothing. Choose originals one by one, a whole UTC day ("Whole day") or "Everything listed", press
+  "Delete confirmed originals", read the list of every chosen file and press "Yes, delete N
   originals"; the web app then posts them to the consolidator (`confirmedBy` is `loopback` until sign-in exists), which
   still refuses any original whose recheck is older than 24 hours or that has changed, and each item shows its own
-  result. The Status page gains a Consolidation card (mode, last merged hour in UTC, backlog, waiting for analysis,
-  failures, held, ready to delete, space freed): amber when the consolidator does not answer, red when an hour failed
-  to merge, the last run failed or a held original failed its recheck.
+  result. The Status page gains a Consolidation card (mode, last merged hour in UTC, backlog, waiting for analysis and
+  the oldest such hour, last run, failures, held, originals refused by holding, ready to delete, space freed): red
+  when an hour failed to merge, the last run failed or a held original failed its recheck; amber when the consolidator
+  does not answer, holding refused an original, no run has finished in the last 3 hours, or an hour has been waiting
+  for analysis more than 48 hours after it became old enough to merge (merging stops at that hour).
 
 Rendering without flicker. The pages are prerendered on the server and then taken over by the interactive circuit,
 which draws them again from scratch; each page makes that second render match the first, so the hand-over shows no

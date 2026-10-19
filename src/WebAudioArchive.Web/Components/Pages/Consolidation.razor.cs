@@ -22,11 +22,6 @@ public sealed partial class Consolidation
         await Review.LoadAsync(CancellationToken.None);
     }
 
-    /// <summary>The ready items grouped by the UTC day in their file name, oldest day first.</summary>
-    IEnumerable<IGrouping<string, HeldItem>> Days => Review.Items
-        .GroupBy(i => i.StartUtc is { } s ? s.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture) : "Unknown day")
-        .OrderBy(g => g.Key, StringComparer.Ordinal);
-
     async Task ReloadAsync()
     {
         Busy = true;

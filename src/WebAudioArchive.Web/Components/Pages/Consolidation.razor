@@ -6,7 +6,7 @@
 <h1 class="h3">Consolidation: originals ready to delete</h1>
 <p class="text-body-secondary">
     Each original below has been merged into a verified hourly copy, held for 7 days and checked again. Nothing is deleted
-    by opening this page: choose the originals, press <em>Delete confirmed originals</em>, then confirm. The consolidator
+    by opening this page: choose originals one by one, a whole UTC day or everything listed, press <em>Delete confirmed originals</em>, then confirm. The consolidator
     refuses any original whose recheck is not fresh or that has changed. All times are UTC.
 </p>
 
@@ -71,10 +71,28 @@
     <p id="consolidation-none">No originals are ready to delete.</p>
 }
 
-@foreach (var day in Days)
+@if (Review.Items.Count > 0)
 {
-    <section class="mb-4" data-day="@day.Key" aria-label="Ready on @day.Key">
-        <h2 class="h5">@day.Key UTC</h2>
+    <div class="form-check mb-3">
+        <input type="checkbox" class="form-check-input" id="consolidation-everything" aria-label="Delete everything listed"
+               checked="@Review.IsEverythingSelected" @onchange="() => Review.ToggleEverything()" />
+        <label class="form-check-label" for="consolidation-everything">Everything listed (@Review.Items.Count originals, @ByteText.Humanize(Review.Items.Sum(i => i.Bytes)))</label>
+    </div>
+}
+
+@foreach (var day in Review.Days)
+{
+    var dayKey = day.Key;
+    var dayId = "consolidation-day-" + dayKey.Replace(' ', '-');
+    <section class="mb-4" data-day="@dayKey" aria-label="Ready on @dayKey">
+        <div class="d-flex align-items-center flex-wrap gap-3 mb-2">
+            <h2 class="h5 mb-0">@dayKey UTC</h2>
+            <div class="form-check mb-0">
+                <input type="checkbox" class="form-check-input" id="@dayId" aria-label="Delete the whole of @dayKey"
+                       checked="@Review.IsDaySelected(dayKey)" @onchange="() => Review.ToggleDay(dayKey)" />
+                <label class="form-check-label" for="@dayId">Whole day (@day.Count() originals)</label>
+            </div>
+        </div>
         <table class="table table-sm align-middle">
             <thead>
                 <tr><th scope="col">Delete</th><th scope="col">Segment start</th><th scope="col">Recorder</th><th scope="col">Size</th><th scope="col">Held since</th><th scope="col">Last checked</th></tr>

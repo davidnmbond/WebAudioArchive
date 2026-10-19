@@ -211,6 +211,73 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_review_page_offers_a_whole_day_and_an_everything_listed_choice()
+    {
+        var html = WebUtility.HtmlDecode(await _client.GetStringAsync("/consolidation"));
+
+        Assert.Contains("aria-label=\"Delete everything listed\"", html);
+        Assert.Contains("aria-label=\"Delete the whole of 2026-10-15\"", html);
+        Assert.Contains("aria-label=\"Delete the whole of 2026-10-16\"", html);
+        Assert.DoesNotContain(_calls, c => c.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task A_whole_day_is_chosen_and_unchosen_together_and_must_be_confirmed_again()
+    {
+        var review = new ConsolidationReview(Client());
+        await review.LoadAsync(CancellationToken.None);
+        Assert.Equal(["2026-10-15", "2026-10-16"], review.Days.Select(d => d.Key));
+
+        review.ToggleDay("2026-10-15");
+        Assert.True(review.IsDaySelected("2026-10-15"));
+        Assert.False(review.IsDaySelected("2026-10-16"));
+        Assert.Equal([("a", "2026/10-15/100000.mp3"), ("b", "2026/10-15/100000.mp3")], review.Selected.Select(i => (i.Recorder, i.File)));
+
+        // One file of the day unchosen: the day is no longer whole, and choosing the day again chooses all of it.
+        review.Toggle(review.Selected[0]);
+        Assert.False(review.IsDaySelected("2026-10-15"));
+        review.ToggleDay("2026-10-15");
+        Assert.Equal(2, review.Selected.Count);
+
+        review.RequestConfirmation();
+        Assert.True(review.Confirming);
+        review.ToggleDay("2026-10-15");
+        Assert.False(review.Confirming);
+        Assert.Empty(review.Selected);
+        Assert.DoesNotContain(_calls, c => c.Method == HttpMethod.Post);
+    }
+
+    [Fact]
+    public async Task Everything_listed_is_chosen_lists_every_file_for_confirmation_and_posts_them_all()
+    {
+        var review = new ConsolidationReview(Client());
+        await review.LoadAsync(CancellationToken.None);
+
+        review.ToggleEverything();
+        Assert.True(review.IsEverythingSelected);
+        Assert.True(review.IsDaySelected("2026-10-15"));
+        Assert.True(review.IsDaySelected("2026-10-16"));
+        review.RequestConfirmation();
+
+        // The confirmation lists every file before anything is sent.
+        Assert.Equal(review.Items, review.Selected);
+        Assert.DoesNotContain(_calls, c => c.Method == HttpMethod.Post);
+
+        await review.ConfirmAsync("loopback", CancellationToken.None);
+
+        var post = Assert.Single(_calls, c => c.Method == HttpMethod.Post);
+        using var doc = JsonDocument.Parse(post.Body);
+        Assert.Equal(3, doc.RootElement.GetProperty("items").GetArrayLength());
+
+        // Unchoosing everything clears every choice.
+        review.ToggleEverything();
+        Assert.True(review.IsEverythingSelected);
+        review.ToggleEverything();
+        Assert.Empty(review.Selected);
+        Assert.False(review.IsEverythingSelected);
+    }
+
+    [Fact]
     public async Task Confirming_posts_the_chosen_items_and_shows_each_result()
     {
         var review = new ConsolidationReview(Client());

@@ -183,6 +183,47 @@ public sealed class ConsolidationReview(ConsolidatorClient client)
         Confirming = false; // a changed choice has to be confirmed again
     }
 
+    public const string UnknownDay = "Unknown day";
+
+    /// <summary>The UTC day of an item, from its file name (yyyy-MM-dd), or <see cref="UnknownDay"/>.</summary>
+    public static string DayOf(HeldItem item) =>
+        item.StartUtc is { } s ? s.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : UnknownDay;
+
+    /// <summary>The items grouped by UTC day, oldest day first.</summary>
+    public IReadOnlyList<IGrouping<string, HeldItem>> Days =>
+        [.. Items.GroupBy(DayOf).OrderBy(g => g.Key, StringComparer.Ordinal)];
+
+    /// <summary>True when the day has items and every one of them is chosen.</summary>
+    public bool IsDaySelected(string day) => AllChosen(Items.Where(i => DayOf(i) == day));
+
+    /// <summary>True when the list has items and every one is chosen.</summary>
+    public bool IsEverythingSelected => AllChosen(Items);
+
+    /// <summary>Chooses every item of the day, or, when all of them are chosen already, none of them.</summary>
+    public void ToggleDay(string day) => ToggleAll([.. Items.Where(i => DayOf(i) == day)]);
+
+    /// <summary>Chooses every item listed, or, when all are chosen already, none.</summary>
+    public void ToggleEverything() => ToggleAll(Items);
+
+    bool AllChosen(IEnumerable<HeldItem> items)
+    {
+        var any = false;
+        foreach (var i in items)
+        {
+            if (!_selected.Contains(i)) return false;
+            any = true;
+        }
+
+        return any;
+    }
+
+    void ToggleAll(IReadOnlyList<HeldItem> items)
+    {
+        if (AllChosen(items)) _selected.ExceptWith(items);
+        else _selected.UnionWith(items);
+        Confirming = false; // a changed choice has to be confirmed again
+    }
+
     /// <summary>Asks the manager to confirm; does nothing when nothing is chosen.</summary>
     public void RequestConfirmation() => Confirming = _selected.Count > 0;
 
