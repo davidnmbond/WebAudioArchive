@@ -41,6 +41,25 @@ public class RecorderProjectTests
     }
 
     [Fact]
+    public void The_docs_rebuild_the_consolidator_through_the_recorders_file_and_never_with_build()
+    {
+        var ops = RepoFiles.Read("docs/operations.md");
+
+        // The consolidator has no build, so --build on it keeps the old image: the shared image is built from the
+        // recorders file (which leaves the running recorders alone) and the consolidator is then recreated from it.
+        Assert.Matches(
+            @"docker compose -f docker/docker-compose\.recorders\.yml build recorder-a\r?\n\s*docker compose -f docker/docker-compose\.yml up -d consolidator\r?\n",
+            ops);
+
+        foreach (var (file, text) in new[] { ("docs/operations.md", ops), ("docker/docker-compose.yml", RepoFiles.Read("docker/docker-compose.yml")) })
+            foreach (var line in text.Split('\n'))
+                Assert.False(line.Contains("docker compose", StringComparison.Ordinal) && line.Contains("--build", StringComparison.Ordinal) && line.Contains("consolidator", StringComparison.Ordinal),
+                    $"{file}: '{line.Trim()}' builds nothing for the consolidator, which has no build");
+
+        Assert.Matches(@"data/merged[^\n]*\n?[^\n]*1654|1654[^\n]*\n?[^\n]*data/merged", ops);
+    }
+
+    [Fact]
     public void Web_and_consolidator_reach_the_recorders_over_the_shared_network()
     {
         Assert.Matches("(?m)^networks:\r?$", RepoFiles.Read(RecordersFile));

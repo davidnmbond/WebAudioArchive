@@ -39,7 +39,10 @@ services:
   # data/merged once analysis has finished them, holds and rechecks the originals, and deletes only on confirmation.
   # The image is built only from the recorders file, so this service has no build and no depends_on: starting or
   # rebuilding it can never recreate a recorder. Health: http://127.0.0.1:8096/healthz.
-  #   docker compose -f docker/docker-compose.yml up -d --build web consolidator   (name the services)
+  # New code: build the shared image from the recorders file (running recorders are left alone), then recreate this:
+  #   docker compose -f docker/docker-compose.recorders.yml build recorder-a
+  #   docker compose -f docker/docker-compose.yml up -d consolidator   (name the service)
+  # On Linux create data/merged owned by uid 1654 before the first start, or Docker creates it as root.
   consolidator:
     image: webaudioarchive:local
     container_name: waa-consolidator

@@ -6,7 +6,12 @@ The recorders are their own compose project (`waa-recorders`), so building or re
 First install only (no recorders running yet): start the recorders first (they create the shared network `waa`), then the rest:
 
     docker compose -f docker/docker-compose.recorders.yml up -d --build recorder-a recorder-b
-    docker compose -f docker/docker-compose.yml up -d --build web consolidator
+    docker compose -f docker/docker-compose.yml up -d --build web
+    docker compose -f docker/docker-compose.yml up -d consolidator
+
+The consolidator has no build of its own: it runs the image the recorders file builds, so it starts after the
+recorders. On Linux create its output folder first, owned by uid 1654, or Docker creates it as root and the
+consolidator cannot write: `mkdir -p data/merged && sudo chown 1654:1654 data/merged` (under `WAA_DATA_DIR` if set).
 
 This starts both recorders together, so use it only when neither is recording. For every later change, upgrade one
 recorder at a time as described under "Dual recording (A and B)", and never stop both together. Always name the
@@ -73,8 +78,8 @@ recorder at a time and never use `--remove-orphans`:
    `docker compose -f docker/docker-compose.recorders.yml up -d recorder-a`. Wait for `/healthz` to show connected and
    a frame in the last 10 s.
 3. The same for `recorder-b` (ports 8081).
-4. `docker compose -f docker/docker-compose.yml up -d --build web consolidator` (always name services; never
-   `--remove-orphans`).
+4. `docker compose -f docker/docker-compose.yml up -d --build web`, then
+   `docker compose -f docker/docker-compose.yml up -d consolidator` (always name services; never `--remove-orphans`).
 
 Containers use `restart: always`, so Docker restarts them after a crash. They only run while Docker Desktop is
 running: Docker Desktop must start on login, the computer must not sleep, and a reboot (for example for Windows
@@ -277,7 +282,16 @@ the recorders must not be restarted for one. Rebuild and restart only the web ap
     docker compose -f docker/docker-compose.yml up -d --build web
 
 The consolidator (`waa-consolidator`, the recorder image started with `--consolidate`, health at
-`http://127.0.0.1:8096/healthz`) is in the same file and is restarted the same way, naming `consolidator`.
+`http://127.0.0.1:8096/healthz`) is in the same file but has no build: it runs the recorder image, which only the
+recorders file builds, so `--build` on this service would keep the old code. To deploy new consolidator code, build
+the shared image (this leaves the running recorders alone; they pick it up only at their own one-at-a-time upgrade),
+then recreate the consolidator from it:
+
+    docker compose -f docker/docker-compose.recorders.yml build recorder-a
+    docker compose -f docker/docker-compose.yml up -d consolidator
+
+On Linux, `data/merged` must exist and be owned by uid 1654 before the consolidator first starts (see Run).
+
 Look and feel: the pages follow the operating system's light or dark preference ("Auto"), or a choice of Light or
 Dark from the toggle at the top right, remembered in the browser (localStorage; without it the page simply follows
 the OS). The theme is set by a small script in the page head before anything is drawn, so there is no flash of the
