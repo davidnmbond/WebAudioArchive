@@ -221,6 +221,19 @@ public sealed class ConsolidationPageTests : IAsyncLifetime
         Assert.DoesNotContain(_calls, c => c.Method == HttpMethod.Post);
     }
 
+    [Theory]
+    [InlineData("2026/10-15/100000.mp3", "2026-10-15T10:00:00Z")]
+    [InlineData("2026/10-15/100312-1.mp3", "2026-10-15T10:03:12Z")]
+    [InlineData("2026/10-15/235959-12.mp3", "2026-10-15T23:59:59Z")]
+    public void A_held_file_name_gives_its_start_and_day_including_restart_files(string file, string start)
+    {
+        var item = new HeldItem("a", file, 1, null, null);
+        var expected = DateTimeOffset.Parse(start, System.Globalization.CultureInfo.InvariantCulture);
+
+        Assert.Equal(expected, item.StartUtc);
+        Assert.Equal("2026-10-15", ConsolidationReview.DayOf(item));
+    }
+
     [Fact]
     public async Task A_whole_day_is_chosen_and_unchosen_together_and_must_be_confirmed_again()
     {

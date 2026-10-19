@@ -29,10 +29,10 @@ public sealed record ConsolidatorHealth(
 /// <summary>An original whose hours are merged but that the consolidator refused to hold, and why.</summary>
 public sealed record RefusedOriginal(string Recorder, string File, string Reason);
 
-/// <summary>A held original that is ready to delete: recorder id and the file under held/ (yyyy/MM-dd/HHmmss.mp3).</summary>
+/// <summary>A held original that is ready to delete: recorder id and the file under held/ (yyyy/MM-dd/HHmmss.mp3, or HHmmss-n.mp3 after a restart).</summary>
 public sealed partial record HeldItem(string Recorder, string File, long Bytes, DateTimeOffset? HeldUtc, DateTimeOffset? CheckedUtc)
 {
-    [GeneratedRegex(@"^(\d{4})/(\d{2})-(\d{2})/(\d{2})(\d{2})(\d{2})\.mp3$")]
+    [GeneratedRegex(@"^(\d{4})/(\d{2})-(\d{2})/(\d{2})(\d{2})(\d{2})(?:-\d+)?\.mp3$")]
     private static partial Regex FilePattern();
 
     /// <summary>The UTC start of the segment, read from its file name; null when the name is not of that form.</summary>

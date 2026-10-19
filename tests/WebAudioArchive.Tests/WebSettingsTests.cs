@@ -41,6 +41,16 @@ public sealed class WebSettingsTests : IDisposable
         Assert.Equal("B", s.Recorders[1].Label);
     }
 
+    [Fact]
+    public void A_recorder_named_merged_is_refused_because_that_id_is_the_merged_copy()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "merged"));
+        var ex = Assert.Throws<SettingsException>(() => WebSettings.Load(Env(("WAA_RECORDERS", $"a={_root}/a,merged={_root}/merged"))));
+        Assert.Contains("WAA_RECORDERS", ex.Message);
+        Assert.Contains("'merged'", ex.Message);
+        Assert.Contains("reserved", ex.Message);
+    }
+
     [Theory]
     [InlineData(null, "WAA_RECORDERS is not set")]
     [InlineData("", "WAA_RECORDERS is not set")]

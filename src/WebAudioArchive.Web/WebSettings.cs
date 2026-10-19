@@ -49,6 +49,8 @@ public sealed partial record WebSettings(string Station, IReadOnlyList<RecorderS
             throw new SettingsException("WAA_RECORDERS is not set. Give each recorder id and its data root, for example WAA_RECORDERS=a=/data/a,b=/data/b");
 
         var roots = ParsePairs("WAA_RECORDERS", recordersText);
+        if (roots.ContainsKey(MergedId))
+            throw new SettingsException($"WAA_RECORDERS: the recorder id '{MergedId}' is reserved for the consolidator's merged copy (WAA_MERGED); give the recorder another id.");
         var health = ParsePairs("WAA_RECORDER_HEALTH", get("WAA_RECORDER_HEALTH") ?? "");
         foreach (var id in health.Keys.Where(id => !roots.ContainsKey(id)))
             throw new SettingsException($"WAA_RECORDER_HEALTH: recorder '{id}' is not listed in WAA_RECORDERS.");

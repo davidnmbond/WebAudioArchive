@@ -425,6 +425,25 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.Equal(1, (await Healthz(client)).GetProperty("refused").GetInt32());
     }
 
+    [Fact]
+    public async Task An_open_part_that_starts_before_an_hour_ends_blocks_merging_that_hour_and_later_ones()
+    {
+        Record();
+        // B is still writing a segment that started at 10:30 (a restart file, HHmmss-n): 10:00 and 11:00 must wait.
+        var openStart = T0.AddMinutes(30);
+        SegmentFiles.Open(Root("b"), "burst", openStart, openStart.AddMinutes(1), 0, name: "103000-1");
+
+        await using var factory = Host("hold", new ManualClock(Now));
+        var (client, _) = await StartAsync(factory);
+
+        Assert.True(File.Exists(MergedMp3(T0.AddHours(-1))), "09:00 ends before the open segment starts");
+        Assert.False(File.Exists(MergedMp3(T0)));
+        Assert.False(File.Exists(MergedMp3(T0.AddHours(1))));
+        Assert.True(File.Exists(MasterMp3("a", T0)), "nothing of 10:00 is held while it is not merged");
+        Assert.True(File.Exists(MasterMp3("b", T0)));
+        Assert.Equal(T0.AddHours(-1), Utc((await Healthz(client)).GetProperty("lastMergedHourUtc")));
+    }
+
     /// <summary>A and B each record a minute at 10:00 and 11:00 only: nothing at all in 09:00.</summary>
     void RecordFromTen()
     {
