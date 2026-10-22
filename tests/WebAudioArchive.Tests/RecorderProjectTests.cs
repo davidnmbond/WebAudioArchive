@@ -34,6 +34,10 @@ public class RecorderProjectTests
         Assert.Contains("[\"--consolidate\"]", c);
         Assert.Contains("WAA_CONSOLIDATE_MODE: merge", c);
         Assert.Contains("WAA_SOURCES: a=/data/a,b=/data/b", c);
+        // Owner decision: analysis is not required until the analysis service runs (issue #111); the read-only mount
+        // stays so switching it on is one line.
+        Assert.Contains("WAA_ANALYSIS: \"\"", c);
+        Assert.DoesNotContain("WAA_ANALYSIS: /data/analysis", c);
         Assert.Contains("/analysis:/data/analysis:ro", c);
         Assert.Contains("\"127.0.0.1:8096:8080\"", c);
         foreach (var (name, block) in Main)

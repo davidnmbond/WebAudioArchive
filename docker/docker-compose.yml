@@ -53,7 +53,10 @@ services:
       WAA_STATION: burst
       WAA_SOURCES: a=/data/a,b=/data/b
       WAA_MERGED: /data/merged
-      WAA_ANALYSIS: /data/analysis
+      # Empty: analysis is not required, so hours are merged and originals held without waiting for it. Set this to
+      # /data/analysis once the analysis service is running (issue #111). Hours merged before then are not analysed
+      # again from the merged copies (not built). The read-only mount below stays, so switching on is this one line.
+      WAA_ANALYSIS: ""
       WAA_CONSOLIDATE_MODE: merge
     volumes:
       - ${WAA_DATA_DIR:-../data}/a:/data/a

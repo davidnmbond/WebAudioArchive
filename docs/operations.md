@@ -97,6 +97,18 @@ found, ICY titles, the recorder's gaps) stays in `held/`, and its `<stem>.held.j
 with status `deleted`, `deletedUtc` and `confirmedBy`. Each deletion is also a line of
 `data/merged/<station>/deletions.jsonl` (who, when, checksum, bytes and the merged files that hold its frames).
 
+Analysis is not required yet. Until the analysis service runs (issue #111), `docker/docker-compose.yml` sets the
+consolidator's `WAA_ANALYSIS` to empty, so hours are merged and originals held without waiting for analysis. The
+read-only `data/analysis` mount stays in place, so switching it on is one line: set `WAA_ANALYSIS: /data/analysis`
+and recreate the consolidator. Hours merged before then are not analysed again from the merged copies (not built):
+originals already moved to `held/` are never read by analysis, which reads only `master/`.
+
+When analysis is required, holding is strict per segment, because analysis writes a segment's `state.json` only when
+its job starts and reads only `master/`. An original is moved to `held/` only when its own state is done or failed, or
+when it has no state and the other recorder's segments whose state is done or failed (in `master/` or already held)
+cover at least 98% of its span, spans less their gaps (analysis's own fill-in rule). Otherwise it stays in `master/`
+for a later run; this is not a refusal, and `/healthz` counts these originals as `heldWaitingForAnalysis`.
+
 Originals that holding refuses. When every hour an original overlaps is merged but holding refuses it (for example
 some of its frames are not in the merged copy, or it is not in the folder for its start time), it stays in `master/`
 and is tried again on every run, never re-merged automatically. `/healthz` reports `refused` and the latest reasons
@@ -109,9 +121,12 @@ failures, `POST /retry` with `{"hourUtc":"<hour>"}`.
 A merged hour is never re-merged from what is left in `master/` once originals were held against it. If its sidecar is
 missing while any held record (whatever its status) or any line of `deletions.jsonl` names it among its merged files,
 the hour is recorded as the failure "merged hour sidecar missing while its originals are held" and nothing is written.
-To re-merge such an hour, first return its held originals: deleting an original's `<stem>.held.json` makes the next
-run move its `.mp3` and `.json` back to `master/` (only while its audio is still held; a deleted original cannot come
-back, so that hour is never re-merged). Then delete the merged sidecar and `POST /retry` as above.
+A held record names the hour before and the hour after its original as well as the original's own hours, so the
+records of originals in the neighbouring hours block a re-merge too. To re-merge such an hour, first return every
+held original whose record names it, the neighbouring hours' included: deleting an original's `<stem>.held.json`
+makes the next run move its `.mp3` and `.json` back to `master/` (only while its audio is still held). Then delete
+the merged sidecar and `POST /retry` as above. An hour named by a deleted original (its tombstone record or its line
+in `deletions.jsonl`) can never be re-merged.
 
 ## Web app (MVP)
 
