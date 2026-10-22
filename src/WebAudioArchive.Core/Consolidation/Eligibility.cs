@@ -83,6 +83,83 @@ public static class Eligibility
         return finished;
     }
 
+    /// <summary>Analysis queues a less preferred recorder's segment when better ones cover less than this of its span (WorkPlanner.MinPreferredCover).</summary>
+    public const double MinOtherCover = 0.98;
+
+    /// <summary>
+    /// Whether holding may move <paramref name="s"/> out of master/, where analysis reads it. Always true when analysis
+    /// is not required (<paramref name="analysisRoot"/> is null). Otherwise analysis writes state.json only when a job
+    /// starts, so a segment with no state may still be planned: it is held only when its own analysis is done or failed,
+    /// or when it has no state and the segments of <paramref name="otherRecorder"/> whose analysis is done or failed cover
+    /// at least <see cref="MinOtherCover"/> of its span (analysis's own fill-in rule, measured as it measures it).
+    /// </summary>
+    public static bool MayHold(string? analysisRoot, string station, SourceSegment s, IEnumerable<SourceSegment> otherRecorder)
+    {
+        if (analysisRoot is null) return true;
+        switch (AnalysisOf(analysisRoot, station, s))
+        {
+            case SegmentAnalysis.Finished:
+                return true;
+            case SegmentAnalysis.Pending:
+                return false;
+        }
+
+        var finished = otherRecorder
+            .Where(o => o.Meta.StartUtc < s.Meta.EndUtc && o.Meta.EndUtc > s.Meta.StartUtc)
+            .Where(o => AnalysisOf(analysisRoot, station, o) == SegmentAnalysis.Finished);
+        return CoveredFraction(s, finished) >= MinOtherCover;
+    }
+
+    /// <summary>
+    /// The fraction of <paramref name="s"/>'s wall span (start to end) that the spans of <paramref name="others"/>, less
+    /// their gaps, cover, overlaps counted once. A segment with no span counts as covered. The same measure as analysis's
+    /// WorkPlanner.CoveredFraction.
+    /// </summary>
+    public static double CoveredFraction(SourceSegment s, IEnumerable<SourceSegment> others)
+    {
+        var from = s.Meta.StartUtc;
+        var to = s.Meta.EndUtc;
+        var span = (to - from).TotalSeconds;
+        if (span <= 0) return 1;
+
+        // Each other segment as the stretches it actually holds: its span with its gaps taken out.
+        var pieces = new List<(DateTimeOffset From, DateTimeOffset To)>();
+        foreach (var o in others)
+        {
+            if (o.Meta.EndUtc <= from || o.Meta.StartUtc >= to) continue;
+            var cursor = o.Meta.StartUtc;
+            foreach (var gap in (o.Meta.Gaps ?? []).OrderBy(g => g.StartUtc))
+            {
+                if (gap.StartUtc > cursor) pieces.Add((cursor, gap.StartUtc < o.Meta.EndUtc ? gap.StartUtc : o.Meta.EndUtc));
+                if (gap.EndUtc > cursor) cursor = gap.EndUtc;
+            }
+
+            if (o.Meta.EndUtc > cursor) pieces.Add((cursor, o.Meta.EndUtc));
+        }
+
+        // Clipped to s and merged, so an overlap is counted once.
+        double covered = 0;
+        DateTimeOffset? runFrom = null, runTo = null;
+        foreach (var (pFrom, pTo) in pieces
+                     .Select(p => (From: p.From < from ? from : p.From, To: p.To > to ? to : p.To))
+                     .Where(p => p.To > p.From)
+                     .OrderBy(p => p.From))
+        {
+            if (runTo is null || pFrom > runTo)
+            {
+                if (runTo is not null) covered += (runTo.Value - runFrom!.Value).TotalSeconds;
+                (runFrom, runTo) = (pFrom, pTo);
+            }
+            else if (pTo > runTo)
+            {
+                runTo = pTo;
+            }
+        }
+
+        if (runTo is not null) covered += (runTo.Value - runFrom!.Value).TotalSeconds;
+        return covered / span;
+    }
+
     /// <summary>
     /// UTC hours, oldest first, that are not merged yet, ended at least <see cref="MinAge"/> ago, have every overlapping
     /// source segment closed that long, that no open .part still reaches into, and for which <paramref name="settled"/>,

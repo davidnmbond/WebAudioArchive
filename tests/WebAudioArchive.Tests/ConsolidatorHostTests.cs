@@ -210,6 +210,84 @@ public sealed class ConsolidatorHostTests : IDisposable
         Assert.Equal(6, health.GetProperty("held").GetInt32());
         Assert.Equal(0, health.GetProperty("ready").GetInt32());
         Assert.Equal(0, health.GetProperty("backlogHours").GetInt32());
+        Assert.Equal(0, health.GetProperty("heldWaitingForAnalysis").GetInt32());
+    }
+
+    // Owner decision after the plan 5 review, strict per segment: analysis writes state.json only when a job starts and
+    // reads only master/, so holding waits for each segment's own analysis or for finished analysis of the other recorder
+    // covering at least 98% of it.
+    [Fact]
+    public async Task With_analysis_required_a_segment_is_held_when_its_own_or_its_counterparts_analysis_finished()
+    {
+        RecordFromTen();
+        var analysis = Path.Combine(_root, "analysis");
+        foreach (var start in Starts.Skip(1)) AnalysisState(analysis, $"a/2026/10-15/{start:HHmmss}", JobStatus.Done);
+
+        await using var factory = Host("hold", new ManualClock(Now), analysis);
+        var (client, _) = await StartAsync(factory);
+
+        foreach (var start in Starts.Skip(1))
+        {
+            Assert.True(File.Exists(HeldMp3("a", start)), $"A {start:HHmmss}: its own analysis is done");
+            Assert.True(File.Exists(HeldMp3("b", start)), $"B {start:HHmmss}: no state, and A's finished segment covers it");
+        }
+
+        var health = await Healthz(client);
+        Assert.Equal(4, health.GetProperty("held").GetInt32());
+        Assert.Equal(0, health.GetProperty("heldWaitingForAnalysis").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_segment_analysis_has_not_started_on_stays_in_master_and_healthz_counts_it()
+    {
+        Directory.CreateDirectory(MergedRoot);
+        var half = T0.AddMinutes(30);
+        SegmentFiles.Live(Root("a"), "burst", Epoch, T0, T0 + SegmentLength);
+        SegmentFiles.Live(Root("a"), "burst", Epoch, half, half + SegmentLength);
+        SegmentFiles.Live(Root("b"), "burst", Epoch, T0, T0 + SegmentLength);
+        var analysis = Path.Combine(_root, "analysis");
+        // Analysis has finished A's 10:30 and planned (not started) A's 10:00, so neither 10:00 segment has a state yet.
+        AnalysisState(analysis, $"a/2026/10-15/{half:HHmmss}", JobStatus.Done);
+
+        await using var factory = Host("hold", new ManualClock(Now), analysis);
+        var (client, service) = await StartAsync(factory);
+
+        Assert.True(File.Exists(MergedMp3(T0)));
+        Assert.True(File.Exists(HeldMp3("a", half)));
+        Assert.True(File.Exists(MasterMp3("a", T0)), "A's 10:00 has no state and B's has none either");
+        Assert.True(File.Exists(MasterMp3("b", T0)), "B's 10:00 has no state and A's has none either");
+        var health = await Healthz(client);
+        Assert.Equal(1, health.GetProperty("held").GetInt32());
+        Assert.Equal(2, health.GetProperty("heldWaitingForAnalysis").GetInt32());
+        Assert.Equal(0, health.GetProperty("refused").GetInt32());
+
+        AnalysisState(analysis, $"a/2026/10-15/{T0:HHmmss}", JobStatus.Done);
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(HeldMp3("a", T0)));
+        Assert.True(File.Exists(HeldMp3("b", T0)));
+        Assert.Equal(0, (await Healthz(client)).GetProperty("heldWaitingForAnalysis").GetInt32());
+    }
+
+    [Fact]
+    public async Task A_segment_with_no_state_is_held_against_a_finished_counterpart_already_held()
+    {
+        Directory.CreateDirectory(MergedRoot);
+        Directory.CreateDirectory(Root("b"));
+        SegmentFiles.Live(Root("a"), "burst", Epoch, T0, T0 + SegmentLength);
+        var analysis = Path.Combine(_root, "analysis");
+        AnalysisState(analysis, $"a/2026/10-15/{T0:HHmmss}", JobStatus.Done);
+
+        await using var factory = Host("hold", new ManualClock(Now), analysis);
+        var (client, service) = await StartAsync(factory);
+        Assert.True(File.Exists(HeldMp3("a", T0)));
+
+        // B's copy of the same minute turns up after A's was held: A's finished analysis still covers it.
+        SegmentFiles.Live(Root("b"), "burst", Epoch, T0, T0 + SegmentLength);
+        await service.RunOnceAsync(CancellationToken.None);
+
+        Assert.True(File.Exists(HeldMp3("b", T0)));
+        Assert.Equal(0, (await Healthz(client)).GetProperty("heldWaitingForAnalysis").GetInt32());
     }
 
     [Fact]

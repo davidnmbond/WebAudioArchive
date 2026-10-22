@@ -21,7 +21,10 @@ public sealed record FailureSummary(DateTimeOffset HourUtc, string Reason);
 /// <summary>A closed original whose hours are all merged but that holding refused to move, and why. It stays in master/ for a person to look at.</summary>
 public sealed record RefusedOriginal(string Recorder, string File, string Reason);
 
-/// <summary>What /healthz reports. Failures are reported here, never as an unhealthy status.</summary>
+/// <summary>
+/// What /healthz reports. Failures are reported here, never as an unhealthy status. HeldWaitingForAnalysis counts the
+/// closed originals whose hours are all merged that the last pass left in master/ because analysis may still read them.
+/// </summary>
 public sealed record ConsolidatorHealth(
     string Station,
     string Mode,
@@ -37,7 +40,8 @@ public sealed record ConsolidatorHealth(
     string? LastError,
     DateTimeOffset? OldestWaitingHourUtc,
     int Refused,
-    IReadOnlyList<RefusedOriginal> RefusedOriginals);
+    IReadOnlyList<RefusedOriginal> RefusedOriginals,
+    int HeldWaitingForAnalysis);
 
 public sealed record DeletionItem(string? Recorder, string? File);
 
@@ -85,6 +89,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
     volatile RunSummary? _last;
     volatile string? _lastError;
     volatile IReadOnlyList<RefusedOriginal> _refused = [];
+    volatile int _heldWaitingForAnalysis;
     long _deletedBytes;
 
     sealed record RunSummary(DateTimeOffset Utc, int BacklogHours, int WaitingForAnalysis, DateTimeOffset? OldestWaitingHourUtc);
@@ -252,9 +257,34 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
 
     bool HourSettled(IReadOnlyList<SourceSegment> overlapping) => Eligibility.HourSettled(settings.AnalysisRoot, settings.Station, overlapping);
 
-    /// <summary>True while analysis is waiting for or running on the segment, so it must stay where analysis reads it.</summary>
-    bool AnalysisPending(SourceSegment s) =>
-        settings.AnalysisRoot is not null && Eligibility.AnalysisOf(settings.AnalysisRoot, settings.Station, s) == SegmentAnalysis.Pending;
+    /// <summary>
+    /// A recorder's originals already in held/, as segments named by their master/ place (so analysis's job ids match),
+    /// read from the sidecars that stay there, a deleted tombstone's included. Used only to measure what the other
+    /// recorder's finished analysis covers; nothing is read from or moved in held/ here.
+    /// </summary>
+    IReadOnlyList<SourceSegment> HeldSegments(ConsolidatorSource source)
+    {
+        var held = Path.Combine(source.Root, settings.Station, "held");
+        var master = Path.Combine(source.Root, settings.Station, "master");
+        var list = new List<SourceSegment>();
+        if (!Directory.Exists(held)) return list;
+        foreach (var json in Directory.EnumerateFiles(held, "*.json", SearchOption.AllDirectories))
+        {
+            if (!json.EndsWith(".json", StringComparison.Ordinal) || json.EndsWith(".held.json", StringComparison.Ordinal)) continue;
+            try
+            {
+                if (SegmentMetaStore.Read(json) is not { } meta || meta.EndUtc < meta.StartUtc) continue;
+                var relative = Path.GetRelativePath(held, Path.ChangeExtension(json, ".mp3"));
+                list.Add(new SourceSegment(source.Id, master, Path.Combine(master, relative), meta));
+            }
+            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
+            {
+                logger.LogWarning("Recorder {Recorder}: held sidecar {Sidecar} could not be read: {Reason}", source.Id, json, ex.Message);
+            }
+        }
+
+        return list;
+    }
 
     void WithHeld(CancellationToken ct, Action action)
     {
@@ -272,7 +302,9 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
     /// <summary>
     /// Holds each closed source segment when every hour it overlaps is merged and the hour before and the hour after it
     /// are each merged or resolved empty (<see cref="ResolvedEmpty"/>). Holding.Hold is given the merged hours among
-    /// those, in order, and checks every frame against them.
+    /// those, in order, and checks every frame against them. When analysis is required, a segment is held only once
+    /// <see cref="Eligibility.MayHold"/> allows it (its own analysis finished, or the other recorder's finished analysis,
+    /// in master/ or already held, covers it); until then it is counted as waiting for analysis.
     /// </summary>
     void Hold(DateTimeOffset now, DateTimeOffset? open, IReadOnlySet<DateTimeOffset> failed, Dictionary<DateTimeOffset, EmptyHour> empties, CancellationToken ct)
     {
@@ -282,6 +314,11 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         var segments = a.Concat(b).ToList();
         var resolved = new Dictionary<DateTimeOffset, bool>();
         var refused = new List<RefusedOriginal>();
+        var waiting = 0;
+        IReadOnlyList<SourceSegment>? otherOfA = null, otherOfB = null;
+        IReadOnlyList<SourceSegment> Other(SourceSegment s) => s.Recorder == settings.A.Id
+            ? otherOfA ??= [.. b, .. HeldSegments(settings.B)]
+            : otherOfB ??= [.. a, .. HeldSegments(settings.A)];
         bool Neighbour(DateTimeOffset h)
         {
             if (hours.Contains(h)) return true;
@@ -292,13 +329,20 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         foreach (var s in segments)
         {
             ct.ThrowIfCancellationRequested();
-            if (s.Meta.EndUtc + Eligibility.MinAge > now || AnalysisPending(s)) continue;
+            if (s.Meta.EndUtc + Eligibility.MinAge > now) continue;
 
             var first = FloorHour(s.Meta.StartUtc);
             var last = FloorHour(s.Meta.EndUtc > s.Meta.StartUtc ? s.Meta.EndUtc.AddTicks(-1) : s.Meta.StartUtc);
             var complete = Neighbour(first.AddHours(-1)) && Neighbour(last.AddHours(1));
             for (var h = first; h <= last && complete; h = h.AddHours(1)) complete = hours.Contains(h);
             if (!complete) continue;
+
+            // Not a refusal: analysis may still read it from master/, so it is left for a later pass.
+            if (!Eligibility.MayHold(settings.AnalysisRoot, settings.Station, s, settings.AnalysisRoot is null ? [] : Other(s)))
+            {
+                waiting++;
+                continue;
+            }
 
             var files = new List<string>();
             for (var h = first.AddHours(-1); h <= last.AddHours(1); h = h.AddHours(1))
@@ -322,6 +366,7 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
         }
 
         _refused = refused;
+        _heldWaitingForAnalysis = waiting;
     }
 
     /// <summary>
@@ -537,7 +582,8 @@ public sealed partial class ConsolidatorService(ConsolidatorSettings settings, I
             _lastError,
             last?.OldestWaitingHourUtc,
             refused.Count,
-            [.. refused.Take(MaxRefusedShown)]);
+            [.. refused.Take(MaxRefusedShown)],
+            _heldWaitingForAnalysis);
     }
 
     /// <summary>

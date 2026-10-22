@@ -15,10 +15,10 @@ public sealed class EligibilityTests : IDisposable
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
     }
 
-    static SourceSegment Seg(string recorder, DateTimeOffset start, DateTimeOffset end, string stem = "100000")
+    static SourceSegment Seg(string recorder, DateTimeOffset start, DateTimeOffset end, string stem = "100000", params SegmentGap[] gaps)
     {
         var master = Path.Combine("x", recorder, "burst", "master");
-        var meta = new SegmentMeta(1, recorder, "burst", stem + ".mp3", start, end, 0, 0, 0, null, null, [], [], "hour-boundary");
+        var meta = new SegmentMeta(1, recorder, "burst", stem + ".mp3", start, end, 0, 0, 0, null, null, [], gaps, "hour-boundary");
         return new SourceSegment(recorder, master, Path.Combine(master, "2026", "10-10", stem + ".mp3"), meta);
     }
 
@@ -135,5 +135,72 @@ public sealed class EligibilityTests : IDisposable
         var a = new[] { Seg("a", H10.AddHours(2), H10.AddHours(3), "120000"), Seg("a", H10, H10.AddHours(2), "100000") };
         var merged = new HashSet<DateTimeOffset> { H10.AddHours(1) };
         Assert.Equal([H10, H10.AddHours(2)], Hours(a, H10.AddDays(5), merged));
+    }
+
+    // Owner decision after the plan 5 review, strict per segment: analysis writes state.json only when a job starts and
+    // reads only master/, so a segment is held only when its own analysis finished or the other recorder's finished
+    // segments cover at least 98% of its span (analysis's own fill-in rule, WorkPlanner).
+    [Theory]
+    [InlineData(JobStatus.Done, true)]
+    [InlineData(JobStatus.Failed, true)]
+    [InlineData(JobStatus.Waiting, false)]
+    [InlineData(JobStatus.Running, false)]
+    public void A_segment_with_its_own_state_may_be_held_only_once_its_analysis_finished(string status, bool expected)
+    {
+        State("b/2026/10-10/100000", status);
+        Assert.Equal(expected, Eligibility.MayHold(_root, "burst", Seg("b", H10, H10.AddHours(1)), []));
+    }
+
+    [Fact]
+    public void A_segment_with_no_state_may_be_held_when_the_other_recorders_finished_segment_covers_it()
+    {
+        State("a/2026/10-10/100000", JobStatus.Done);
+        Assert.True(Eligibility.MayHold(_root, "burst", Seg("b", H10, H10.AddHours(1)), [Seg("a", H10, H10.AddHours(1))]));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(JobStatus.Waiting)]
+    [InlineData(JobStatus.Running)]
+    public void A_segment_with_no_state_is_not_held_while_its_counterpart_is_not_finished(string? counterpart)
+    {
+        State("a/2026/10-10/100000", counterpart);
+        Assert.False(Eligibility.MayHold(_root, "burst", Seg("b", H10, H10.AddHours(1)), [Seg("a", H10, H10.AddHours(1))]));
+    }
+
+    [Fact]
+    public void A_segment_with_no_state_is_not_held_when_the_finished_counterpart_covers_under_98_percent()
+    {
+        // A's finished segment has a 73 s gap in the hour: 97.97% covered, so analysis would queue B there.
+        State("a/2026/10-10/100000", JobStatus.Done);
+        var gap = new SegmentGap(H10.AddMinutes(20), H10.AddMinutes(20).AddSeconds(73), 73, "reconnect");
+        Assert.False(Eligibility.MayHold(_root, "burst", Seg("b", H10, H10.AddHours(1)), [Seg("a", H10, H10.AddHours(1), "100000", gap)]));
+    }
+
+    [Fact]
+    public void A_segment_with_no_state_is_held_when_finished_counterparts_together_cover_98_percent()
+    {
+        // Two finished A segments with 60 s between them (98.3%); once one is not finished it no longer counts.
+        State("a/2026/10-10/100000", JobStatus.Done);
+        State("a/2026/10-10/103100", JobStatus.Done);
+        var others = new[] { Seg("a", H10, H10.AddMinutes(30)), Seg("a", H10.AddMinutes(31), H10.AddHours(1), "103100") };
+        Assert.True(Eligibility.MayHold(_root, "burst", Seg("b", H10, H10.AddHours(1)), others));
+
+        State("a/2026/10-10/103100", JobStatus.Running);
+        Assert.False(Eligibility.MayHold(_root, "burst", Seg("b", H10, H10.AddHours(1)), others));
+    }
+
+    [Fact]
+    public void Holding_does_not_wait_for_analysis_when_there_is_no_analysis_root() =>
+        Assert.True(Eligibility.MayHold(null, "burst", Seg("b", H10, H10.AddHours(1)), []));
+
+    [Fact]
+    public void Coverage_counts_spans_less_their_gaps_and_overlaps_once()
+    {
+        var s = Seg("b", H10, H10.AddHours(1));
+        var gap = new SegmentGap(H10.AddMinutes(10), H10.AddMinutes(16), 360, "reconnect");
+        var others = new[] { Seg("a", H10.AddMinutes(-5), H10.AddMinutes(40), "095500", gap), Seg("a", H10.AddMinutes(30), H10.AddMinutes(50), "103000") };
+        // Covered: 10:00 to 10:10 and 10:16 to 10:50, so 44 of the 60 minutes.
+        Assert.Equal(44.0 / 60, Eligibility.CoveredFraction(s, others), 9);
     }
 }
